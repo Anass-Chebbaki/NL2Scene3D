@@ -1,0 +1,36 @@
+You are reviewing a 3D room scene that has been reorganized by an AI system.
+The attached image shows the current state of the room from an isometric view.
+
+Please analyze the room layout and identify any visual imperfections or
+suboptimal placements. Focus on:
+1. Objects that appear misaligned with nearby furniture
+2. Objects that seem to be floating or overlapping
+3. Rotations that look unnatural for the object type
+4. Objects that are too close to walls or other objects
+5. Furniture groups that could be better arranged
+
+Return a JSON object with the following structure:
+{
+  "quality_assessment": "brief overall assessment of the current layout",
+  "score": <integer from 1 to 10, where 10 is perfect>,
+  "corrections": [
+    {
+      "object_name": "<exact object name from the scene>",
+      "action": "<move|rotate|move_and_rotate>",
+      "new_location": [x, y, z],
+      "new_rotation_euler": [rx, ry, rz],
+      "reason": "<brief explanation>"
+    }
+  ]
+}
+
+If the layout looks good and no corrections are needed, return:
+{
+  "quality_assessment": "Layout is well organized",
+  "score": <score>,
+  "corrections": []
+}
+
+Current room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}]
+
+IMPORTANT: Return ONLY valid JSON. Do not include any other text.

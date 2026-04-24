@@ -1,20 +1,66 @@
-# Ambiente virtuale
+# =============================================================================
+# NL2Scene3D - .gitignore
+# =============================================================================
+
+# Ambiente virtuale Python
 .venv/
 venv/
-__pycache__/
-*.pyc
+env/
+ENV/
 
-# Variabili d'ambiente (mai su Git!)
+# Variabili d'ambiente e segreti (NON committare mai la chiave API)
 .env
+.env.local
+.env.*.local
 
-# Output generati
-outputs/
-*.png
-*.jpg
+# File generati dalla pipeline (scene, render, JSON intermedi)
+scenes/outputs/
+scenes/originals/*.blend
 
-# File Blender temporanei
-*.blend1
+# Log dell'applicazione
+logs/
+*.log
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Distribuzione e build
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Cache dei tool
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Blender file temporanei
+*.blend1
+*.blend2
+
+# File di output temporanei del rendering
+/tmp/

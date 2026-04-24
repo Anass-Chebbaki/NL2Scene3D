@@ -1,0 +1,202 @@
+# =============================================================================
+# NL2Scene3D - Configurazione applicativa
+# =============================================================================
+# Questo file contiene i parametri di configurazione strutturati del progetto.
+# Le variabili sensibili (chiavi API) restano nel file .env e NON vanno qui.
+# I valori qui definiti rappresentano i default dell'applicazione;
+# le variabili d'ambiente hanno precedenza su questi valori.
+# =============================================================================
+
+[project]
+name = "NL2Scene3D"
+version = "0.1.0"
+description = "Scene reorganization from random to ordered via Multimodal Language Models"
+
+# =============================================================================
+# Configurazione del modello LLM
+# =============================================================================
+[gemini]
+
+# Modello primario per il riordino testuale (Step 7)
+# Gemini 3 Flash: free tier, 500 req/giorno, ottimo per ragionamento su JSON
+model_primary = "gemini-3-flash-preview"
+
+# Modello fallback per retry su errori transitori (Step 7 e Step 9)
+model_fallback = "gemini-2.5-flash"
+
+# Numero massimo di tentativi per ogni chiamata API prima di arrendersi
+max_retries = 3
+
+# Timeout in secondi per ogni singola chiamata API
+timeout_seconds = 120
+
+# Temperatura del modello: valori bassi producono output piu' deterministici.
+# Per il ragionamento spaziale su JSON, valori bassi (0.1-0.3) sono preferibili.
+temperature = 0.2
+
+# Numero massimo di token nell'output del modello
+max_output_tokens = 4096
+
+# =============================================================================
+# Configurazione della pipeline
+# =============================================================================
+[pipeline]
+
+# Numero massimo di oggetti movibili per scena.
+# Oltre questo limite gli oggetti vengono marcati come non movibili
+# per evitare che il prompt superi il context window del modello.
+max_movable_objects = 20
+
+# Dimensione minima (in metri) affinche' un oggetto sia considerato
+# abbastanza grande da partecipare al layout.
+min_object_dimension_meters = 0.05
+
+# Margine dai muri durante la randomizzazione (in metri)
+wall_margin_meters = 0.10
+
+# Percentuale massima di sovrapposizione AABB consentita tra due oggetti
+# prima di considerare il posizionamento non valido e ritentare.
+# Valore in [0.0, 1.0].
+max_overlap_ratio = 0.50
+
+# Numero massimo di tentativi per posizionare un oggetto senza sovrapposizioni
+max_placement_attempts = 10
+
+# Punteggio minimo (su 10) assegnato dal modello Vision affinche'
+# le correzioni vengano comunque applicate.
+min_quality_score_for_corrections = 7
+
+# Numero massimo di correzioni da applicare in fase di refinement
+max_corrections_to_apply = 5
+
+# =============================================================================
+# Configurazione della randomizzazione
+# =============================================================================
+[randomizer]
+
+# Seed per il generatore di numeri casuali.
+# 0 = seed casuale basato sull'orologio di sistema.
+# Qualsiasi altro intero = seed fisso per riproducibilita'.
+seed = 0
+
+# Ruota solo l'asse Z (yaw) degli oggetti durante la randomizzazione.
+# Impostare a false per rotazioni complete su tutti gli assi (non raccomandato
+# per oggetti di arredamento).
+rotate_z_only = true
+
+# Abilita il controllo delle sovrapposizioni AABB durante la randomizzazione.
+# Disabilitare solo per debug o test rapidi.
+check_overlaps = true
+
+# =============================================================================
+# Configurazione del rendering
+# =============================================================================
+[render]
+
+# --- Render di preview (Step 3, 5, 8) ---
+# Usato per tutti gli step intermedi della pipeline.
+# Qualita' ridotta per velocizzare l'iterazione.
+[render.preview]
+width = 512
+height = 512
+samples = 64
+engine = "CYCLES"
+
+# --- Render finale (Step 10) ---
+# Usato per il render finale di presentazione.
+[render.final]
+width = 1280
+height = 720
+samples = 256
+engine = "CYCLES"
+
+# --- Configurazione delle camere ---
+[render.camera]
+
+# Angolo di elevazione della camera isometrica (gradi rispetto al piano XY)
+isometric_elevation_degrees = 45.0
+
+# Angolo azimutale della camera isometrica (gradi rispetto all'asse X)
+isometric_azimuth_degrees = 45.0
+
+# Lunghezza focale della camera isometrica (mm, equivale a un grandangolo moderato)
+isometric_focal_length_mm = 35.0
+
+# Moltiplicatore dell'altezza della stanza per il posizionamento della camera top-down
+topdown_height_multiplier = 3.0
+
+# Margine di scala ortografica rispetto alle dimensioni della stanza (rapporto)
+topdown_ortho_scale_padding = 1.10
+
+# Prefisso del nome degli oggetti camera creati dalla pipeline
+# (evita conflitti con le camere originali della scena)
+pipeline_camera_prefix = "NL2Scene3D_Camera"
+
+# =============================================================================
+# Percorsi di default
+# =============================================================================
+[paths]
+
+# Directory contenente i file .blend originali
+scenes_dir = "scenes/originals"
+
+# Directory dove vengono salvati JSON e render generati
+outputs_dir = "scenes/outputs"
+
+# Directory dei template dei prompt
+prompts_dir = "config/prompts"
+
+# =============================================================================
+# Classificazione degli oggetti
+# =============================================================================
+[object_classification]
+
+# Tipi Blender di oggetti che vengono sempre esclusi dal layout
+# (non hanno geometria movibile rilevante)
+non_mesh_types = ["CAMERA", "LIGHT", "SPEAKER", "ARMATURE", "EMPTY", "CURVE"]
+
+# Pattern nei nomi degli oggetti che li identificano come elementi strutturali
+# (pareti, pavimento, soffitto, ecc.) - confronto case-insensitive
+structural_name_patterns = [
+    "wall", "floor", "ceiling", "room", "baseboard",
+    "muro", "pavimento", "soffitto", "stanza",
+    "door", "window", "porta", "finestra",
+    "architrave", "column", "colonna",
+]
+
+# Pattern che identificano lampade da soffitto (non movibili)
+ceiling_light_patterns = ["ceiling", "soffitto", "pendant", "chandelier", "lampadario"]
+
+# =============================================================================
+# Logging
+# =============================================================================
+[logging]
+
+# Livello di default del logger root
+# Valori validi: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+level = "INFO"
+
+# Formato delle righe di log
+format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# Formato del timestamp
+datefmt = "%Y-%m-%d %H:%M:%S"
+
+# Se true, scrive i log anche su file oltre che su stdout
+write_to_file = false
+
+# Percorso del file di log (usato solo se write_to_file = true)
+log_file = "logs/nl2scene3d.log"
+
+# =============================================================================
+# Metriche e confronto qualitativo
+# =============================================================================
+[metrics]
+
+# Se true, calcola e salva le metriche di confronto tra lo stato originale
+# e quello finale (distanza media degli oggetti, variazione angolare media)
+enabled = true
+
+# Soglia di miglioramento minimo (distanza media in metri) affinche'
+# il riordino venga considerato un successo rispetto al disordine
+min_improvement_distance_meters = 0.3
