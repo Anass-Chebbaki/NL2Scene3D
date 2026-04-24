@@ -1,0 +1,20 @@
+# Ambiente virtuale
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Variabili d'ambiente (mai su Git!)
+.env
+
+# Output generati
+outputs/
+*.png
+*.jpg
+
+# File Blender temporanei
+*.blend1
+
+# IDE
+.idea/
+.vscode/
