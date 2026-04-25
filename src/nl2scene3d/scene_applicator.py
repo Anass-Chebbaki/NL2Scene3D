@@ -1,7 +1,7 @@
 """
 Applicazione delle trasformazioni suggerite dall'LLM alla scena Blender.
 
-Questo modulo implementa gli Step 8 e 10 della pipeline:
+Questo modulo:
 - Legge il JSON dello stato riordinato/raffinato
 - Aggiorna le proprieta' location e rotation_euler degli oggetti in Blender
 - Garantisce che le modifiche vengano applicate correttamente prima del rendering
@@ -70,8 +70,7 @@ class SceneApplicator:
         blender_scene = bpy.context.scene
 
         logger.info(
-            "Applicazione stato '%s' (step: %s) alla scena Blender. "
-            "Oggetti nello stato: %d",
+            "Applicazione stato '%s' alla scena Blender. ",
             state.scene_name,
             state.pipeline_step,
             len(state.objects),

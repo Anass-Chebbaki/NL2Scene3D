@@ -2,7 +2,7 @@
 Calcolo delle metriche di valutazione qualitativa della pipeline.
 
 Questo modulo calcola indicatori numerici per misurare quanto
-la pipeline abbia migliorato il layout della scena rispetto
+il layout della scena sia migliorato rispetto
 allo stato disordinato e confrontandolo con l'originale.
 
 Le metriche calcolate sono:
@@ -29,7 +29,7 @@ class SceneMetrics:
 
     Attributes:
         scene_name: Nome della scena di riferimento.
-        pipeline_step: Step della pipeline a cui si riferiscono le metriche.
+        pipeline_step: Identificativo dello stato a cui si riferiscono le metriche.
         mean_position_delta_meters: Distanza media (in metri) tra le posizioni
             degli oggetti in questo stato e quelle dello stato originale.
             Calcolata solo per gli oggetti movibili.
@@ -242,7 +242,7 @@ def compute_pipeline_metrics(
     refined_state: SceneState,
 ) -> dict[str, SceneMetrics]:
     """
-    Calcola le metriche per tutti gli step della pipeline in una sola chiamata.
+    Calcola le metriche per tutti gli stati della scena in una sola chiamata.
 
     Args:
         original_state: Stato originale (ground truth).

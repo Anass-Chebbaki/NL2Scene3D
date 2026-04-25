@@ -1,8 +1,8 @@
 """
 Sistema di rendering automatico per la pipeline NL2Scene3D.
 
-Gestisce il rendering delle viste top-down e isometrica per ogni step
-della pipeline, con configurazione separata per i render di preview
+Gestisce il rendering delle viste top-down e isometrica per ogni configurazione
+della scena, con impostazioni separate per i render di preview
 (bassa qualita') e il render finale (alta qualita').
 
 Deve essere eseguito all'interno dell'ambiente Python di Blender.
@@ -58,7 +58,7 @@ class BlenderRenderer:
     Esegue il rendering della scena corrente in Blender.
 
     Gestisce la configurazione del motore di rendering, il posizionamento
-    delle camere e il salvataggio delle immagini per ogni step della pipeline.
+    delle camere e il salvataggio delle immagini per ogni stato della scena.
 
     Attributes:
         output_dir: Directory di base per i file renderizzati.
@@ -187,10 +187,10 @@ class BlenderRenderer:
         quality: RenderQuality = "preview",
     ) -> dict[str, Path]:
         """
-        Esegue entrambe le viste (top-down e isometrica) per uno step della pipeline.
+        Esegue entrambe le viste (top-down e isometrica) per una configurazione della scena.
 
         Args:
-            step_name: Identificatore dello step (es. 'original', 'randomized',
+            step_name: Identificativo della configurazione (es. 'original', 'randomized',
                        'reordered', 'refined').
             state: Stato corrente della scena (usato per configurare le camere).
             quality: Qualita' del render ('preview' o 'final').
@@ -235,7 +235,7 @@ class BlenderRenderer:
         render_paths["iso"] = self._do_render(iso_path)
 
         logger.info(
-            "Render step '%s' completato: top=%s, iso=%s",
+            "Render per '%s' completato: top=%s, iso=%s",
             step_name,
             render_paths["top"],
             render_paths["iso"],

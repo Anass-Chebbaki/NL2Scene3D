@@ -2,8 +2,8 @@
 Client per l'interazione con le API Google Gemini.
 
 Gestisce:
-- Chiamate testuali per il riordino della scena (Step 7)
-- Chiamate vision per il feedback visivo (Step 9)
+- Chiamate testuali per il riordino della scena
+- Chiamate vision per il feedback visivo
 - Retry automatico con backoff esponenziale
 - Fallback al modello alternativo in caso di errori
 - Parsing robusto dell'output JSON dell'LLM
@@ -196,11 +196,10 @@ class GeminiClient:
         """
         Esegue una chiamata testuale al modello e restituisce il JSON parsato.
 
-        Corrisponde allo Step 7 della pipeline: riordino della scena
-        tramite ragionamento testuale.
+        riordino della scena tramite ragionamento testuale.
 
         Args:
-            system_prompt: Prompt di sistema che contestualizza il task.
+            system_prompt: Prompt di sistema che contestualizza l'azione.
             user_prompt: Prompt utente con i dati della scena disordinata.
             use_fallback: Se True, usa il modello fallback invece del primario.
 
@@ -253,12 +252,11 @@ class GeminiClient:
         """
         Esegue una chiamata vision al modello con un'immagine allegata.
 
-        Corrisponde allo Step 9 della pipeline: critica visiva del render
-        per identificare imperfezioni nel layout riordinato.
+        critica visiva del render per identificare imperfezioni nel layout riordinato.
 
         Args:
             image_path: Percorso all'immagine del render da analizzare.
-            user_prompt: Prompt utente che descrive il task di critica.
+            user_prompt: Prompt utente che descrive l'azione di critica.
             use_fallback: Se True, usa il modello fallback invece del primario.
 
         Returns:

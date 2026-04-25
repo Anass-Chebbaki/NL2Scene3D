@@ -1,8 +1,7 @@
 """
 Randomizzazione controllata degli oggetti di una scena 3D.
 
-Implementa lo Step 4 della pipeline: disorganizzazione artificiale
-del layout di una scena pre-esistente per creare uno stato caotico
+Disorganizza artificialmente il layout di una scena pre-esistente per creare uno stato caotico
 su cui l'LLM possa intervenire.
 
 La randomizzazione e' volutamente "plausibile": gli oggetti rimangono

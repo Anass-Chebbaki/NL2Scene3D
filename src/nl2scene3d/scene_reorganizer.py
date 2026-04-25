@@ -1,5 +1,5 @@
 """
-Riordino della scena tramite chiamata testuale a Gemini (Step 7).
+Riordino della scena tramite chiamata testuale a Gemini.
 
 Questo modulo costruisce il prompt per l'LLM, invia lo stato disordinato
 della scena e riceve il JSON con le nuove coordinate degli oggetti.
@@ -201,8 +201,6 @@ class SceneReorganizer:
     """
     Coordina la prima chiamata LLM per il riordino testuale della scena.
 
-    Corrisponde allo Step 7 della pipeline.
-
     Attributes:
         client: Client Gemini per le chiamate API.
         prompts_dir: Directory contenente i template dei prompt.
@@ -260,7 +258,7 @@ class SceneReorganizer:
         Esegue il riordino della scena tramite chiamata LLM.
 
         Args:
-            disordered_state: Stato disordinato della scena (output Step 4-6).
+            disordered_state: Stato disordinato della scena.
 
         Returns:
             Nuovo SceneState con le posizioni suggerite dall'LLM, validate

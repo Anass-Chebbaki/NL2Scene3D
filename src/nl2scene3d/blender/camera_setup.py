@@ -1,7 +1,7 @@
 """
 Configurazione e posizionamento delle camere di rendering in Blender.
 
-Gestisce la creazione di due viste standard per ogni step della pipeline:
+Gestisce la creazione di due viste standard per le diverse configurazioni della scena:
 - Vista top-down: orthografica dall'alto per la verifica del layout 2D
 - Vista isometrica: prospettica a 45 gradi per l'anteprima fotorealistica
 

@@ -1,15 +1,15 @@
 """
 Orchestratore end-to-end della pipeline NL2Scene3D.
 
-Questo script coordina l'esecuzione di tutti gli step della pipeline:
-1-2. Caricamento e introspezione della scena .blend
-3.   Render originale (top-down + isometrico)
-4.   Randomizzazione degli oggetti
-5-6. Render + estrazione stato disordinato
-7.   Prima chiamata LLM: riordino testuale
-8.   Applica le coordinate e render
-9.   Seconda chiamata LLM Vision: critica visiva
-10.  Applica le rifiniture e render finale
+Questo script coordina l'esecuzione del flusso di lavoro:
+- Caricamento e introspezione della scena .blend
+- Render originale (top-down + isometrico)
+- Randomizzazione degli oggetti
+- Render + estrazione stato disordinato
+- Chiamata LLM: riordino testuale
+- Applica le coordinate e render
+- Chiamata LLM Vision: critica visiva
+- Applica le rifiniture e render finale
 
 UTILIZZO:
     blender --background scene.blend --python scripts/run_pipeline.py -- \
@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-vision",
         action="store_true",
-        help="Salta la seconda chiamata LLM Vision (Step 9). "
+        help="Salta la seconda chiamata LLM Vision. "
              "Utile per test rapidi o per risparmiare quota API.",
     )
     parser.add_argument(
@@ -187,9 +187,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
         )
 
     # =========================================================================
-    # STEP 1-2: Caricamento e introspezione della scena
+    # Caricamento e introspezione della scena
     # =========================================================================
-    logger.info("--- Step 1-2: Estrazione stato originale ---")
+    logger.info("--- Estrazione stato originale ---")
     original_state = loader.extract_scene_state(scene_name=args.scene_name)
 
     original_json_path = output_dir / "scene_original.json"
@@ -201,9 +201,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
 
     # =========================================================================
-    # STEP 3: Render originale
+    # Render originale
     # =========================================================================
-    logger.info("--- Step 3: Render originale ---")
+    logger.info("--- Render originale ---")
     original_renders = renderer.render_step(
         step_name="original",
         state=original_state,
@@ -212,9 +212,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Render originali: %s", original_renders)
 
     # =========================================================================
-    # STEP 4: Randomizzazione
+    # Randomizzazione
     # =========================================================================
-    logger.info("--- Step 4: Randomizzazione ---")
+    logger.info("--- Randomizzazione ---")
     randomized_state = randomizer.randomize(original_state)
 
     # Applica la randomizzazione alla scena Blender
@@ -224,9 +224,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     loader.save_state_to_json(randomized_state, randomized_json_path)
 
     # =========================================================================
-    # STEP 5-6: Render + estrazione stato disordinato
+    # Render + estrazione stato disordinato
     # =========================================================================
-    logger.info("--- Step 5-6: Render scena disordinata ---")
+    logger.info("--- Render scena disordinata ---")
     randomized_renders = renderer.render_step(
         step_name="randomized",
         state=randomized_state,
@@ -235,18 +235,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Render disordinati: %s", randomized_renders)
 
     # =========================================================================
-    # STEP 7: Prima chiamata LLM - Riordino testuale
+    # Chiamata LLM - Riordino testuale
     # =========================================================================
-    logger.info("--- Step 7: Chiamata LLM per riordino testuale ---")
+    logger.info("--- Chiamata LLM per riordino testuale ---")
     reordered_state = reorganizer.reorganize(randomized_state)
 
     reordered_json_path = output_dir / "scene_reordered.json"
     loader.save_state_to_json(reordered_state, reordered_json_path)
 
     # =========================================================================
-    # STEP 8: Applica le coordinate riordinate e renderizza
+    # Applica le coordinate riordinate e renderizza
     # =========================================================================
-    logger.info("--- Step 8: Applicazione coordinate riordinate ---")
+    logger.info("--- Applicazione coordinate riordinate ---")
     applicator.apply_state(reordered_state)
 
     reordered_renders = renderer.render_step(
@@ -257,14 +257,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Render riordinati: %s", reordered_renders)
 
     # =========================================================================
-    # STEP 9: Seconda chiamata LLM Vision - Critica visiva
+    # Chiamata LLM Vision - Critica visiva
     # =========================================================================
     if args.skip_vision:
-        logger.info("--- Step 9: Critica visiva SALTATA (--skip-vision) ---")
+        logger.info("--- Critica visiva SALTATA (--skip-vision) ---")
         refined_state = reordered_state
         refined_state.pipeline_step = "refined"
     else:
-        logger.info("--- Step 9: Chiamata LLM Vision per critica visiva ---")
+        logger.info("--- Chiamata LLM Vision per critica visiva ---")
         iso_render_path = reordered_renders["iso"]
         refined_state = visual_critic.critique_and_refine(
             reordered_state=reordered_state,
@@ -283,9 +283,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
         applicator.apply_state(refined_state)
 
     # =========================================================================
-    # STEP 10: Render finale ad alta qualita'
+    # Render finale ad alta qualita'
     # =========================================================================
-    logger.info("--- Step 10: Render finale ad alta qualita' ---")
+    logger.info("--- Render finale ad alta qualita' ---")
     final_renders = renderer.render_step(
         step_name="final",
         state=refined_state,

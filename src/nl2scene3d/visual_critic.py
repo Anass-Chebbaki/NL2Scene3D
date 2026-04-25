@@ -1,5 +1,5 @@
 """
-Critica visiva del layout riordinato tramite chiamata LLM Vision (Step 9).
+Critica visiva del layout riordinato tramite chiamata LLM Vision.
 
 Questo modulo analizza il render isometrico della scena riordinata
 e produce una lista di correzioni suggerite per migliorare il layout.
@@ -195,8 +195,6 @@ class VisualCritic:
     """
     Esegue la critica visiva del layout riordinato tramite LLM Vision.
 
-    Corrisponde allo Step 9 della pipeline.
-
     Attributes:
         client: Client Gemini per le chiamate API.
         prompts_dir: Directory contenente i template dei prompt.
@@ -258,7 +256,7 @@ class VisualCritic:
         (score post-critica inferiore), viene restituita la versione precedente.
 
         Args:
-            reordered_state: Stato della scena dopo il riordino LLM (Step 7-8).
+            reordered_state: Stato della scena dopo il riordino LLM.
             render_iso_path: Percorso al render isometrico da analizzare.
 
         Returns:

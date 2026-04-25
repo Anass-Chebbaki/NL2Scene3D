@@ -2,7 +2,7 @@
 Definizione dei modelli dati condivisi in tutta la pipeline.
 
 Vengono usati dataclass tipizzate per garantire coerenza strutturale
-tra i vari step della pipeline e la serializzazione JSON.
+e la serializzazione JSON.
 """
 
 from __future__ import annotations
@@ -182,14 +182,13 @@ class RoomBounds:
 @dataclass
 class SceneState:
     """
-    Rappresenta lo stato completo di una scena in un determinato momento
-    della pipeline.
+    Rappresenta lo stato completo di una scena in un determinato momento.
 
     Attributes:
         scene_name: Nome identificativo della scena.
         objects: Lista degli oggetti presenti nella scena.
         room_bounds: Limiti spaziali della stanza.
-        pipeline_step: Step della pipeline che ha generato questo stato.
+        pipeline_step: Etichetta dello stato (es. 'original', 'randomized', 'reordered').
         metadata: Dizionario opzionale per dati aggiuntivi.
     """
 
@@ -254,7 +253,7 @@ class SceneState:
 @dataclass
 class LLMCorrection:
     """
-    Rappresenta una correzione suggerita dall'LLM Vision nella fase di refinement.
+    Rappresenta una correzione suggerita dall'LLM Vision.
 
     Attributes:
         object_name: Nome dell'oggetto da correggere.

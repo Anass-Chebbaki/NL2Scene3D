@@ -1,7 +1,7 @@
 """
 Caricamento e introspezione di scene Blender.
 
-Questo modulo implementa gli Step 1 e 2 della pipeline:
+Questo modulo implementa:
 1. Apertura della scena .blend tramite bpy
 2. Estrazione dello stato degli oggetti in formato SceneState
 
@@ -80,15 +80,23 @@ def _classify_object(
     if object_type in NON_MESH_TYPES:
         return "technical", False
 
-    # Elementi strutturali identificati per nome
-    for pattern in STRUCTURAL_NAME_PATTERNS:
-        if pattern in name_lower:
-            return STRUCTURAL_CATEGORY, False
-
     # Oggetti troppo piccoli vengono ignorati (es. viti, chiodi)
     max_dim = max(dimensions) if dimensions else 0.0
     if max_dim < MIN_OBJECT_DIMENSION:
         return "decoration_small", False
+
+    # Le lampade hanno la precedenza sui pattern strutturali perche' 
+    # spesso contengono la parola "floor" o "wall" nel nome.
+    if any(kw in name_lower for kw in ("lamp", "lampada", "light")):
+        # Le lampade da terra sono movibili, quelle a soffitto o muro no
+        if any(kw in name_lower for kw in ("ceiling", "soffitto", "pendant", "wall", "muro")):
+            return "light_ceiling", False
+        return "light_floor", True
+
+    # Elementi strutturali identificati per nome
+    for pattern in STRUCTURAL_NAME_PATTERNS:
+        if pattern in name_lower:
+            return STRUCTURAL_CATEGORY, False
 
     # Classificazione euristica per categoria di arredo
     if any(kw in name_lower for kw in ("sofa", "couch", "divano")):
@@ -101,11 +109,6 @@ def _classify_object(
         return "storage", True
     if any(kw in name_lower for kw in ("bed", "letto", "mattress", "materasso")):
         return "bed", True
-    if any(kw in name_lower for kw in ("lamp", "lampada", "light")):
-        # Le lampade da terra sono movibili, quelle a soffitto no
-        if any(kw in name_lower for kw in ("ceiling", "soffitto", "pendant")):
-            return "light_ceiling", False
-        return "light_floor", True
     if any(kw in name_lower for kw in ("rug", "tappeto", "carpet")):
         return "rug", True
     if any(kw in name_lower for kw in ("plant", "pianta", "vase", "vaso")):
@@ -336,7 +339,7 @@ class SceneLoader:
             json.dump(state.to_dict(), fh, indent=2, ensure_ascii=False)
 
         logger.info(
-            "Stato scena '%s' (step: %s) salvato in: %s",
+            "Stato scena '%s' (tag: %s) salvato in: %s",
             state.scene_name,
             state.pipeline_step,
             output_path,
@@ -367,7 +370,7 @@ class SceneLoader:
 
         state = SceneState.from_dict(data)
         logger.info(
-            "Stato scena '%s' (step: %s) caricato da: %s",
+            "Stato scena '%s' (tag: %s) caricato da: %s",
             state.scene_name,
             state.pipeline_step,
             json_path,

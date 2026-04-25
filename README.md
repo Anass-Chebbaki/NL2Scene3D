@@ -68,20 +68,20 @@ Per ogni scena processata vengono prodotti:
 - `render_reordered_top.png`, `render_reordered_iso.png`
 - `render_final_top.png`, `render_final_iso.png`
 
-## Architettura
+## Flusso di lavoro
 
-La pipeline segue 10 step definiti nel documento di design:
+Il sistema esegue le seguenti operazioni:
 
-1. Caricamento del file .blend
-2. Estrazione JSON degli oggetti e delle loro trasformazioni
-3. Render di riferimento (top-down + isometrico)
-4. Randomizzazione controllata di posizioni e rotazioni
-5. Render della scena disorganizzata
-6. Estrazione JSON dello stato disorganizzato
-7. Prima chiamata LLM: riordino testuale basato su JSON
-8. Applicazione delle coordinate suggerite e rendering
-9. Seconda chiamata LLM Vision: critica del render isometrico
-10. Applicazione delle rifiniture e render finale ad alta qualita'
+- Caricamento del file .blend
+- Estrazione JSON degli oggetti e delle loro trasformazioni
+- Render di riferimento (top-down + isometrico)
+- Randomizzazione controllata di posizioni e rotazioni
+- Render della scena disorganizzata
+- Estrazione JSON dello stato disorganizzato
+- Chiamata LLM: riordino testuale basato su JSON
+- Applicazione delle coordinate suggerite e rendering
+- Chiamata LLM Vision: critica del render isometrico
+- Applicazione delle rifiniture e render finale ad alta qualita'
 ```
 
 ---

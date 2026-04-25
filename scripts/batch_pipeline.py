@@ -2,7 +2,7 @@
 Esecuzione batch della pipeline NL2Scene3D su piu' scene.
 
 Questo script itera su tutti i file .blend presenti nella directory
-delle scene originali e lancia la pipeline per ciascuno di essi,
+delle scene originali e lancia l'elaborazione per ciascuno di essi,
 raccogliendo le metriche aggregate al termine.
 
 UTILIZZO:
@@ -134,7 +134,7 @@ def run_single_scene(
     start_time = time.monotonic()
 
     logger.info(
-        "Avvio pipeline per scena: %s (%s)",
+        "Avvio elaborazione per scena: %s (%s)",
         scene_name,
         blend_path,
     )
