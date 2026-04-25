@@ -53,7 +53,6 @@ class ObjectTransform:
             dimensions=list(data["dimensions"]),
         )
 
-
 @dataclass
 class SceneObject:
     """
@@ -100,7 +99,6 @@ class SceneObject:
             category=data.get("category", "unknown"),
             is_movable=data.get("is_movable", True),
         )
-
 
 @dataclass
 class RoomBounds:
@@ -181,7 +179,6 @@ class RoomBounds:
             z_ceiling=data.get("z_ceiling", 3.0),
         )
 
-
 @dataclass
 class SceneState:
     """
@@ -254,7 +251,6 @@ class SceneState:
             metadata=data.get("metadata", {}),
         )
 
-
 @dataclass
 class LLMCorrection:
     """
@@ -295,15 +291,12 @@ class LLMCorrection:
             reason=data.get("reason", ""),
         )
 
-
 # Radianti per PI greco, usato nelle conversioni angolari
 PI = math.pi
-
 
 def degrees_to_radians(degrees: float) -> float:
     """Converte gradi in radianti."""
     return degrees * PI / 180.0
-
 
 def radians_to_degrees(radians: float) -> float:
     """Converte radianti in gradi."""

@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 # Carica .env dalla root del progetto se presente
 load_dotenv()
 
-
 @dataclass
 class GeminiConfig:
     """Parametri di configurazione per il client Gemini."""
@@ -48,7 +47,6 @@ class GeminiConfig:
             timeout_seconds=int(os.environ.get("GEMINI_TIMEOUT_SECONDS", "120")),
         )
 
-
 @dataclass
 class RenderConfig:
     """Parametri di configurazione per il sistema di rendering."""
@@ -72,7 +70,6 @@ class RenderConfig:
             final_samples=int(os.environ.get("RENDER_FINAL_SAMPLES", "256")),
         )
 
-
 @dataclass
 class PipelineConfig:
     """Parametri generali della pipeline."""
@@ -93,7 +90,6 @@ class PipelineConfig:
             ),
             randomizer_seed=int(os.environ.get("RANDOMIZER_SEED", "0")),
         )
-
 
 @dataclass
 class AppConfig:
@@ -123,7 +119,6 @@ class AppConfig:
             render=RenderConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
-
 
 def get_config() -> AppConfig:
     """

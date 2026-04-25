@@ -1,1 +1,1 @@
-# tests/__init__.py
+"""Suite di test per il pacchetto NL2Scene3D."""
