@@ -1,17 +1,17 @@
+# src/nl2scene3d/metrics.py
 """
 Calcolo delle metriche di valutazione qualitativa della pipeline.
 
-Questo modulo calcola indicatori numerici per misurare quanto
-il layout della scena sia migliorato rispetto
-allo stato disordinato e confrontandolo con l'originale.
+Calcola indicatori numerici per misurare il miglioramento del layout
+della scena rispetto allo stato disordinato, confrontandolo con l'originale.
 
-Le metriche calcolate sono:
+Metriche calcolate:
 - Distanza media dalla posizione originale (per stato disordinato e riordinato)
 - Variazione angolare media sull'asse Z
-- Score di miglioramento: quanto il riordinato si avvicina all'originale
-  rispetto al disordinato (0.0 = nessun miglioramento, 1.0 = originale esatto)
+- Score di miglioramento in [0.0, 1.0]:
+    0.0 = nessun miglioramento rispetto al disordinato
+    1.0 = identico all'originale
 """
-
 from __future__ import annotations
 
 import logging
@@ -22,6 +22,7 @@ from nl2scene3d.models import SceneState
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class SceneMetrics:
     """
@@ -31,15 +32,14 @@ class SceneMetrics:
         scene_name: Nome della scena di riferimento.
         pipeline_step: Identificativo dello stato a cui si riferiscono le metriche.
         mean_position_delta_meters: Distanza media (in metri) tra le posizioni
-            degli oggetti in questo stato e quelle dello stato originale.
-            Calcolata solo per gli oggetti movibili.
+            degli oggetti movibili in questo stato e quelle dello stato originale.
         mean_rotation_delta_radians: Differenza angolare media (in radianti)
             sull'asse Z tra questo stato e lo stato originale.
-        object_count_movable: Numero di oggetti movibili considerati.
-        improvement_score: Score in [0.0, 1.0] che indica quanto il layout
+        object_count_movable: Numero di oggetti movibili considerati nel calcolo.
+        improvement_score: Valore in [0.0, 1.0] che indica quanto il layout
             si avvicina all'originale rispetto al disordinato.
-            0.0 = uguale al disordinato, 1.0 = identico all'originale.
-            None se non calcolabile (manca il riferimento disordinato).
+            None se non calcolabile (stato disordinato non fornito).
+        per_object_details: Dettaglio delle metriche per singolo oggetto.
     """
 
     scene_name: str
@@ -85,12 +85,13 @@ class SceneMetrics:
             f"improvement={improvement_str}"
         )
 
+
 def _euclidean_distance_2d(
     loc_a: list[float],
     loc_b: list[float],
 ) -> float:
     """
-    Calcola la distanza euclidea 2D tra due posizioni (piano XY).
+    Calcola la distanza euclidea 2D tra due posizioni nel piano XY.
 
     La coordinata Z viene ignorata per confrontare solo lo spostamento
     planimetrico degli oggetti.
@@ -106,6 +107,7 @@ def _euclidean_distance_2d(
     dy = loc_a[1] - loc_b[1]
     return math.sqrt(dx * dx + dy * dy)
 
+
 def _angular_difference_z(
     rot_a: list[float],
     rot_b: list[float],
@@ -113,8 +115,8 @@ def _angular_difference_z(
     """
     Calcola la differenza angolare minima sull'asse Z tra due rotazioni.
 
-    Usa la differenza angolare normalizzata in [0, pi] per evitare
-    ambiguita' con angoli equivalenti (es. 0 e 2*pi sono identici).
+    La differenza viene normalizzata in [0, pi] per gestire correttamente
+    angoli equivalenti (es. 0 e 2*pi, oppure pi e -pi).
 
     Args:
         rot_a: Prima rotazione [rx, ry, rz] in radianti.
@@ -123,13 +125,11 @@ def _angular_difference_z(
     Returns:
         Differenza angolare sull'asse Z in [0, pi] radianti.
     """
-    diff = abs(rot_a[2] - rot_b[2])
-    # Normalizza in [0, pi]: angoli supplementari sono equivalenti
-    # per oggetti simmetrici, ma usiamo la differenza assoluta minima
-    diff = diff % (2.0 * math.pi)
+    diff = abs(rot_a[2] - rot_b[2]) % (2.0 * math.pi)
     if diff > math.pi:
         diff = 2.0 * math.pi - diff
     return diff
+
 
 def compute_metrics(
     reference_state: SceneState,
@@ -141,13 +141,13 @@ def compute_metrics(
 
     Confronta lo stato valutato con lo stato di riferimento (originale)
     per determinare quanto il riordino si avvicini alla configurazione
-    professionale originale.
+    originale.
 
     Args:
         reference_state: Stato originale della scena (ground truth).
         evaluated_state: Stato da valutare (riordinato o raffinato).
-        disordered_state: Stato disordinato (opzionale, usato per calcolare
-                          l'improvement_score).
+        disordered_state: Stato disordinato opzionale, usato per calcolare
+            l'improvement_score.
 
     Returns:
         SceneMetrics con le metriche calcolate.
@@ -179,7 +179,6 @@ def compute_metrics(
             "rotation_delta_degrees": round(math.degrees(rot_delta), 2),
         }
 
-        # Calcola il delta dal disordinato se disponibile
         if disordered_state is not None:
             dis_obj = disordered_state.get_object_by_name(ref_obj.name)
             if dis_obj is not None:
@@ -208,15 +207,12 @@ def compute_metrics(
     mean_pos_delta = sum(position_deltas) / len(position_deltas)
     mean_rot_delta = sum(rotation_deltas) / len(rotation_deltas)
 
-    # Calcolo improvement_score: quanto il riordinato si avvicina all'originale
     improvement_score: float | None = None
     if disordered_deltas and len(disordered_deltas) == len(position_deltas):
         mean_dis_delta = sum(disordered_deltas) / len(disordered_deltas)
         if mean_dis_delta > 0.0:
-            # Score: 1.0 se uguale all'originale, 0.0 se uguale al disordinato
-            improvement_score = 1.0 - (mean_pos_delta / mean_dis_delta)
-            # Clamp in [0.0, 1.0] (puo' essere negativo se peggioriamo)
-            improvement_score = max(0.0, min(1.0, improvement_score))
+            raw_score = 1.0 - (mean_pos_delta / mean_dis_delta)
+            improvement_score = max(0.0, min(1.0, raw_score))
 
     metrics = SceneMetrics(
         scene_name=evaluated_state.scene_name,
@@ -233,7 +229,9 @@ def compute_metrics(
         evaluated_state.scene_name,
         metrics.summary_line(),
     )
+
     return metrics
+
 
 def compute_pipeline_metrics(
     original_state: SceneState,
@@ -242,13 +240,13 @@ def compute_pipeline_metrics(
     refined_state: SceneState,
 ) -> dict[str, SceneMetrics]:
     """
-    Calcola le metriche per tutti gli stati della scena in una sola chiamata.
+    Calcola le metriche per tutti gli stati della pipeline in una sola chiamata.
 
     Args:
         original_state: Stato originale (ground truth).
         randomized_state: Stato dopo la randomizzazione.
         reordered_state: Stato dopo il riordino LLM.
-        refined_state: Stato dopo il refinement visivo.
+        refined_state: Stato dopo il raffinamento visivo.
 
     Returns:
         Dizionario step_name -> SceneMetrics.
@@ -259,13 +257,11 @@ def compute_pipeline_metrics(
         reference_state=original_state,
         evaluated_state=randomized_state,
     )
-
     results["reordered"] = compute_metrics(
         reference_state=original_state,
         evaluated_state=reordered_state,
         disordered_state=randomized_state,
     )
-
     results["refined"] = compute_metrics(
         reference_state=original_state,
         evaluated_state=refined_state,
@@ -276,7 +272,7 @@ def compute_pipeline_metrics(
         "Metriche pipeline complete per scena '%s':",
         original_state.scene_name,
     )
-    for step, m in results.items():
+    for _step, m in results.items():
         logger.info("  %s", m.summary_line())
 
     return results

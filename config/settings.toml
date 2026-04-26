@@ -21,7 +21,7 @@ description = "Scene reorganization from random to ordered via Multimodal Langua
 # Gemini 3 Flash: free tier, 500 req/giorno, ottimo per ragionamento su JSON
 model_primary = "gemini-3-flash-preview"
 
-# Modello fallback per retry su errori transitori (Step 7 e Step 9)
+# Modello di fallback se il primario fallisce o va in rate limit
 model_fallback = "gemini-2.5-flash"
 
 # Numero massimo di tentativi per ogni chiamata API prima di arrendersi

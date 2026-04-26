@@ -1,3 +1,4 @@
+# src/nl2scene3d/gemini_client.py
 """
 Client per l'interazione con le API Google Gemini.
 
@@ -5,10 +6,9 @@ Gestisce:
 - Chiamate testuali per il riordino della scena
 - Chiamate vision per il feedback visivo
 - Retry automatico con backoff esponenziale
-- Fallback al modello alternativo in caso di errori
-- Parsing robusto dell'output JSON dell'LLM
+- Fallback al modello alternativo in caso di errori persistenti
+- Parsing robusto dell'output JSON del modello
 """
-
 from __future__ import annotations
 
 import json
@@ -31,19 +31,19 @@ class GeminiClientError(Exception):
 
 
 class GeminiParsingError(GeminiClientError):
-    """Eccezione sollevata quando il parsing della risposta JSON fallisce."""
+    """Sollevata quando il parsing della risposta JSON fallisce."""
 
 
 class GeminiRateLimitError(GeminiClientError):
-    """Eccezione sollevata quando il rate limit viene raggiunto."""
+    """Sollevata quando il rate limit viene raggiunto in modo persistente."""
 
 
 class GeminiClient:
     """
-    Client astratto per le chiamate alle API Google Gemini.
+    Client per le chiamate alle API Google Gemini.
 
     Implementa retry con backoff esponenziale e fallback automatico
-    al modello secondario in caso di errori persistenti.
+    al modello secondario in caso di errori persistenti sul modello primario.
 
     Attributes:
         config: Configurazione Gemini (API key, modelli, limiti).
@@ -60,10 +60,12 @@ class GeminiClient:
         """
         self.config = config
         genai.configure(api_key=config.api_key)
-
-        self._primary_model = genai.GenerativeModel(config.model_primary)
-        self._fallback_model = genai.GenerativeModel(config.model_fallback)
-
+        self._primary_model: genai.GenerativeModel = genai.GenerativeModel(
+            config.model_primary
+        )
+        self._fallback_model: genai.GenerativeModel = genai.GenerativeModel(
+            config.model_fallback
+        )
         logger.info(
             "GeminiClient inizializzato. Modello primario: %s, fallback: %s",
             config.model_primary,
@@ -72,13 +74,13 @@ class GeminiClient:
 
     def _extract_json_from_response(self, text: str) -> dict | list:
         """
-        Estrae e parsa il JSON dalla risposta testuale dell'LLM.
+        Estrae e parsa il JSON dalla risposta testuale del modello.
 
-        L'LLM spesso include testo aggiuntivo prima e dopo il JSON.
-        Questo metodo prova diverse strategie di estrazione.
+        Il modello include spesso testo aggiuntivo prima e dopo il JSON.
+        Vengono applicate tre strategie di estrazione in ordine di preferenza.
 
         Args:
-            text: Testo grezzo della risposta dell'LLM.
+            text: Testo grezzo della risposta del modello.
 
         Returns:
             Struttura dati Python parsata dal JSON.
@@ -86,13 +88,13 @@ class GeminiClient:
         Raises:
             GeminiParsingError: Se nessuna strategia di parsing ha successo.
         """
-        # Strategia 1: parse diretto della risposta pulita
+        # Strategia 1: parse diretto della risposta pulita.
         try:
             return json.loads(text.strip())
         except json.JSONDecodeError:
             pass
 
-        # Strategia 2: estrazione di blocchi ```json ... ```
+        # Strategia 2: estrazione di blocchi ```json ... ```.
         json_block_pattern = re.compile(
             r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL | re.IGNORECASE
         )
@@ -103,7 +105,7 @@ class GeminiClient:
             except json.JSONDecodeError:
                 pass
 
-        # Strategia 3: ricerca del primo { ... } o [ ... ] nel testo
+        # Strategia 3: ricerca greedy della struttura JSON piu' esterna.
         brace_pattern = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
         match = brace_pattern.search(text)
         if match:
@@ -113,7 +115,7 @@ class GeminiClient:
                 pass
 
         raise GeminiParsingError(
-            f"Impossibile estrarre JSON valido dalla risposta del modello. "
+            "Impossibile estrarre JSON valido dalla risposta del modello. "
             f"Risposta ricevuta (primi 500 caratteri): {text[:500]}"
         )
 
@@ -124,10 +126,10 @@ class GeminiClient:
         generation_config: Optional[dict] = None,
     ) -> str:
         """
-        Esegue una chiamata al modello con retry automatico.
+        Esegue una chiamata al modello con retry e backoff esponenziale.
 
-        Usa backoff esponenziale: attende 2^attempt secondi tra un tentativo
-        e il successivo.
+        Attende 2^(attempt+1) secondi tra un tentativo e il successivo
+        in caso di rate limit, e 2^attempt secondi per altri errori API.
 
         Args:
             model: Modello Gemini da usare.
@@ -138,27 +140,31 @@ class GeminiClient:
             Testo della risposta del modello.
 
         Raises:
-            GeminiRateLimitError: Se il rate limit e' persistentemente raggiunto.
-            GeminiClientError: Per altri errori non recuperabili.
+            GeminiRateLimitError: Se il rate limit e' persistente su tutti i tentativi.
+            GeminiClientError: Per altri errori API non recuperabili.
         """
-        gen_config = generation_config or {
-            "temperature": 0.2,
-            "max_output_tokens": 4096,
+        gen_config: dict[str, Any] = generation_config or {
+            "temperature": self.config.temperature,
+            "max_output_tokens": self.config.max_output_tokens,
         }
+
+        last_exception: Exception = GeminiClientError("Nessun tentativo eseguito.")
 
         for attempt in range(self.config.max_retries):
             try:
                 response = model.generate_content(
                     contents,
                     generation_config=gen_config,
+                    request_options={"timeout": self.config.timeout_seconds},
                 )
                 return response.text
 
             except ResourceExhausted as exc:
+                last_exception = exc
                 wait_seconds = 2 ** (attempt + 1)
                 logger.warning(
                     "Rate limit raggiunto (tentativo %d/%d). "
-                    "Attendo %d secondi prima di riprovare.",
+                    "Attesa di %d secondi prima di riprovare.",
                     attempt + 1,
                     self.config.max_retries,
                     wait_seconds,
@@ -171,6 +177,7 @@ class GeminiClient:
                     ) from exc
 
             except GoogleAPIError as exc:
+                last_exception = exc
                 logger.error(
                     "Errore API Google (tentativo %d/%d): %s",
                     attempt + 1,
@@ -178,14 +185,15 @@ class GeminiClient:
                     exc,
                 )
                 if attempt < self.config.max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
                 else:
                     raise GeminiClientError(
                         f"Errore API persistente: {exc}"
                     ) from exc
 
-        # Non dovrebbe mai essere raggiunto, ma per sicurezza
-        raise GeminiClientError("Tutti i tentativi esauriti senza risposta.")
+        raise GeminiClientError(
+            f"Tutti i tentativi esauriti senza risposta. Ultimo errore: {last_exception}"
+        )
 
     def call_text(
         self,
@@ -196,11 +204,9 @@ class GeminiClient:
         """
         Esegue una chiamata testuale al modello e restituisce il JSON parsato.
 
-        riordino della scena tramite ragionamento testuale.
-
         Args:
             system_prompt: Prompt di sistema che contestualizza l'azione.
-            user_prompt: Prompt utente con i dati della scena disordinata.
+            user_prompt: Prompt utente con i dati della scena.
             use_fallback: Se True, usa il modello fallback invece del primario.
 
         Returns:
@@ -210,31 +216,29 @@ class GeminiClient:
             GeminiClientError: In caso di errori API non recuperabili.
             GeminiParsingError: Se il JSON nella risposta non e' valido.
         """
-        model = self._fallback_model if use_fallback else self._primary_model
         model_name = (
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
-
+        model = genai.GenerativeModel(
+            model_name,
+            system_instruction=system_prompt,
+        )
         logger.info(
             "Chiamata testuale a Gemini (modello: %s). "
-            "Lunghezza system_prompt: %d, user_prompt: %d",
+            "Lunghezza system_prompt: %d caratteri, user_prompt: %d caratteri.",
             model_name,
             len(system_prompt),
             len(user_prompt),
         )
-
-        # Composizione del messaggio nel formato atteso da Gemini
         contents = [
-            {"role": "user", "parts": [system_prompt + "\n\n" + user_prompt]},
+            {"role": "user", "parts": [user_prompt]},
         ]
-
         try:
             raw_response = self._call_with_retry(model, contents)
             logger.debug("Risposta grezza ricevuta: %s", raw_response[:200])
             parsed = self._extract_json_from_response(raw_response)
             logger.info("JSON parsato con successo dalla risposta testuale.")
             return parsed
-
         except GeminiRateLimitError:
             if not use_fallback:
                 logger.warning(
@@ -251,8 +255,6 @@ class GeminiClient:
     ) -> dict | list:
         """
         Esegue una chiamata vision al modello con un'immagine allegata.
-
-        critica visiva del render per identificare imperfezioni nel layout riordinato.
 
         Args:
             image_path: Percorso all'immagine del render da analizzare.
@@ -283,24 +285,43 @@ class GeminiClient:
             image_path,
         )
 
-        # Caricamento dell'immagine tramite le API File di Gemini
-        uploaded_file = genai.upload_file(str(image_path))
-
-        contents = [uploaded_file, user_prompt]
-
+        uploaded_file = None
         try:
-            raw_response = self._call_with_retry(model, contents)
-            logger.debug(
-                "Risposta vision grezza ricevuta: %s", raw_response[:200]
-            )
-            parsed = self._extract_json_from_response(raw_response)
-            logger.info("JSON parsato con successo dalla risposta vision.")
-            return parsed
+            uploaded_file = genai.upload_file(str(image_path))
+            contents = [uploaded_file, user_prompt]
 
-        except GeminiRateLimitError:
-            if not use_fallback:
-                logger.warning(
-                    "Rate limit sul modello primario. Tentativo con modello fallback."
+            try:
+                raw_response = self._call_with_retry(model, contents)
+                logger.debug(
+                    "Risposta vision grezza ricevuta: %s", raw_response[:200]
                 )
-                return self.call_vision(image_path, user_prompt, use_fallback=True)
-            raise
+                parsed = self._extract_json_from_response(raw_response)
+                logger.info("JSON parsato con successo dalla risposta vision.")
+                return parsed
+            except GeminiRateLimitError:
+                if not use_fallback:
+                    logger.warning(
+                        "Rate limit sul modello primario. Tentativo con modello fallback."
+                    )
+                    # Il file e' gia' caricato; qui facciamo la chiamata diretta
+                    # con il modello fallback invece di ricorrere a call_vision
+                    # per evitare un doppio upload.
+                    raw_response = self._call_with_retry(self._fallback_model, contents)
+                    parsed = self._extract_json_from_response(raw_response)
+                    return parsed
+                raise
+
+        finally:
+            if uploaded_file is not None:
+                try:
+                    genai.delete_file(uploaded_file.name)
+                    logger.debug(
+                        "File immagine '%s' eliminato dai server Gemini.",
+                        uploaded_file.name,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Impossibile eliminare il file immagine '%s': %s",
+                        uploaded_file.name,
+                        exc,
+                    )

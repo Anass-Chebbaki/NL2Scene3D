@@ -1,17 +1,16 @@
+# src/nl2scene3d/randomizer.py
 """
 Randomizzazione controllata degli oggetti di una scena 3D.
 
-Disorganizza artificialmente il layout di una scena pre-esistente per creare uno stato caotico
-su cui l'LLM possa intervenire.
+Disorganizza artificialmente il layout di una scena pre-esistente per creare
+uno stato caotico su cui l'LLM possa intervenire.
 
 La randomizzazione e' volutamente "plausibile": gli oggetti rimangono
 all'interno dei bounds della stanza e mantengono la loro quota Z,
-ma le posizioni X/Y e la rotazione Z vengono perturbate in modo casuale.
+mentre le posizioni X/Y e la rotazione Z vengono perturbate in modo casuale.
 """
-
 from __future__ import annotations
 
-import copy
 import logging
 import math
 import random
@@ -22,14 +21,6 @@ from nl2scene3d.models import ObjectTransform, RoomBounds, SceneObject, SceneSta
 
 logger = logging.getLogger(__name__)
 
-# Percentuale massima di sovrapposizione AABB consentita prima di un retry.
-MAX_OVERLAP_RATIO: float = 0.5
-
-# Numero massimo di tentativi per posizionare un oggetto senza sovrapposizioni.
-MAX_PLACEMENT_ATTEMPTS: int = 10
-
-# Margine di sicurezza (in metri) dai bordi della stanza durante il piazzamento.
-WALL_MARGIN: float = 0.1
 
 @dataclass
 class RandomizerConfig:
@@ -37,24 +28,28 @@ class RandomizerConfig:
     Parametri di configurazione per la randomizzazione.
 
     Attributes:
-        seed: Seed per il generatore di numeri casuali (0 = casuale).
+        seed: Seed per il generatore di numeri casuali (0 = non deterministico).
         jitter_ratio: Frazione della dimensione della stanza usata come jitter
-                      massimo nella posizione (es. 0.8 = fino all'80% della larghezza).
-        rotate_z_only: Se True, ruota solo l'asse Z (yaw), come da design document.
+            massimo nella posizione (es. 0.8 = fino all'80% della larghezza).
+        rotate_z_only: Se True, ruota solo l'asse Z (yaw).
         check_overlaps: Se True, verifica le sovrapposizioni AABB e ritenta.
+        wall_margin: Margine minimo dai muri in metri.
+        max_overlap_ratio: Rapporto massimo di sovrapposizione consentito.
+        max_placement_attempts: Numero massimo di tentativi di posizionamento per oggetto.
     """
 
     seed: int = 0
     jitter_ratio: float = 0.8
     rotate_z_only: bool = True
     check_overlaps: bool = True
+    wall_margin: float = 0.1
+    max_overlap_ratio: float = 0.5
+    max_placement_attempts: int = 10
+
 
 def _compute_aabb(obj: SceneObject) -> tuple[float, float, float, float]:
     """
-    Calcola l'Axis-Aligned Bounding Box (AABB) 2D di un oggetto.
-
-    Considera solo il piano XY (vista dall'alto), poiche' gli oggetti
-    restano sulla stessa quota Z.
+    Calcola l'Axis-Aligned Bounding Box (AABB) 2D di un oggetto nel piano XY.
 
     Args:
         obj: Oggetto di cui calcolare l'AABB.
@@ -73,6 +68,7 @@ def _compute_aabb(obj: SceneObject) -> tuple[float, float, float, float]:
         loc[1] + half_y,
     )
 
+
 def _compute_overlap_ratio(
     aabb_a: tuple[float, float, float, float],
     aabb_b: tuple[float, float, float, float],
@@ -80,45 +76,40 @@ def _compute_overlap_ratio(
     """
     Calcola il rapporto di sovrapposizione tra due AABB 2D.
 
-    Il rapporto e' calcolato come area di intersezione divisa
-    per l'area minima dei due bounding box.
+    Il rapporto e' calcolato come area di intersezione divisa per l'area
+    minima tra i due bounding box.
 
     Args:
         aabb_a: AABB del primo oggetto (x_min, x_max, y_min, y_max).
-        aabb_b: AABB del secondo oggetto.
+        aabb_b: AABB del secondo oggetto (x_min, x_max, y_min, y_max).
 
     Returns:
-        Valore in [0.0, 1.0] dove 0 = nessuna sovrapposizione.
+        Valore in [0.0, 1.0] dove 0.0 indica nessuna sovrapposizione.
     """
-    x_overlap = max(
-        0.0,
-        min(aabb_a[1], aabb_b[1]) - max(aabb_a[0], aabb_b[0]),
-    )
-    y_overlap = max(
-        0.0,
-        min(aabb_a[3], aabb_b[3]) - max(aabb_a[2], aabb_b[2]),
-    )
+    x_overlap = max(0.0, min(aabb_a[1], aabb_b[1]) - max(aabb_a[0], aabb_b[0]))
+    y_overlap = max(0.0, min(aabb_a[3], aabb_b[3]) - max(aabb_a[2], aabb_b[2]))
     intersection = x_overlap * y_overlap
 
-    if intersection == 0.0:
+    if intersection < 1e-6:
         return 0.0
 
     area_a = (aabb_a[1] - aabb_a[0]) * (aabb_a[3] - aabb_a[2])
     area_b = (aabb_b[1] - aabb_b[0]) * (aabb_b[3] - aabb_b[2])
     min_area = min(area_a, area_b)
 
-    if min_area <= 0.0:
+    if min_area < 1e-6:
         return 0.0
 
     return intersection / min_area
 
+
 def _has_excessive_overlap(
     candidate: SceneObject,
     placed_objects: list[SceneObject],
-    max_overlap_ratio: float = MAX_OVERLAP_RATIO,
+    max_overlap_ratio: float,
 ) -> bool:
     """
-    Verifica se un oggetto ha sovrapposizioni eccessive con gli altri gia' posizionati.
+    Verifica se un oggetto ha sovrapposizioni eccessive con quelli gia' posizionati.
 
     Args:
         candidate: Oggetto da verificare.
@@ -136,13 +127,14 @@ def _has_excessive_overlap(
         ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
         if ratio > max_overlap_ratio:
             logger.debug(
-                "Sovrapposizione eccessiva: '%s' vs '%s' = %.2f",
+                "Sovrapposizione eccessiva: '%s' vs '%s' = %.2f.",
                 candidate.name,
                 other.name,
                 ratio,
             )
             return True
     return False
+
 
 class SceneRandomizer:
     """
@@ -153,7 +145,7 @@ class SceneRandomizer:
 
     Attributes:
         config: Parametri di randomizzazione.
-        _rng: Istanza del generatore di numeri casuali.
+        _rng: Istanza del generatore di numeri casuali con seed controllato.
     """
 
     def __init__(self, config: Optional[RandomizerConfig] = None) -> None:
@@ -162,14 +154,16 @@ class SceneRandomizer:
 
         Args:
             config: Configurazione della randomizzazione.
-                    Se None, usa i valori di default.
+                    Se None, vengono usati i valori di default.
         """
         self.config = config or RandomizerConfig()
-        seed = self.config.seed if self.config.seed != 0 else None
-        self._rng = random.Random(seed)
+        effective_seed: Optional[int] = (
+            self.config.seed if self.config.seed != 0 else None
+        )
+        self._rng = random.Random(effective_seed)
         logger.info(
-            "SceneRandomizer inizializzato. Seed: %s, jitter_ratio: %.2f",
-            seed,
+            "SceneRandomizer inizializzato. Seed: %s, jitter_ratio: %.2f.",
+            effective_seed,
             self.config.jitter_ratio,
         )
 
@@ -179,26 +173,23 @@ class SceneRandomizer:
         room_bounds: RoomBounds,
     ) -> list[float]:
         """
-        Genera una nuova posizione casuale per un oggetto.
+        Genera una nuova posizione casuale per un oggetto all'interno dei bounds.
 
         Args:
             original_location: Posizione originale [x, y, z].
             room_bounds: Bounds della stanza.
 
         Returns:
-            Nuova posizione [x, y, z] con Z invariata.
+            Nuova posizione [x, y, z] con coordinata Z invariata.
         """
-        # Campiona una posizione uniforme nell'area utilizzabile della stanza
-        # con un margine dai muri.
         new_x = self._rng.uniform(
-            room_bounds.x_min + WALL_MARGIN,
-            room_bounds.x_max - WALL_MARGIN,
+            room_bounds.x_min + self.config.wall_margin,
+            room_bounds.x_max - self.config.wall_margin,
         )
         new_y = self._rng.uniform(
-            room_bounds.y_min + WALL_MARGIN,
-            room_bounds.y_max - WALL_MARGIN,
+            room_bounds.y_min + self.config.wall_margin,
+            room_bounds.y_max - self.config.wall_margin,
         )
-        # La quota Z viene preservata per mantenere gli oggetti sul pavimento
         return [new_x, new_y, original_location[2]]
 
     def _randomize_rotation(
@@ -208,7 +199,8 @@ class SceneRandomizer:
         """
         Genera una nuova rotazione casuale per un oggetto.
 
-        Solo l'asse Z (yaw) viene randomizzato, come da design document.
+        Solo l'asse Z (yaw) viene randomizzato se rotate_z_only e' True,
+        in modo da mantenere gli oggetti verticali e realistici.
 
         Args:
             original_rotation: Rotazione originale [rx, ry, rz] in radianti.
@@ -217,15 +209,14 @@ class SceneRandomizer:
             Nuova rotazione [rx, ry, rz] con Z randomizzata in [0, 2*pi].
         """
         if self.config.rotate_z_only:
-            new_rotation_z = self._rng.uniform(0.0, 2.0 * math.pi)
-            return [original_rotation[0], original_rotation[1], new_rotation_z]
-        else:
-            # Rotazione completa su tutti gli assi (non raccomandato per arredamento)
-            return [
-                self._rng.uniform(0.0, 2.0 * math.pi),
-                self._rng.uniform(0.0, 2.0 * math.pi),
-                self._rng.uniform(0.0, 2.0 * math.pi),
-            ]
+            new_z = self._rng.uniform(0.0, 2.0 * math.pi)
+            return [original_rotation[0], original_rotation[1], new_z]
+
+        return [
+            self._rng.uniform(0.0, 2.0 * math.pi),
+            self._rng.uniform(0.0, 2.0 * math.pi),
+            self._rng.uniform(0.0, 2.0 * math.pi),
+        ]
 
     def randomize(self, state: SceneState) -> SceneState:
         """
@@ -241,7 +232,7 @@ class SceneRandomizer:
             Nuovo SceneState con layout randomizzato.
 
         Raises:
-            ValueError: Se la scena non ha bounds definiti.
+            ValueError: Se la scena non ha room_bounds definiti.
         """
         if state.room_bounds is None:
             raise ValueError(
@@ -250,39 +241,35 @@ class SceneRandomizer:
             )
 
         room_bounds = state.room_bounds
+
         logger.info(
-            "Avvio randomizzazione scena '%s'. "
-            "Oggetti movibili: %d",
+            "Avvio randomizzazione scena '%s'. Oggetti movibili: %d.",
             state.scene_name,
             len(state.movable_objects),
         )
 
-        # Copia profonda per non modificare lo stato originale
         new_objects: list[SceneObject] = []
         placed_objects: list[SceneObject] = []
 
-        # Prima aggiungiamo gli oggetti statici invariati
         for obj in state.static_objects:
-            new_obj = copy.deepcopy(obj)
+            new_obj = obj.copy()
             new_objects.append(new_obj)
             placed_objects.append(new_obj)
 
-        # Poi randomizziamo gli oggetti movibili
         randomized_count = 0
         failed_count = 0
 
         for obj in state.movable_objects:
-            new_obj = copy.deepcopy(obj)
+            new_obj = obj.copy()
             placed = False
 
-            for attempt in range(MAX_PLACEMENT_ATTEMPTS):
+            for attempt in range(self.config.max_placement_attempts):
                 candidate_location = self._randomize_location(
                     obj.transform.location, room_bounds
                 )
                 candidate_rotation = self._randomize_rotation(
                     obj.transform.rotation_euler
                 )
-
                 new_obj.transform = ObjectTransform(
                     location=candidate_location,
                     rotation_euler=candidate_rotation,
@@ -290,7 +277,7 @@ class SceneRandomizer:
                 )
 
                 if not self.config.check_overlaps or not _has_excessive_overlap(
-                    new_obj, placed_objects
+                    new_obj, placed_objects, self.config.max_overlap_ratio
                 ):
                     placed = True
                     break
@@ -303,10 +290,10 @@ class SceneRandomizer:
 
             if not placed:
                 logger.warning(
-                    "Oggetto '%s': impossibile trovare posizione senza sovrapposizioni "
+                    "Oggetto '%s': posizione senza sovrapposizioni non trovata "
                     "dopo %d tentativi. Viene usata l'ultima posizione calcolata.",
                     obj.name,
-                    MAX_PLACEMENT_ATTEMPTS,
+                    self.config.max_placement_attempts,
                 )
                 failed_count += 1
 

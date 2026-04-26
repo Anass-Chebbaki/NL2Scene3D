@@ -22,7 +22,9 @@ STRICT CONSTRAINTS:
 - Only modify 'location' and 'rotation_euler' fields
 - All coordinates must be within the provided room bounds
 - Keep the Z coordinate (height) unchanged for each object
-- Rotation is in radians; only modify the Z axis (index 2) for yaw rotation
+- Rotation is in radians; only modify the Z axis (index 2) for yaw rotation.
+  Note: 0 radians points towards +X (East), PI/2 points towards +Y (North).
+  Rotation is counter-clockwise.
 - The JSON structure must exactly match the input structure
 
 OUTPUT FORMAT:

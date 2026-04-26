@@ -82,9 +82,6 @@ Il sistema esegue le seguenti operazioni:
 - Applicazione delle coordinate suggerite e rendering
 - Chiamata LLM Vision: critica del render isometrico
 - Applicazione delle rifiniture e render finale ad alta qualita'
-```
-
----
 
 ## Nota finale sull'esecuzione
 

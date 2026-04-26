@@ -1,3 +1,4 @@
+# src/nl2scene3d/__init__.py
 """
 NL2Scene3D - Scene Reorganization via Multimodal Language Models.
 

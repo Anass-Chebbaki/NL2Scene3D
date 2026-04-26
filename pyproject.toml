@@ -1,3 +1,4 @@
+# pyproject.toml
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -10,9 +11,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "NL2Scene3D Team" }]
-
 dependencies = [
     "google-generativeai>=0.8.0",
+    "google-api-core>=2.15.0",
     "python-dotenv>=1.0.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
@@ -46,8 +47,9 @@ select = [
     "ANN", # flake8-annotations
 ]
 ignore = [
-    "ANN101",  # missing type annotation for self
-    "ANN102",  # missing type annotation for cls
+    "ANN101",  # missing type annotation for self (deprecated in newer ruff)
+    "ANN102",  # missing type annotation for cls (deprecated in newer ruff)
+    "ANN401",  # disallows Any type annotation
 ]
 
 [tool.ruff.lint.isort]

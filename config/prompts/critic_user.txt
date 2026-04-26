@@ -32,5 +32,6 @@ If the layout looks good and no corrections are needed, return:
 }
 
 Current room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}]
+Units: METERS. Coordinate System: Right-handed (+X: East, +Y: North, +Z: Up).
 
 IMPORTANT: Return ONLY valid JSON. Do not include any other text.

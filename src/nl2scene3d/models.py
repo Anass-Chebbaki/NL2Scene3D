@@ -1,15 +1,17 @@
+# src/nl2scene3d/models.py
 """
 Definizione dei modelli dati condivisi in tutta la pipeline.
 
-Vengono usati dataclass tipizzate per garantire coerenza strutturale
-e la serializzazione JSON.
+Dataclass tipizzate per garantire coerenza strutturale e serializzazione JSON
+coerente tra tutti i moduli della pipeline.
 """
-
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from typing import Optional
+
 
 @dataclass
 class ObjectTransform:
@@ -27,13 +29,13 @@ class ObjectTransform:
     dimensions: list[float]
 
     def __post_init__(self) -> None:
-        """Valida che le liste abbiano esattamente 3 componenti."""
+        """Verifica che ogni lista contenga esattamente 3 componenti."""
         for attr_name in ("location", "rotation_euler", "dimensions"):
             value = getattr(self, attr_name)
             if len(value) != 3:
                 raise ValueError(
                     f"'{attr_name}' deve contenere esattamente 3 valori, "
-                    f"ricevuto: {len(value)}"
+                    f"ricevuti: {len(value)}."
                 )
 
     def to_dict(self) -> dict:
@@ -44,6 +46,14 @@ class ObjectTransform:
             "dimensions": self.dimensions,
         }
 
+    def copy(self) -> "ObjectTransform":
+        """Crea una copia della trasformazione con liste indipendenti."""
+        return ObjectTransform(
+            location=list(self.location),
+            rotation_euler=list(self.rotation_euler),
+            dimensions=list(self.dimensions),
+        )
+
     @classmethod
     def from_dict(cls, data: dict) -> "ObjectTransform":
         """Deserializza da dizionario JSON."""
@@ -52,6 +62,7 @@ class ObjectTransform:
             rotation_euler=list(data["rotation_euler"]),
             dimensions=list(data["dimensions"]),
         )
+
 
 @dataclass
 class SceneObject:
@@ -84,6 +95,16 @@ class SceneObject:
             "is_movable": self.is_movable,
         }
 
+    def copy(self) -> "SceneObject":
+        """Crea una copia dell'oggetto con trasformazione indipendente."""
+        return SceneObject(
+            name=self.name,
+            object_type=self.object_type,
+            transform=self.transform.copy(),
+            category=self.category,
+            is_movable=self.is_movable,
+        )
+
     @classmethod
     def from_dict(cls, data: dict) -> "SceneObject":
         """Deserializza da dizionario JSON."""
@@ -100,11 +121,14 @@ class SceneObject:
             is_movable=data.get("is_movable", True),
         )
 
+
 @dataclass
 class RoomBounds:
     """
-    Limiti spaziali della stanza, utilizzati per vincolare la randomizzazione
-    e validare le coordinate suggerite dall'LLM.
+    Limiti spaziali della stanza.
+
+    Utilizzati per vincolare la randomizzazione e validare le coordinate
+    suggerite dall'LLM.
 
     Attributes:
         x_min: Limite minimo sull'asse X.
@@ -129,7 +153,7 @@ class RoomBounds:
 
     @property
     def depth(self) -> float:
-        """Profondi della stanza sull'asse Y."""
+        """Profondita' della stanza sull'asse Y."""
         return self.y_max - self.y_min
 
     @property
@@ -139,7 +163,7 @@ class RoomBounds:
 
     def clamp_location(self, location: list[float]) -> list[float]:
         """
-        Porta le coordinate dentro i bounds della stanza.
+        Riporta le coordinate X e Y all'interno dei bounds della stanza.
 
         La coordinata Z viene lasciata invariata per non alterare
         la quota di appoggio degli oggetti.
@@ -148,12 +172,12 @@ class RoomBounds:
             location: Coordinate [x, y, z] da vincolare.
 
         Returns:
-            Coordinate vincolate ai bounds.
+            Coordinate vincolate ai bounds della stanza.
         """
         return [
             max(self.x_min, min(self.x_max, location[0])),
             max(self.y_min, min(self.y_max, location[1])),
-            location[2],  # Z non viene modificato
+            location[2],
         ]
 
     def to_dict(self) -> dict:
@@ -179,6 +203,7 @@ class RoomBounds:
             z_ceiling=data.get("z_ceiling", 3.0),
         )
 
+
 @dataclass
 class SceneState:
     """
@@ -188,7 +213,7 @@ class SceneState:
         scene_name: Nome identificativo della scena.
         objects: Lista degli oggetti presenti nella scena.
         room_bounds: Limiti spaziali della stanza.
-        pipeline_step: Etichetta dello stato (es. 'original', 'randomized', 'reordered').
+        pipeline_step: Etichetta dello stato ('original', 'randomized', 'reordered', 'refined').
         metadata: Dizionario opzionale per dati aggiuntivi.
     """
 
@@ -197,6 +222,12 @@ class SceneState:
     room_bounds: Optional[RoomBounds] = None
     pipeline_step: str = "unknown"
     metadata: dict = field(default_factory=dict)
+
+
+    @property
+    def _object_cache(self) -> dict[str, SceneObject]:
+        """Cache dinamica degli oggetti indicizzata per nome."""
+        return {obj.name: obj for obj in self.objects}
 
     @property
     def movable_objects(self) -> list[SceneObject]:
@@ -218,10 +249,22 @@ class SceneState:
         Returns:
             L'oggetto trovato oppure None.
         """
-        for obj in self.objects:
-            if obj.name == name:
-                return obj
-        return None
+        return self._object_cache.get(name)
+
+    def copy(self) -> "SceneState":
+        """
+        Crea una copia profonda dello stato.
+
+        La cache degli oggetti viene ricostruita automaticamente
+        da __post_init__ sulla nuova istanza.
+        """
+        return SceneState(
+            scene_name=self.scene_name,
+            objects=[obj.copy() for obj in self.objects],
+            room_bounds=copy.deepcopy(self.room_bounds) if self.room_bounds else None,
+            pipeline_step=self.pipeline_step,
+            metadata=copy.deepcopy(self.metadata),
+        )
 
     def to_dict(self) -> dict:
         """Serializza lo stato completo in dizionario compatibile con JSON."""
@@ -236,7 +279,7 @@ class SceneState:
     @classmethod
     def from_dict(cls, data: dict) -> "SceneState":
         """Deserializza da dizionario JSON."""
-        room_bounds = None
+        room_bounds: Optional[RoomBounds] = None
         if data.get("room_bounds"):
             room_bounds = RoomBounds.from_dict(data["room_bounds"])
 
@@ -249,6 +292,7 @@ class SceneState:
             pipeline_step=data.get("pipeline_step", "unknown"),
             metadata=data.get("metadata", {}),
         )
+
 
 @dataclass
 class LLMCorrection:
@@ -289,14 +333,3 @@ class LLMCorrection:
             new_rotation_euler=data.get("new_rotation_euler"),
             reason=data.get("reason", ""),
         )
-
-# Radianti per PI greco, usato nelle conversioni angolari
-PI = math.pi
-
-def degrees_to_radians(degrees: float) -> float:
-    """Converte gradi in radianti."""
-    return degrees * PI / 180.0
-
-def radians_to_degrees(radians: float) -> float:
-    """Converte radianti in gradi."""
-    return radians * 180.0 / PI

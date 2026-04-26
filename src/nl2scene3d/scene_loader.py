@@ -1,20 +1,20 @@
+# src/nl2scene3d/scene_loader.py
 """
 Caricamento e introspezione di scene Blender.
 
-Questo modulo implementa:
+Implementa:
 1. Apertura della scena .blend tramite bpy
 2. Estrazione dello stato degli oggetti in formato SceneState
+3. Serializzazione e deserializzazione dello stato in JSON
 
-NOTA IMPORTANTE: Questo modulo e' progettato per essere eseguito
-all'interno del Python integrato in Blender (bpy disponibile).
-Per i test unitari, viene usata una implementazione mock di bpy.
+Questo modulo e' progettato per essere eseguito all'interno del Python
+integrato in Blender (bpy disponibile). Per i test unitari viene usata
+una implementazione mock di bpy.
 """
-
 from __future__ import annotations
 
 import json
 import logging
-import math
 from pathlib import Path
 from typing import Optional
 
@@ -24,97 +24,12 @@ from nl2scene3d.models import (
     SceneObject,
     SceneState,
 )
+from nl2scene3d.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
-# Tipi di oggetti Blender che vengono sempre ignorati durante l'estrazione
-# perche' non fanno parte del layout arredativo.
-NON_MESH_TYPES: frozenset[str] = frozenset({"CAMERA", "LIGHT", "SPEAKER", "ARMATURE"})
-
-# Nomi (o parti di nomi) che identificano elementi strutturali non movibili.
-# Il confronto e' case-insensitive.
-STRUCTURAL_NAME_PATTERNS: frozenset[str] = frozenset(
-    {
-        "wall",
-        "floor",
-        "ceiling",
-        "room",
-        "baseboard",
-        "muro",
-        "pavimento",
-        "soffitto",
-        "stanza",
-        "door",
-        "window",
-        "porta",
-        "finestra",
-    }
-)
-
-# Nomi di categorie per oggetti strutturali
 STRUCTURAL_CATEGORY: str = "structural"
 
-# Dimensione minima (in metri) affinche' un oggetto sia considerato
-# abbastanza grande da essere incluso nel layout.
-MIN_OBJECT_DIMENSION: float = 0.05
-
-def _classify_object(
-    name: str,
-    object_type: str,
-    dimensions: list[float],
-) -> tuple[str, bool]:
-    """
-    Determina la categoria e la movibilita' di un oggetto.
-
-    Args:
-        name: Nome dell'oggetto nella scena Blender.
-        object_type: Tipo Blender dell'oggetto.
-        dimensions: Dimensioni [x, y, z] del bounding box.
-
-    Returns:
-        Tupla (categoria, is_movable).
-    """
-    name_lower = name.lower()
-
-    # Oggetti non-mesh (camere, luci, ecc.) sono sempre non movibili
-    if object_type in NON_MESH_TYPES:
-        return "technical", False
-
-    # Oggetti troppo piccoli vengono ignorati (es. viti, chiodi)
-    max_dim = max(dimensions) if dimensions else 0.0
-    if max_dim < MIN_OBJECT_DIMENSION:
-        return "decoration_small", False
-
-    # Le lampade hanno la precedenza sui pattern strutturali perche' 
-    # spesso contengono la parola "floor" o "wall" nel nome.
-    if any(kw in name_lower for kw in ("lamp", "lampada", "light")):
-        # Le lampade da terra sono movibili, quelle a soffitto o muro no
-        if any(kw in name_lower for kw in ("ceiling", "soffitto", "pendant", "wall", "muro")):
-            return "light_ceiling", False
-        return "light_floor", True
-
-    # Elementi strutturali identificati per nome
-    for pattern in STRUCTURAL_NAME_PATTERNS:
-        if pattern in name_lower:
-            return STRUCTURAL_CATEGORY, False
-
-    # Classificazione euristica per categoria di arredo
-    if any(kw in name_lower for kw in ("sofa", "couch", "divano")):
-        return "seating_large", True
-    if any(kw in name_lower for kw in ("chair", "sedia", "stool", "sgabello")):
-        return "seating_small", True
-    if any(kw in name_lower for kw in ("table", "tavolo", "desk", "scrivania")):
-        return "table", True
-    if any(kw in name_lower for kw in ("shelf", "scaffale", "bookcase", "libreria")):
-        return "storage", True
-    if any(kw in name_lower for kw in ("bed", "letto", "mattress", "materasso")):
-        return "bed", True
-    if any(kw in name_lower for kw in ("rug", "tappeto", "carpet")):
-        return "rug", True
-    if any(kw in name_lower for kw in ("plant", "pianta", "vase", "vaso")):
-        return "decoration", True
-
-    return "furniture", True
 
 def extract_room_bounds_from_objects(
     objects: list[SceneObject],
@@ -122,63 +37,141 @@ def extract_room_bounds_from_objects(
     """
     Calcola i bounds della stanza a partire dagli oggetti strutturali.
 
-    Se non ci sono oggetti strutturali, stima i bounds dai movabili.
+    Se non ci sono oggetti strutturali, stima i bounds dall'insieme
+    completo degli oggetti con un avviso nel log.
 
     Args:
         objects: Lista completa degli oggetti della scena.
 
     Returns:
-        RoomBounds calcolati.
+        RoomBounds calcolati dagli oggetti strutturali (o da tutti se assenti).
     """
     structural = [obj for obj in objects if not obj.is_movable]
+
     if not structural:
+        logger.warning(
+            "Nessun oggetto strutturale trovato. "
+            "I bounds della stanza vengono stimati dall'insieme completo degli oggetti."
+        )
         structural = objects
 
-    all_x = [obj.transform.location[0] for obj in structural]
-    all_y = [obj.transform.location[1] for obj in structural]
+    if not structural:
+        logger.warning(
+            "La scena non contiene oggetti. Vengono usati bounds di default."
+        )
+        return RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
+
+    all_x_min = [
+        obj.transform.location[0] - obj.transform.dimensions[0] / 2.0
+        for obj in structural
+    ]
+    all_x_max = [
+        obj.transform.location[0] + obj.transform.dimensions[0] / 2.0
+        for obj in structural
+    ]
+    all_y_min = [
+        obj.transform.location[1] - obj.transform.dimensions[1] / 2.0
+        for obj in structural
+    ]
+    all_y_max = [
+        obj.transform.location[1] + obj.transform.dimensions[1] / 2.0
+        for obj in structural
+    ]
     all_z = [obj.transform.location[2] for obj in structural]
 
-    # Calcolo z_ceiling con euristica sulle dimensioni
     z_with_dims = [
         obj.transform.location[2] + obj.transform.dimensions[2]
         for obj in structural
         if obj.transform.dimensions[2] > 0.1
     ]
 
-    padding = 0.2  # margine di sicurezza in metri
-
     return RoomBounds(
-        x_min=min(all_x) - padding if all_x else -5.0,
-        x_max=max(all_x) + padding if all_x else 5.0,
-        y_min=min(all_y) - padding if all_y else -5.0,
-        y_max=max(all_y) + padding if all_y else 5.0,
-        z_floor=min(all_z) if all_z else 0.0,
+        x_min=min(all_x_min),
+        x_max=max(all_x_max),
+        y_min=min(all_y_min),
+        y_max=max(all_y_max),
+        z_floor=min(all_z),
         z_ceiling=max(z_with_dims) if z_with_dims else 3.0,
     )
+
 
 class SceneLoader:
     """
     Carica e ispeziona scene Blender tramite l'API bpy.
 
-    Questo loader viene istanziato e usato all'interno dell'ambiente
-    Python di Blender, dove bpy e' disponibile come modulo built-in.
+    Deve essere istanziato e usato all'interno dell'ambiente Python di
+    Blender, dove bpy e' disponibile come modulo built-in.
 
     Attributes:
-        max_objects: Limite massimo di oggetti movibili da includere.
+        config: Configurazione della pipeline.
     """
 
-    def __init__(self, max_objects: int = 20) -> None:
+    def __init__(self, config: PipelineConfig) -> None:
         """
         Inizializza il loader.
 
         Args:
-            max_objects: Numero massimo di oggetti movibili da includere.
-                         Valore dal design document: 20.
+            config: Configurazione della pipeline.
         """
-        self.max_objects = max_objects
+        self.config = config
         logger.info(
-            "SceneLoader inizializzato. Limite oggetti movibili: %d", max_objects
+            "SceneLoader inizializzato. Limite oggetti movibili: %d.",
+            config.max_movable_objects,
         )
+
+    def _classify_object(
+        self,
+        name: str,
+        object_type: str,
+        dimensions: list[float],
+    ) -> tuple[str, bool]:
+        """
+        Determina la categoria e la movibilita' di un oggetto.
+
+        Usa i pattern di classificazione definiti nella configurazione.
+
+        Args:
+            name: Nome dell'oggetto nella scena Blender.
+            object_type: Tipo Blender dell'oggetto.
+            dimensions: Dimensioni [x, y, z] del bounding box.
+
+        Returns:
+            Tupla (categoria, is_movable).
+        """
+        name_lower = name.lower()
+
+        if object_type in self.config.non_mesh_types:
+            return "technical", False
+
+        max_dim = max(dimensions) if dimensions else 0.0
+        if max_dim < self.config.min_object_dimension:
+            return "decoration_small", False
+
+        if any(kw in name_lower for kw in ("lamp", "lampada", "light")):
+            if any(kw in name_lower for kw in self.config.ceiling_light_patterns):
+                return "light_ceiling", False
+            return "light_floor", True
+
+        for pattern in self.config.structural_patterns:
+            if pattern in name_lower:
+                return STRUCTURAL_CATEGORY, False
+
+        if any(kw in name_lower for kw in ("sofa", "couch", "divano")):
+            return "seating_large", True
+        if any(kw in name_lower for kw in ("chair", "sedia", "stool", "sgabello")):
+            return "seating_small", True
+        if any(kw in name_lower for kw in ("table", "tavolo", "desk", "scrivania")):
+            return "table", True
+        if any(kw in name_lower for kw in ("shelf", "scaffale", "bookcase", "libreria")):
+            return "storage", True
+        if any(kw in name_lower for kw in ("bed", "letto", "mattress", "materasso")):
+            return "bed", True
+        if any(kw in name_lower for kw in ("rug", "tappeto", "carpet")):
+            return "rug", True
+        if any(kw in name_lower for kw in ("plant", "pianta", "vase", "vaso")):
+            return "decoration", True
+
+        return "furniture", True
 
     def load_blend_file(self, blend_path: Path) -> None:
         """
@@ -189,7 +182,7 @@ class SceneLoader:
 
         Raises:
             FileNotFoundError: Se il file .blend non esiste.
-            ImportError: Se bpy non e' disponibile (esecuzione fuori Blender).
+            ImportError: Se bpy non e' disponibile.
         """
         if not blend_path.exists():
             raise FileNotFoundError(
@@ -197,7 +190,7 @@ class SceneLoader:
             )
 
         try:
-            import bpy  # noqa: PLC0415 - import locale necessario per bpy
+            import bpy  # noqa: PLC0415
         except ImportError as exc:
             raise ImportError(
                 "Il modulo 'bpy' non e' disponibile. "
@@ -220,7 +213,7 @@ class SceneLoader:
 
         Args:
             scene_name: Nome identificativo da assegnare alla scena estratta.
-                        Se None, usa il nome del file .blend.
+                        Se None, usa il nome della scena Blender corrente.
 
         Returns:
             SceneState con tutti gli oggetti classificati.
@@ -240,7 +233,7 @@ class SceneLoader:
         effective_name = scene_name or blender_scene.name
 
         logger.info(
-            "Estrazione stato scena '%s'. Oggetti presenti: %d",
+            "Estrazione stato scena '%s'. Oggetti presenti: %d.",
             effective_name,
             len(blender_scene.objects),
         )
@@ -249,24 +242,25 @@ class SceneLoader:
         movable_count = 0
 
         for blender_obj in blender_scene.objects:
-            obj_name = blender_obj.name
-            obj_type = blender_obj.type
+            obj_name: str = blender_obj.name
+            obj_type: str = blender_obj.type
 
-            # Ottiene dimensioni del bounding box in scala applicata
             dimensions = [
                 blender_obj.dimensions.x,
                 blender_obj.dimensions.y,
                 blender_obj.dimensions.z,
             ]
 
-            category, is_movable = _classify_object(obj_name, obj_type, dimensions)
+            category, is_movable = self._classify_object(
+                obj_name, obj_type, dimensions
+            )
 
-            # Applica il limite al numero di oggetti movibili
-            if is_movable and movable_count >= self.max_objects:
+            if is_movable and movable_count >= self.config.max_movable_objects:
                 logger.debug(
-                    "Oggetto '%s' ignorato: limite di %d oggetti movibili raggiunto.",
+                    "Oggetto '%s' declassato a non movibile: "
+                    "limite di %d oggetti movibili raggiunto.",
                     obj_name,
-                    self.max_objects,
+                    self.config.max_movable_objects,
                 )
                 is_movable = False
 
@@ -302,10 +296,10 @@ class SceneLoader:
             movable_count,
         )
 
-        # Calcolo automatico dei bounds della stanza
         room_bounds = extract_room_bounds_from_objects(objects)
+
         logger.info(
-            "Bounds calcolati: X[%.2f, %.2f] Y[%.2f, %.2f] Z[%.2f, %.2f]",
+            "Bounds calcolati: X[%.2f, %.2f] Y[%.2f, %.2f] Z[%.2f, %.2f].",
             room_bounds.x_min,
             room_bounds.x_max,
             room_bounds.y_min,
@@ -334,12 +328,10 @@ class SceneLoader:
             output_path: Percorso del file JSON di destinazione.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(state.to_dict(), fh, indent=2, ensure_ascii=False)
-
         logger.info(
-            "Stato scena '%s' (tag: %s) salvato in: %s",
+            "Stato scena '%s' (step: %s) salvato in: %s",
             state.scene_name,
             state.pipeline_step,
             output_path,
@@ -370,7 +362,7 @@ class SceneLoader:
 
         state = SceneState.from_dict(data)
         logger.info(
-            "Stato scena '%s' (tag: %s) caricato da: %s",
+            "Stato scena '%s' (step: %s) caricato da: %s",
             state.scene_name,
             state.pipeline_step,
             json_path,

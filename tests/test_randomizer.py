@@ -205,3 +205,34 @@ class TestSceneRandomizer:
         )
         with pytest.raises(ValueError, match="room_bounds"):
             randomizer.randomize(state)
+
+    def test_jitter_ratio_zero(self) -> None:
+        """Verifica che con jitter_ratio=0.0 gli oggetti non si muovano (Bug 5.4)."""
+        config = RandomizerConfig(seed=42, jitter_ratio=0.0, check_overlaps=False)
+        randomizer = SceneRandomizer(config=config)
+        state = _make_test_state()
+        
+        randomized = randomizer.randomize(state)
+        
+        for original_obj in state.movable_objects:
+            rand_obj = randomized.get_object_by_name(original_obj.name)
+            assert rand_obj.transform.location == original_obj.transform.location
+
+    def test_object_bigger_than_room(self) -> None:
+        """Verifica che un oggetto piu' grande della stanza non mandi in crash (Bug 5.4)."""
+        config = RandomizerConfig(seed=42, max_placement_attempts=2)
+        randomizer = SceneRandomizer(config=config)
+        
+        # Oggetto 10x10 in una stanza 2x2
+        objects = [_make_object("big", [0, 0, 0], [10, 10, 1])]
+        state = SceneState(
+            scene_name="small_room",
+            objects=objects,
+            room_bounds=RoomBounds(-1, 1, -1, 1),
+            pipeline_step="original"
+        )
+        
+        # Dovrebbe fallire il posizionamento ma restituire comunque lo stato (con l'oggetto nella posizione originale o clampata)
+        randomized = randomizer.randomize(state)
+        assert len(randomized.objects) == 1
+        assert randomized.metadata["failed_placements"] == 1

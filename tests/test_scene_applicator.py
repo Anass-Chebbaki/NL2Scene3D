@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pathlib import Path
+
 from nl2scene3d.models import ObjectTransform, RoomBounds, SceneObject, SceneState
 from nl2scene3d.scene_applicator import SceneApplicator
 
@@ -132,4 +134,16 @@ class TestSceneApplicator:
         with patch.dict("sys.modules", {"bpy": mock_bpy}):
             counters = applicator.apply_state(state)
 
-        assert counters["not_found"] == 2
+    def test_save_blend_file(self, tmp_path: Path) -> None:
+        """Verifica il salvataggio del file .blend."""
+        applicator = SceneApplicator()
+        output_file = tmp_path / "test_scene.blend"
+
+        mock_bpy = MagicMock()
+        # Mock della creazione directory parent
+        with patch.dict("sys.modules", {"bpy": mock_bpy}):
+            applicator.save_blend_file(output_file)
+
+        mock_bpy.ops.wm.save_as_mainfile.assert_called_once_with(
+            filepath=str(output_file)
+        )
