@@ -119,7 +119,7 @@ class GeminiConfig:
             api_key=api_key,
             model_primary=os.environ.get(
                 "GEMINI_MODEL_PRIMARY",
-                gemini_toml.get("model_primary", "gemini-3-flash-preview"),
+                gemini_toml.get("model_primary", "gemini-2.5-flash"),
             ),
             model_fallback=os.environ.get(
                 "GEMINI_MODEL_FALLBACK",

@@ -31,9 +31,14 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 _SRC_DIR = _PROJECT_ROOT / "src"
+_VENV_SITE_PACKAGES = _PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
 
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
+
+# Aggiunge le dipendenze del .venv al Python di Blender (che e' isolato).
+if _VENV_SITE_PACKAGES.exists() and str(_VENV_SITE_PACKAGES) not in sys.path:
+    sys.path.insert(0, str(_VENV_SITE_PACKAGES))
 
 from nl2scene3d.blender.renderer import BlenderRenderer
 from nl2scene3d.config import get_config, RandomizerConfig
