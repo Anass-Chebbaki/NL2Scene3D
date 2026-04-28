@@ -168,28 +168,48 @@ class SceneRandomizer:
         )
 
     def _randomize_location(
-        self,
-        original_location: list[float],
-        room_bounds: RoomBounds,
+            self,
+            original_location: list[float],
+            original_dimensions: list[float],
+            room_bounds: RoomBounds,
     ) -> list[float]:
         """
         Genera una nuova posizione casuale per un oggetto all'interno dei bounds.
 
+        Tiene conto delle dimensioni dell'oggetto: il centro viene posizionato
+        in modo che i bordi dell'AABB restino dentro i bounds della stanza,
+        meno il margine dai muri.
+
         Args:
             original_location: Posizione originale [x, y, z].
+            original_dimensions: Dimensioni AABB [w, d, h] dell'oggetto.
             room_bounds: Bounds della stanza.
 
         Returns:
             Nuova posizione [x, y, z] con coordinata Z invariata.
         """
-        new_x = self._rng.uniform(
-            room_bounds.x_min + self.config.wall_margin,
-            room_bounds.x_max - self.config.wall_margin,
-        )
-        new_y = self._rng.uniform(
-            room_bounds.y_min + self.config.wall_margin,
-            room_bounds.y_max - self.config.wall_margin,
-        )
+        half_x = original_dimensions[0] / 2.0
+        half_y = original_dimensions[1] / 2.0
+        margin = self.config.wall_margin
+
+        # I bounds effettivi per il CENTRO dell'oggetto sono ridotti di
+        # mezza dimensione + margine, in modo che l'AABB completo resti dentro.
+        x_lo = room_bounds.x_min + half_x + margin
+        x_hi = room_bounds.x_max - half_x - margin
+        y_lo = room_bounds.y_min + half_y + margin
+        y_hi = room_bounds.y_max - half_y - margin
+
+        # Se l'oggetto e' piu' grande della stanza, fallback al centro.
+        if x_lo >= x_hi:
+            new_x = (room_bounds.x_min + room_bounds.x_max) / 2.0
+        else:
+            new_x = self._rng.uniform(x_lo, x_hi)
+
+        if y_lo >= y_hi:
+            new_y = (room_bounds.y_min + room_bounds.y_max) / 2.0
+        else:
+            new_y = self._rng.uniform(y_lo, y_hi)
+
         return [new_x, new_y, original_location[2]]
 
     def _randomize_rotation(
@@ -265,7 +285,7 @@ class SceneRandomizer:
 
             for attempt in range(self.config.max_placement_attempts):
                 candidate_location = self._randomize_location(
-                    obj.transform.location, room_bounds
+                    obj.transform.location,obj.transform.dimensions, room_bounds
                 )
                 candidate_rotation = self._randomize_rotation(
                     obj.transform.rotation_euler

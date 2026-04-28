@@ -35,7 +35,7 @@ timeout_seconds = 120
 temperature = 0.2
 
 # Numero massimo di token nell'output del modello
-max_output_tokens = 4096
+max_output_tokens = 32768
 
 # =============================================================================
 # Configurazione della pipeline
@@ -114,22 +114,29 @@ engine = "CYCLES"
 [render.camera]
 
 # Angolo di elevazione della camera isometrica (gradi rispetto al piano XY)
-isometric_elevation_degrees = 45.0
+# 30° = vista classica "3/4" stile Sketchfab. 45° era troppo dall'alto.
+isometric_elevation_degrees = 30.0
 
 # Angolo azimutale della camera isometrica (gradi rispetto all'asse X)
-isometric_azimuth_degrees = 45.0
+isometric_azimuth_degrees = 275.0
 
-# Lunghezza focale della camera isometrica (mm, equivale a un grandangolo moderato)
-isometric_focal_length_mm = 35.0
+# Lunghezza focale della camera isometrica (mm)
+# 50mm = grandangolo moderato, evita distorsioni
+isometric_focal_length_mm = 50.0
 
-# Moltiplicatore dell'altezza della stanza per il posizionamento della camera top-down
-topdown_height_multiplier = 3.0
+# Distanza camera isometrica come moltiplicatore della larghezza stanza
+# Valori bassi = camera vicina; valori alti = camera lontana
+# 1.3 funziona bene per stanze 8-10m
+isometric_distance_multiplier = 1.7
 
-# Margine di scala ortografica rispetto alle dimensioni della stanza (rapporto)
-topdown_ortho_scale_padding = 1.10
+# Moltiplicatore dell'altezza stanza per la camera top-down
+# 2.0 e' sufficiente per stanze realistiche (alte ~2.5m)
+topdown_height_multiplier = 2.0
+
+# Margine di scala ortografica (1.05 = padding del 5%)
+topdown_ortho_scale_padding = 1.05
 
 # Prefisso del nome degli oggetti camera creati dalla pipeline
-# (evita conflitti con le camere originali della scena)
 pipeline_camera_prefix = "NL2Scene3D_Camera"
 
 # =============================================================================

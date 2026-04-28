@@ -35,16 +35,22 @@ def extract_room_bounds_from_objects(
     objects: list[SceneObject],
 ) -> RoomBounds:
     """
-    Calcola i bounds della stanza a partire dagli oggetti strutturali.
+    Calcola i bounds della stanza dagli oggetti strutturali.
 
-    Se non ci sono oggetti strutturali, stima i bounds dall'insieme
-    completo degli oggetti con un avviso nel log.
+    Strategia:
+    1. Se esiste un singolo oggetto strutturale "grande" (volume > 50% del
+       volume totale strutturale), usa le sue dimensioni come stanza.
+       Questo gestisce le scene Sketchfab dove la stanza e' un'unica mesh.
+    2. Altrimenti combina gli AABB di tutti gli oggetti strutturali
+       (caso classico di muri separati).
+    3. Per Z usa sempre un range realistico (0 - 2.5m) per evitare
+       che oggetti siano randomizzati troppo in alto.
 
     Args:
         objects: Lista completa degli oggetti della scena.
 
     Returns:
-        RoomBounds calcolati dagli oggetti strutturali (o da tutti se assenti).
+        RoomBounds calcolati con margini realistici.
     """
     structural = [obj for obj in objects if not obj.is_movable]
 
@@ -61,6 +67,40 @@ def extract_room_bounds_from_objects(
         )
         return RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
 
+    # Strategia 1: cerca un'unica mesh-stanza grande (es. structural_room).
+    main_room: Optional[SceneObject] = None
+    for obj in structural:
+        # Volume dell'oggetto
+        vol = (
+            obj.transform.dimensions[0]
+            * obj.transform.dimensions[1]
+            * obj.transform.dimensions[2]
+        )
+        # Soglia minima: oggetto > 5x5x2 metri = 50 m^3
+        if vol > 50.0 and "room" in obj.name.lower():
+            main_room = obj
+            break
+
+    if main_room is not None:
+        logger.info(
+            "Stanza identificata da oggetto unico: '%s' (dim: %.2fx%.2fx%.2f)",
+            main_room.name,
+            main_room.transform.dimensions[0],
+            main_room.transform.dimensions[1],
+            main_room.transform.dimensions[2],
+        )
+        loc = main_room.transform.location
+        dim = main_room.transform.dimensions
+        return RoomBounds(
+            x_min=loc[0] - dim[0] / 2.0,
+            x_max=loc[0] + dim[0] / 2.0,
+            y_min=loc[1] - dim[1] / 2.0,
+            y_max=loc[1] + dim[1] / 2.0,
+            z_floor=0.0,
+            z_ceiling=2.5,
+        )
+
+    # Strategia 2: combina AABB di tutti gli oggetti strutturali (muri separati).
     all_x_min = [
         obj.transform.location[0] - obj.transform.dimensions[0] / 2.0
         for obj in structural
@@ -77,21 +117,14 @@ def extract_room_bounds_from_objects(
         obj.transform.location[1] + obj.transform.dimensions[1] / 2.0
         for obj in structural
     ]
-    all_z = [obj.transform.location[2] for obj in structural]
-
-    z_with_dims = [
-        obj.transform.location[2] + obj.transform.dimensions[2]
-        for obj in structural
-        if obj.transform.dimensions[2] > 0.1
-    ]
 
     return RoomBounds(
         x_min=min(all_x_min),
         x_max=max(all_x_max),
         y_min=min(all_y_min),
         y_max=max(all_y_max),
-        z_floor=min(all_z),
-        z_ceiling=max(z_with_dims) if z_with_dims else 3.0,
+        z_floor=0.0,
+        z_ceiling=2.5,
     )
 
 

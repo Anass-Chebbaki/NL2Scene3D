@@ -163,7 +163,10 @@ def setup_isometric_camera(
         scene_z_min, scene_z_ceiling,
     )
 
-    camera_distance = max_dim * 1.8
+    # Usa la dimensione orizzontale (max tra width e depth) - non l'altezza Z.
+    # Questo evita che stanze "alte" (es. con tetti enormi) facciano allontanare troppo la camera.
+    horizontal_max = max(scene_x_max - scene_x_min, scene_y_max - scene_y_min)
+    camera_distance = horizontal_max * config.isometric_distance_multiplier
     elevation_rad = math.radians(config.isometric_elevation)
     azimuth_rad = math.radians(config.isometric_azimuth)
 
