@@ -162,12 +162,12 @@ class RenderConfig:
     final_width: int
     final_height: int
     final_samples: int
-    isometric_elevation: float = 45.0
-    isometric_azimuth: float = 45.0
-    isometric_focal_length: float = 35.0
-    topdown_height_multiplier: float = 3.0
-    isometric_distance_multiplier: float = 1.3
-    topdown_ortho_scale_padding: float = 1.10
+    isometric_elevation: float = 30.0
+    isometric_azimuth: float = 275.0
+    isometric_focal_length: float = 50.0
+    topdown_height_multiplier: float = 2.0
+    isometric_distance_multiplier: float = 1.7
+    topdown_ortho_scale_padding: float = 1.05
     pipeline_camera_prefix: str = "NL2Scene3D_Camera"
 
     @classmethod
@@ -206,22 +206,22 @@ class RenderConfig:
                 os.environ.get("RENDER_FINAL_SAMPLES", str(final_toml.get("samples", 256)))
             ),
             isometric_elevation=float(
-                camera_toml.get("isometric_elevation_degrees", 45.0)
+                camera_toml.get("isometric_elevation_degrees", 30.0)
             ),
             isometric_azimuth=float(
-                camera_toml.get("isometric_azimuth_degrees", 45.0)
+                camera_toml.get("isometric_azimuth_degrees", 275.0)
             ),
             isometric_focal_length=float(
-                camera_toml.get("isometric_focal_length_mm", 35.0)
+                camera_toml.get("isometric_focal_length_mm", 50.0)
             ),
             isometric_distance_multiplier=float(
-                camera_toml.get("isometric_distance_multiplier", 1.3)
+                camera_toml.get("isometric_distance_multiplier", 1.7)
             ),
             topdown_height_multiplier=float(
-                camera_toml.get("topdown_height_multiplier", 3.0)
+                camera_toml.get("topdown_height_multiplier", 2.0)
             ),
             topdown_ortho_scale_padding=float(
-                camera_toml.get("topdown_ortho_scale_padding", 1.10)
+                camera_toml.get("topdown_ortho_scale_padding", 1.05)
             ),
             pipeline_camera_prefix=camera_toml.get(
                 "pipeline_camera_prefix", "NL2Scene3D_Camera"
@@ -264,6 +264,7 @@ class PipelineConfig:
     min_object_dimension: float = 0.05
     wall_margin: float = 0.10
     max_overlap_ratio: float = 0.50
+    jitter_ratio: float = 0.80
     max_placement_attempts: int = 10
     min_quality_score: int = 7
     max_corrections: int = 5
@@ -324,6 +325,7 @@ class PipelineConfig:
             ),
             wall_margin=float(pipeline_toml.get("wall_margin_meters", 0.10)),
             max_overlap_ratio=float(pipeline_toml.get("max_overlap_ratio", 0.50)),
+            jitter_ratio=float(randomizer_toml.get("jitter_ratio", 0.80)),
             max_placement_attempts=int(
                 pipeline_toml.get("max_placement_attempts", 10)
             ),
@@ -441,4 +443,5 @@ def reset_config() -> None:
     Non deve essere chiamata nel codice di produzione.
     """
     global _config_instance  # noqa: PLW0603
-    _config_instance = None
+    with _config_lock:
+        _config_instance = None

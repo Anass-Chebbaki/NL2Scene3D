@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -67,19 +68,25 @@ def extract_room_bounds_from_objects(
         )
         return RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
 
-    # Strategia 1: cerca un'unica mesh-stanza grande (es. structural_room).
+    # Calcolo z_ceiling dinamico
+    ceiling_objects = [obj for obj in structural if any(kw in obj.name.lower() for kw in ("ceiling", "room", "roof"))]
+    if ceiling_objects:
+        z_ceiling = max(obj.transform.location[2] + obj.transform.dimensions[2] / 2.0 for obj in ceiling_objects)
+    else:
+        max_struct_z = max((obj.transform.location[2] + obj.transform.dimensions[2] / 2.0 for obj in structural), default=2.5)
+        z_ceiling = max_struct_z if max_struct_z > 1.0 else 2.5
+
+    # Strategia 1: cerca un'unica mesh-stanza predominante per volume
     main_room: Optional[SceneObject] = None
-    for obj in structural:
-        # Volume dell'oggetto
-        vol = (
-            obj.transform.dimensions[0]
-            * obj.transform.dimensions[1]
-            * obj.transform.dimensions[2]
-        )
-        # Soglia minima: oggetto > 5x5x2 metri = 50 m^3
-        if vol > 50.0 and "room" in obj.name.lower():
-            main_room = obj
-            break
+    structural_vols = [
+        (obj, obj.transform.dimensions[0] * obj.transform.dimensions[1] * obj.transform.dimensions[2])
+        for obj in structural
+    ]
+    if structural_vols:
+        largest_obj, max_vol = max(structural_vols, key=lambda x: x[1])
+        total_vol = sum(v for _, v in structural_vols)
+        if total_vol > 0 and max_vol > 0.5 * total_vol and max_vol > 1.0:
+            main_room = largest_obj
 
     if main_room is not None:
         logger.info(
@@ -97,7 +104,7 @@ def extract_room_bounds_from_objects(
             y_min=loc[1] - dim[1] / 2.0,
             y_max=loc[1] + dim[1] / 2.0,
             z_floor=0.0,
-            z_ceiling=2.5,
+            z_ceiling=z_ceiling,
         )
 
     # Strategia 2: combina AABB di tutti gli oggetti strutturali (muri separati).
@@ -124,7 +131,7 @@ def extract_room_bounds_from_objects(
         y_min=min(all_y_min),
         y_max=max(all_y_max),
         z_floor=0.0,
-        z_ceiling=2.5,
+        z_ceiling=z_ceiling,
     )
 
 
@@ -173,6 +180,10 @@ class SceneLoader:
         """
         name_lower = name.lower()
 
+        def has_keyword(kws: tuple[str, ...] | list[str], text: str) -> bool:
+            pattern = r"(?:^|[_\W])(" + "|".join(re.escape(kw) for kw in kws) + r")(?=[_\W]|$)"
+            return re.search(pattern, text) is not None
+
         if object_type in self.config.non_mesh_types:
             return "technical", False
 
@@ -180,28 +191,28 @@ class SceneLoader:
         if max_dim < self.config.min_object_dimension:
             return "decoration_small", False
 
-        if any(kw in name_lower for kw in ("lamp", "lampada", "light")):
-            if any(kw in name_lower for kw in self.config.ceiling_light_patterns):
+        # Structural priority
+        if has_keyword(self.config.structural_patterns, name_lower):
+            return STRUCTURAL_CATEGORY, False
+
+        if has_keyword(("lamp", "lampada", "light"), name_lower):
+            if has_keyword(self.config.ceiling_light_patterns, name_lower):
                 return "light_ceiling", False
             return "light_floor", True
 
-        for pattern in self.config.structural_patterns:
-            if pattern in name_lower:
-                return STRUCTURAL_CATEGORY, False
-
-        if any(kw in name_lower for kw in ("sofa", "couch", "divano")):
+        if has_keyword(("sofa", "couch", "divano"), name_lower):
             return "seating_large", True
-        if any(kw in name_lower for kw in ("chair", "sedia", "stool", "sgabello")):
+        if has_keyword(("chair", "sedia", "stool", "sgabello"), name_lower):
             return "seating_small", True
-        if any(kw in name_lower for kw in ("table", "tavolo", "desk", "scrivania")):
+        if has_keyword(("table", "tavolo", "desk", "scrivania"), name_lower):
             return "table", True
-        if any(kw in name_lower for kw in ("shelf", "scaffale", "bookcase", "libreria")):
+        if has_keyword(("shelf", "scaffale", "bookcase", "libreria"), name_lower):
             return "storage", True
-        if any(kw in name_lower for kw in ("bed", "letto", "mattress", "materasso")):
+        if has_keyword(("bed", "letto", "mattress", "materasso"), name_lower):
             return "bed", True
-        if any(kw in name_lower for kw in ("rug", "tappeto", "carpet")):
+        if has_keyword(("rug", "tappeto", "carpet"), name_lower):
             return "rug", True
-        if any(kw in name_lower for kw in ("plant", "pianta", "vase", "vaso")):
+        if has_keyword(("plant", "pianta", "vase", "vaso"), name_lower):
             return "decoration", True
 
         return "furniture", True

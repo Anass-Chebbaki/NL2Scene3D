@@ -22,8 +22,7 @@ from nl2scene3d.models import ObjectTransform, RoomBounds, SceneObject, SceneSta
 
 logger = logging.getLogger(__name__)
 
-# Correzioni con spostamento inferiore a questa soglia (in metri) vengono ignorate.
-MIN_MOVEMENT_THRESHOLD: float = 0.01
+# (Costante MIN_MOVEMENT_THRESHOLD rimossa poiche' non utilizzata)
 
 
 def _load_prompt_template(prompt_path: Path) -> str:
@@ -140,12 +139,18 @@ def _validate_and_sanitize_llm_output(
         llm_obj_data = llm_objects_by_name.get(original_obj.name)
 
         if llm_obj_data is None:
-            logger.warning(
-                "Oggetto '%s' assente dalla risposta LLM. Mantenuta posizione originale.",
-                original_obj.name,
-            )
+            if original_obj.category == "structural":
+                logger.debug(
+                    "Oggetto strutturale '%s' assente dalla risposta LLM (comportamento atteso).",
+                    original_obj.name,
+                )
+            else:
+                logger.warning(
+                    "Oggetto movibile '%s' assente dalla risposta LLM. Mantenuta posizione originale.",
+                    original_obj.name,
+                )
+                missing_count += 1
             corrected_objects.append(copy.deepcopy(original_obj))
-            missing_count += 1
             continue
 
         if not original_obj.is_movable:

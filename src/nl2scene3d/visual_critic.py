@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from nl2scene3d.gemini_client import GeminiClient, GeminiParsingError
-from nl2scene3d.models import LLMCorrection, ObjectTransform, RoomBounds, SceneState
+from nl2scene3d.models import LLMCorrection, ObjectTransform, RoomBounds, SceneObject, SceneState
 from nl2scene3d.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,11 @@ def _apply_corrections_to_state(
     Returns:
         Nuovo SceneState con le correzioni applicate.
     """
-    objects_by_name: dict[str, "SceneObject"] = {  # type: ignore[name-defined]
+    # Nota: In Python 3.7+, i dict mantengono l'ordine di inserimento.
+    # Questo preserva l'ordine originale degli oggetti in state.objects.
+    # Gli oggetti non targettati da alcuna correzione rimangono nel dict
+    # e verranno regolarmente estratti alla fine come .values().
+    objects_by_name: dict[str, SceneObject] = {
         obj.name: obj.copy() for obj in state.objects
     }
 
@@ -337,22 +341,13 @@ class VisualCritic:
                 score,
                 self.min_quality_score,
             )
-
-            refined_state = _apply_corrections_to_state(
-                reordered_state,
-                corrections,
-                self.max_corrections,
-                reordered_state.room_bounds,
+        else:
+            logger.info(
+                "Score %d < soglia %d. Correzioni applicate per recuperare qualita' insufficiente.",
+                score,
+                self.min_quality_score,
             )
-            refined_state.metadata["quality_score"] = score
-            refined_state.metadata["quality_assessment"] = quality_assessment
-            return refined_state
 
-        logger.info(
-            "Score %d < soglia %d. Correzioni applicate per recuperare qualita' insufficiente.",
-            score,
-            self.min_quality_score,
-        )
         refined_state = _apply_corrections_to_state(
             reordered_state,
             corrections,

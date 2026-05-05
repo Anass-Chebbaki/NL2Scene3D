@@ -124,6 +124,12 @@ The refined state is saved to `scene_refined.json`.
 
 A final render of the refined scene is produced at presentation quality (1280x720, 256 Cycles samples). Both top-down and isometric views are generated.
 
+### Step 7 — Metrics and Final Save
+
+The pipeline concludes by performing a quantitative evaluation:
+- **Metrics Calculation**: Compares the final state against the original and randomized baselines using `compute_pipeline_metrics`. The results (position delta, rotation delta, and improvement score) are saved to `metrics.json`.
+- **Final .blend Preservation**: The final state of the Blender scene is saved as a new `.blend` file (e.g., `living_room_final.blend`) in the output directory, allowing for further manual adjustment or secondary analysis.
+
 ---
 
 ## Project Structure
@@ -400,6 +406,8 @@ For each processed scene, the following files are written to the output director
 | `render_reordered_iso.png` | Isometric render after LLM text reorganization (used as vision input) |
 | `render_final_top.png` | Final high-quality top-down render |
 | `render_final_iso.png` | Final high-quality isometric render |
+| `metrics.json` | JSON dictionary with quantitative evaluation metrics for all steps |
+| `*_final.blend` | The final Blender scene file with the refined layout |
 
 For batch runs, an additional file is written to the root output directory:
 
@@ -415,7 +423,7 @@ When metrics are enabled (`[metrics] enabled = true` in `settings.toml`), the pi
 
 The **mean position delta** measures, in meters, the average 2D Euclidean distance between each movable object's final position and its original position. A lower value indicates a layout closer to the original arrangement.
 
-The **mean rotation delta** measures, in radians, the average angular difference on the Z axis between the final and original rotations, normalized to the range [0, pi].
+The **mean rotation delta** measures, in radians, the average angular difference on the Z axis between the final and original rotations, normalized to the range [0, pi]. *Limitation note: this metric is ambiguous for objects with rotational symmetry (e.g., a rectangular table rotated 180 degrees visually identical but yields a maximal error of pi).*
 
 The **improvement score** normalizes the position delta against the randomized baseline. A value of 1.0 indicates that the pipeline has exactly recovered the original layout. A value of 0.0 indicates that the reordered layout is no closer to the original than the randomized one. Negative values are clamped to 0.0.
 
@@ -427,7 +435,7 @@ These metrics are logged at the INFO level at the end of each pipeline run and, 
 
 ### Run the unit test suite
 
-The tests do not require Blender. They use mock implementations of `bpy` to test all Blender-dependent modules in isolation.
+The tests do not require Blender. They use mock implementations of `bpy` to test all Blender-dependent modules in isolation. Mocking is achieved by substituting the `bpy` module at runtime during testing. This allows for verifying the scene classification and object manipulation logic by simulating the `bpy.context.scene.objects` collection and the `ObjectTransform` properties (location, rotation, dimensions) without requiring a full Blender installation or headless execution.
 
 ```bash
 pytest tests/ -v --cov=src/nl2scene3d --cov-report=term-missing

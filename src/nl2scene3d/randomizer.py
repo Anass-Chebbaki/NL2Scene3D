@@ -77,7 +77,11 @@ def _compute_overlap_ratio(
     Calcola il rapporto di sovrapposizione tra due AABB 2D.
 
     Il rapporto e' calcolato come area di intersezione divisa per l'area
-    minima tra i due bounding box.
+    minima tra i due bounding box. 
+    Nota: L'asimmetria del calcolo (uso del min) è intenzionale per proteggere 
+    gli oggetti piccoli. Se un oggetto piccolo si sovrappone a uno grande, 
+    l'area minima sarà quella dell'oggetto piccolo, restituendo un rapporto alto, 
+    segnalando correttamente la sovrapposizione.
 
     Args:
         aabb_a: AABB del primo oggetto (x_min, x_max, y_min, y_max).
@@ -279,9 +283,14 @@ class SceneRandomizer:
         randomized_count = 0
         failed_count = 0
 
-        for obj in state.movable_objects:
+        movable_objects = list(state.movable_objects)
+        self._rng.shuffle(movable_objects)
+
+        for obj in movable_objects:
             new_obj = obj.copy()
             placed = False
+            best_transform = None
+            min_max_overlap = float('inf')
 
             for attempt in range(self.config.max_placement_attempts):
                 candidate_location = self._randomize_location(
@@ -290,15 +299,34 @@ class SceneRandomizer:
                 candidate_rotation = self._randomize_rotation(
                     obj.transform.rotation_euler
                 )
-                new_obj.transform = ObjectTransform(
+                candidate_transform = ObjectTransform(
                     location=candidate_location,
                     rotation_euler=candidate_rotation,
                     dimensions=obj.transform.dimensions,
                 )
+                new_obj.transform = candidate_transform
 
-                if not self.config.check_overlaps or not _has_excessive_overlap(
-                    new_obj, placed_objects, self.config.max_overlap_ratio
-                ):
+                if not self.config.check_overlaps:
+                    placed = True
+                    break
+
+                candidate_aabb = _compute_aabb(new_obj)
+                current_max_overlap = 0.0
+                for other in placed_objects:
+                    if other.name == new_obj.name:
+                        continue
+                    other_aabb = _compute_aabb(other)
+                    ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
+                    if ratio > current_max_overlap:
+                        current_max_overlap = ratio
+                        if current_max_overlap > self.config.max_overlap_ratio:
+                            break
+
+                if current_max_overlap < min_max_overlap:
+                    min_max_overlap = current_max_overlap
+                    best_transform = candidate_transform
+
+                if current_max_overlap <= self.config.max_overlap_ratio:
                     placed = True
                     break
 
@@ -309,11 +337,14 @@ class SceneRandomizer:
                 )
 
             if not placed:
+                if best_transform is not None:
+                    new_obj.transform = best_transform
                 logger.warning(
                     "Oggetto '%s': posizione senza sovrapposizioni non trovata "
-                    "dopo %d tentativi. Viene usata l'ultima posizione calcolata.",
+                    "dopo %d tentativi. Viene usata la posizione migliore (overlap max: %.2f).",
                     obj.name,
                     self.config.max_placement_attempts,
+                    min_max_overlap,
                 )
                 failed_count += 1
 

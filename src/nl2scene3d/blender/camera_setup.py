@@ -157,7 +157,7 @@ def setup_isometric_camera(
         ) from exc
 
     scene = bpy.context.scene
-    center, max_dim = _get_scene_center_and_bounds(
+    center, _ = _get_scene_center_and_bounds(
         scene_x_min, scene_x_max,
         scene_y_min, scene_y_max,
         scene_z_min, scene_z_ceiling,
@@ -220,13 +220,19 @@ def _get_or_create_pipeline_camera(
 
     camera_name = f"{prefix}_{suffix}"
 
-    if camera_name in bpy.data.objects:
-        camera_obj = bpy.data.objects[camera_name]
-        logger.debug("Camera esistente recuperata: %s.", camera_name)
+    camera_obj = scene.objects.get(camera_name)
+    if camera_obj is not None:
+        logger.debug("Camera esistente recuperata dalla scena: %s.", camera_name)
     else:
-        camera_data = bpy.data.cameras.new(name=camera_name)
-        camera_obj = bpy.data.objects.new(camera_name, camera_data)
-        scene.collection.objects.link(camera_obj)
-        logger.debug("Nuova camera creata: %s.", camera_name)
+        # Se esiste nei dati globali ma non nella scena corrente, colleghiamola
+        if camera_name in bpy.data.objects:
+            camera_obj = bpy.data.objects[camera_name]
+            scene.collection.objects.link(camera_obj)
+            logger.debug("Camera globale collegata alla scena: %s.", camera_name)
+        else:
+            camera_data = bpy.data.cameras.new(name=camera_name)
+            camera_obj = bpy.data.objects.new(camera_name, camera_data)
+            scene.collection.objects.link(camera_obj)
+            logger.debug("Nuova camera creata: %s.", camera_name)
 
     return camera_obj

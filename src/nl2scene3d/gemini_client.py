@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import google.generativeai as genai
-from google.api_core.exceptions import GoogleAPIError, ResourceExhausted
+from google.api_core.exceptions import GoogleAPIError, ResourceExhausted, InvalidArgument
 
 from nl2scene3d.config import GeminiConfig
 
@@ -71,6 +71,16 @@ class GeminiClient:
             config.model_primary,
             config.model_fallback,
         )
+
+        try:
+            model_info = genai.get_model(f"models/{config.model_primary}")
+            logger.info("Modello primario validato con successo: %s", model_info.name)
+        except Exception as exc:
+            logger.warning(
+                "Impossibile validare il modello primario '%s'. Potrebbe non esistere o non essere accessibile. Errore: %s",
+                config.model_primary,
+                exc,
+            )
 
     def _extract_json_from_response(self, text: str) -> dict | list:
         """
@@ -176,6 +186,10 @@ class GeminiClient:
                         "Rate limit persistente dopo tutti i tentativi."
                     ) from exc
 
+            except InvalidArgument as exc:
+                logger.error("Errore API permanente (InvalidArgument): %s", exc)
+                raise GeminiClientError(f"Errore API permanente: {exc}") from exc
+
             except GoogleAPIError as exc:
                 last_exception = exc
                 logger.error(
@@ -219,6 +233,8 @@ class GeminiClient:
         model_name = (
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
+        # Nota: L'istanziazione di un nuovo modello ad ogni chiamata e' necessaria per 
+        # poter passare la system_instruction in Gemini SDK. Questo costo e' accettabile.
         model = genai.GenerativeModel(
             model_name,
             system_instruction=system_prompt,
@@ -247,6 +263,27 @@ class GeminiClient:
                 return self.call_text(system_prompt, user_prompt, use_fallback=True)
             raise
 
+    def _call_vision_internal(self, contents: list, use_fallback: bool) -> dict | list:
+        model = self._fallback_model if use_fallback else self._primary_model
+        try:
+            raw_response = self._call_with_retry(model, contents)
+            logger.debug(
+                "Risposta vision grezza ricevuta: %s", raw_response[:200]
+            )
+            parsed = self._extract_json_from_response(raw_response)
+            logger.info("JSON parsato con successo dalla risposta vision.")
+            return parsed
+        except GeminiRateLimitError:
+            if not use_fallback:
+                logger.warning(
+                    "Rate limit sul modello primario. Tentativo con modello fallback."
+                )
+                return self._call_vision_internal(contents, use_fallback=True)
+            raise
+        except GeminiParsingError as exc:
+            logger.error("Parsing fallito per la risposta vision (fallback=%s): %s", use_fallback, exc)
+            raise
+
     def call_vision(
         self,
         image_path: Path,
@@ -258,7 +295,7 @@ class GeminiClient:
 
         Args:
             image_path: Percorso all'immagine del render da analizzare.
-            user_prompt: Prompt utente che descrive l'azione di critica.
+            user_prompt: Prompt utente che descrive l'action di critica.
             use_fallback: Se True, usa il modello fallback invece del primario.
 
         Returns:
@@ -274,7 +311,6 @@ class GeminiClient:
                 f"Immagine per la chiamata vision non trovata: {image_path}"
             )
 
-        model = self._fallback_model if use_fallback else self._primary_model
         model_name = (
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
@@ -289,27 +325,7 @@ class GeminiClient:
         try:
             uploaded_file = genai.upload_file(str(image_path))
             contents = [uploaded_file, user_prompt]
-
-            try:
-                raw_response = self._call_with_retry(model, contents)
-                logger.debug(
-                    "Risposta vision grezza ricevuta: %s", raw_response[:200]
-                )
-                parsed = self._extract_json_from_response(raw_response)
-                logger.info("JSON parsato con successo dalla risposta vision.")
-                return parsed
-            except GeminiRateLimitError:
-                if not use_fallback:
-                    logger.warning(
-                        "Rate limit sul modello primario. Tentativo con modello fallback."
-                    )
-                    # Il file e' gia' caricato; qui facciamo la chiamata diretta
-                    # con il modello fallback invece di ricorrere a call_vision
-                    # per evitare un doppio upload.
-                    raw_response = self._call_with_retry(self._fallback_model, contents)
-                    parsed = self._extract_json_from_response(raw_response)
-                    return parsed
-                raise
+            return self._call_vision_internal(contents, use_fallback)
 
         finally:
             if uploaded_file is not None:
