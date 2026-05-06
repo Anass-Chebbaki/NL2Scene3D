@@ -15,7 +15,6 @@ import pytest
 
 from nl2scene3d.models import LLMCorrection, ObjectTransform, RoomBounds, SceneObject, SceneState
 from nl2scene3d.visual_critic import (
-    MAX_CORRECTIONS_TO_APPLY,
     _apply_corrections_to_state,
     _parse_corrections_from_llm,
 )
@@ -140,7 +139,7 @@ class TestApplyCorrectionsToState:
                 reason="Move sofa",
             )
         ]
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         sofa = result.get_object_by_name("sofa")
         assert sofa is not None
         assert sofa.transform.location[0] == pytest.approx(2.0)
@@ -157,7 +156,7 @@ class TestApplyCorrectionsToState:
                 reason="Rotate chair",
             )
         ]
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         chair = result.get_object_by_name("chair")
         assert chair is not None
         assert chair.transform.rotation_euler[2] == pytest.approx(math.pi / 2)
@@ -176,7 +175,7 @@ class TestApplyCorrectionsToState:
                 reason="This should be ignored",
             )
         ]
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         wall = result.get_object_by_name("wall_n")
         assert wall.transform.location == pytest.approx(original_wall_loc)
 
@@ -191,7 +190,7 @@ class TestApplyCorrectionsToState:
                 reason="Should not crash",
             )
         ]
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         assert result.metadata["skipped_corrections"] == 1
 
     def test_z_coordinate_preserved_in_correction(self) -> None:
@@ -207,7 +206,7 @@ class TestApplyCorrectionsToState:
                 reason="Move sofa",
             )
         ]
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         sofa = result.get_object_by_name("sofa")
         assert sofa.transform.location[2] == pytest.approx(original_z)
 
@@ -222,15 +221,59 @@ class TestApplyCorrectionsToState:
                 new_location=[float(i) * 0.1, 0.0, 0.0],
                 reason=f"Correction {i}",
             )
-            for i in range(MAX_CORRECTIONS_TO_APPLY + 10)
+            for i in range(15)
         ]
         # Non deve sollevare eccezioni
-        result = _apply_corrections_to_state(state, corrections, state.room_bounds)
+        result = _apply_corrections_to_state(state, corrections, 5, state.room_bounds)
         # Il contatore delle applicazioni non deve superare il limite
-        assert result.metadata["applied_corrections"] <= MAX_CORRECTIONS_TO_APPLY
+        assert result.metadata["applied_corrections"] <= 5
 
     def test_pipeline_step_set_to_refined(self) -> None:
         """Lo step della pipeline deve essere impostato a 'refined'."""
         state = _make_test_state()
-        result = _apply_corrections_to_state(state, [], state.room_bounds)
+        result = _apply_corrections_to_state(state, [], 5, state.room_bounds)
         assert result.pipeline_step == "refined"
+
+class TestVisualCritic:
+    """Test per la classe VisualCritic."""
+
+    @pytest.fixture
+    def critic(self, tmp_path: Path) -> VisualCritic:
+        from nl2scene3d.visual_critic import VisualCritic
+        client = MagicMock()
+        return VisualCritic(client, tmp_path)
+
+    def test_critique_success(self, critic, tmp_path) -> None:
+        """Verifica il successo di una critica visiva."""
+        state = _make_test_state()
+        render_path = tmp_path / "test.png"
+        render_path.touch()
+        
+        # Setup prompt template
+        (tmp_path / "critic_user.txt").write_text("Prompt {x_min}")
+        
+        critic.client.call_vision.return_value = {
+            "score": 8,
+            "quality_assessment": "Good",
+            "corrections": []
+        }
+        
+        result = critic.critique_and_refine(state, render_path)
+        assert result.pipeline_step == "refined"
+        assert result.metadata["quality_score"] == 8
+
+    def test_critique_parsing_error_fallback(self, critic, tmp_path) -> None:
+        """Verifica il fallback in caso di errore di parsing vision."""
+        state = _make_test_state()
+        render_path = tmp_path / "test.png"
+        render_path.touch()
+        (tmp_path / "critic_user.txt").write_text("Prompt")
+        
+        from nl2scene3d.gemini_client import GeminiParsingError
+        critic.client.call_vision.side_effect = GeminiParsingError("Vision fail")
+        
+        result = critic.critique_and_refine(state, render_path)
+        assert result.pipeline_step == "refined"
+        assert "Vision fail" in result.metadata["error"]
+
+from nl2scene3d.visual_critic import VisualCritic

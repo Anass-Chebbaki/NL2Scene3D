@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "NL2Scene3D Team" }]
 dependencies = [
-    "google-generativeai>=0.8.0",
+    "google-genai>=1.0.0",
     "google-api-core>=2.15.0",
     "python-dotenv>=1.0.0",
     "tomli>=2.0.0; python_version < '3.11'",

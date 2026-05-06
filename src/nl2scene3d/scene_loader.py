@@ -191,14 +191,14 @@ class SceneLoader:
         if max_dim < self.config.min_object_dimension:
             return "decoration_small", False
 
-        # Structural priority
-        if has_keyword(self.config.structural_patterns, name_lower):
-            return STRUCTURAL_CATEGORY, False
-
         if has_keyword(("lamp", "lampada", "light"), name_lower):
             if has_keyword(self.config.ceiling_light_patterns, name_lower):
                 return "light_ceiling", False
             return "light_floor", True
+
+        # Structural priority
+        if has_keyword(self.config.structural_patterns, name_lower):
+            return STRUCTURAL_CATEGORY, False
 
         if has_keyword(("sofa", "couch", "divano"), name_lower):
             return "seating_large", True

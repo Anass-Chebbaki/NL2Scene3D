@@ -18,8 +18,6 @@ from nl2scene3d.models import (
     RoomBounds,
     SceneObject,
     SceneState,
-    degrees_to_radians,
-    radians_to_degrees,
 )
 
 class TestObjectTransform:
@@ -213,13 +211,13 @@ class TestConversions:
 
     def test_degrees_to_radians(self) -> None:
         """Verifica la conversione gradi -> radianti."""
-        assert degrees_to_radians(0.0) == pytest.approx(0.0)
-        assert degrees_to_radians(90.0) == pytest.approx(math.pi / 2)
-        assert degrees_to_radians(180.0) == pytest.approx(math.pi)
-        assert degrees_to_radians(360.0) == pytest.approx(2 * math.pi)
+        assert math.radians(0.0) == pytest.approx(0.0)
+        assert math.radians(90.0) == pytest.approx(math.pi / 2)
+        assert math.radians(180.0) == pytest.approx(math.pi)
+        assert math.radians(360.0) == pytest.approx(2 * math.pi)
 
     def test_radians_to_degrees(self) -> None:
         """Verifica la conversione radianti -> gradi."""
-        assert radians_to_degrees(0.0) == pytest.approx(0.0)
-        assert radians_to_degrees(math.pi / 2) == pytest.approx(90.0)
-        assert radians_to_degrees(math.pi) == pytest.approx(180.0)
+        assert math.degrees(0.0) == pytest.approx(0.0)
+        assert math.degrees(math.pi / 2) == pytest.approx(90.0)
+        assert math.degrees(math.pi) == pytest.approx(180.0)

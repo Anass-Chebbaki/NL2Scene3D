@@ -18,8 +18,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import google.generativeai as genai
-from google.api_core.exceptions import GoogleAPIError, ResourceExhausted, InvalidArgument
+from google import genai
+from google.genai import types
+from google.genai.errors import ClientError, ServerError
 
 from nl2scene3d.config import GeminiConfig
 
@@ -44,59 +45,27 @@ class GeminiClient:
 
     Implementa retry con backoff esponenziale e fallback automatico
     al modello secondario in caso di errori persistenti sul modello primario.
-
-    Attributes:
-        config: Configurazione Gemini (API key, modelli, limiti).
-        _primary_model: Istanza del modello primario.
-        _fallback_model: Istanza del modello fallback.
     """
 
     def __init__(self, config: GeminiConfig) -> None:
         """
-        Inizializza il client e configura i modelli.
+        Inizializza il client e configura la connessione.
 
         Args:
             config: Oggetto di configurazione Gemini.
         """
         self.config = config
-        genai.configure(api_key=config.api_key)
-        self._primary_model: genai.GenerativeModel = genai.GenerativeModel(
-            config.model_primary
-        )
-        self._fallback_model: genai.GenerativeModel = genai.GenerativeModel(
-            config.model_fallback
-        )
+        self._client = genai.Client(api_key=config.api_key)
         logger.info(
-            "GeminiClient inizializzato. Modello primario: %s, fallback: %s",
+            "GeminiClient inizializzato con successo. "
+            "Modello primario: %s, fallback: %s",
             config.model_primary,
             config.model_fallback,
         )
 
-        try:
-            model_info = genai.get_model(f"models/{config.model_primary}")
-            logger.info("Modello primario validato con successo: %s", model_info.name)
-        except Exception as exc:
-            logger.warning(
-                "Impossibile validare il modello primario '%s'. Potrebbe non esistere o non essere accessibile. Errore: %s",
-                config.model_primary,
-                exc,
-            )
-
     def _extract_json_from_response(self, text: str) -> dict | list:
         """
         Estrae e parsa il JSON dalla risposta testuale del modello.
-
-        Il modello include spesso testo aggiuntivo prima e dopo il JSON.
-        Vengono applicate tre strategie di estrazione in ordine di preferenza.
-
-        Args:
-            text: Testo grezzo della risposta del modello.
-
-        Returns:
-            Struttura dati Python parsata dal JSON.
-
-        Raises:
-            GeminiParsingError: Se nessuna strategia di parsing ha successo.
         """
         # Strategia 1: parse diretto della risposta pulita.
         try:
@@ -131,83 +100,64 @@ class GeminiClient:
 
     def _call_with_retry(
         self,
-        model: genai.GenerativeModel,
-        contents: list,
-        generation_config: Optional[dict] = None,
+        model_name: str,
+        contents: Any,
+        system_prompt: Optional[str] = None,
+        config_override: Optional[dict] = None,
     ) -> str:
         """
         Esegue una chiamata al modello con retry e backoff esponenziale.
-
-        Attende 2^(attempt+1) secondi tra un tentativo e il successivo
-        in caso di rate limit, e 2^attempt secondi per altri errori API.
-
-        Args:
-            model: Modello Gemini da usare.
-            contents: Contenuti da inviare al modello.
-            generation_config: Configurazione opzionale della generazione.
-
-        Returns:
-            Testo della risposta del modello.
-
-        Raises:
-            GeminiRateLimitError: Se il rate limit e' persistente su tutti i tentativi.
-            GeminiClientError: Per altri errori API non recuperabili.
         """
-        gen_config: dict[str, Any] = generation_config or {
-            "temperature": self.config.temperature,
-            "max_output_tokens": self.config.max_output_tokens,
-        }
+        gen_config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=self.config.temperature,
+            max_output_tokens=self.config.max_output_tokens,
+            **(config_override or {}),
+        )
 
         last_exception: Exception = GeminiClientError("Nessun tentativo eseguito.")
 
         for attempt in range(self.config.max_retries):
             try:
-                response = model.generate_content(
-                    contents,
-                    generation_config=gen_config,
-                    request_options={"timeout": self.config.timeout_seconds},
+                response = self._client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=gen_config,
                 )
+                if not response.text:
+                    raise GeminiParsingError("Risposta del modello vuota.")
                 return response.text
 
-            except ResourceExhausted as exc:
-                last_exception = exc
-                wait_seconds = 2 ** (attempt + 1)
-                logger.warning(
-                    "Rate limit raggiunto (tentativo %d/%d). "
-                    "Attesa di %d secondi prima di riprovare.",
-                    attempt + 1,
-                    self.config.max_retries,
-                    wait_seconds,
-                )
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(wait_seconds)
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                if "429" in exc_str or "quota" in exc_str or "exhausted" in exc_str:
+                    last_exception = exc
+                    wait_seconds = 2 ** (attempt + 1)
+                    logger.warning(
+                        "Rate limit raggiunto (tentativo %d/%d). "
+                        "Attesa di %d secondi.",
+                        attempt + 1,
+                        self.config.max_retries,
+                        wait_seconds,
+                    )
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(wait_seconds)
+                    else:
+                        raise GeminiRateLimitError(
+                            "Rate limit persistente."
+                        ) from exc
+                elif "400" in exc_str or "invalid" in exc_str:
+                    logger.error("Errore API permanente: %s", exc)
+                    raise GeminiClientError(f"Errore API permanente: {exc}") from exc
                 else:
-                    raise GeminiRateLimitError(
-                        "Rate limit persistente dopo tutti i tentativi."
-                    ) from exc
+                    last_exception = exc
+                    logger.error("Errore API Gemini (tentativo %d/%d): %s", attempt + 1, self.config.max_retries, exc)
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        raise GeminiClientError(f"Errore API persistente: {exc}") from exc
 
-            except InvalidArgument as exc:
-                logger.error("Errore API permanente (InvalidArgument): %s", exc)
-                raise GeminiClientError(f"Errore API permanente: {exc}") from exc
-
-            except GoogleAPIError as exc:
-                last_exception = exc
-                logger.error(
-                    "Errore API Google (tentativo %d/%d): %s",
-                    attempt + 1,
-                    self.config.max_retries,
-                    exc,
-                )
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    raise GeminiClientError(
-                        f"Errore API persistente: {exc}"
-                    ) from exc
-
-        raise GeminiClientError(
-            f"Tutti i tentativi esauriti senza risposta. Ultimo errore: {last_exception}"
-        )
+        raise GeminiClientError(f"Tentativi esauriti. Ultimo errore: {last_exception}")
 
     def call_text(
         self,
@@ -217,71 +167,39 @@ class GeminiClient:
     ) -> dict | list:
         """
         Esegue una chiamata testuale al modello e restituisce il JSON parsato.
-
-        Args:
-            system_prompt: Prompt di sistema che contestualizza l'azione.
-            user_prompt: Prompt utente con i dati della scena.
-            use_fallback: Se True, usa il modello fallback invece del primario.
-
-        Returns:
-            Struttura JSON parsata dalla risposta del modello.
-
-        Raises:
-            GeminiClientError: In caso di errori API non recuperabili.
-            GeminiParsingError: Se il JSON nella risposta non e' valido.
         """
         model_name = (
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
-        # Nota: L'istanziazione di un nuovo modello ad ogni chiamata e' necessaria per 
-        # poter passare la system_instruction in Gemini SDK. Questo costo e' accettabile.
-        model = genai.GenerativeModel(
-            model_name,
-            system_instruction=system_prompt,
-        )
         logger.info(
-            "Chiamata testuale a Gemini (modello: %s). "
-            "Lunghezza system_prompt: %d caratteri, user_prompt: %d caratteri.",
+            "Chiamata testuale a Gemini (%s).",
             model_name,
-            len(system_prompt),
-            len(user_prompt),
         )
-        contents = [
-            {"role": "user", "parts": [user_prompt]},
-        ]
+        
         try:
-            raw_response = self._call_with_retry(model, contents)
-            logger.debug("Risposta grezza ricevuta: %s", raw_response[:200])
+            raw_response = self._call_with_retry(
+                model_name=model_name,
+                contents=user_prompt,
+                system_prompt=system_prompt,
+            )
             parsed = self._extract_json_from_response(raw_response)
-            logger.info("JSON parsato con successo dalla risposta testuale.")
             return parsed
         except GeminiRateLimitError:
             if not use_fallback:
-                logger.warning(
-                    "Rate limit sul modello primario. Tentativo con modello fallback."
-                )
+                logger.warning("Switching to fallback model due to rate limit.")
                 return self.call_text(system_prompt, user_prompt, use_fallback=True)
             raise
 
-    def _call_vision_internal(self, contents: list, use_fallback: bool) -> dict | list:
-        model = self._fallback_model if use_fallback else self._primary_model
+    def _call_vision_internal(self, model_name: str, contents: list, use_fallback: bool) -> dict | list:
         try:
-            raw_response = self._call_with_retry(model, contents)
-            logger.debug(
-                "Risposta vision grezza ricevuta: %s", raw_response[:200]
+            raw_response = self._call_with_retry(
+                model_name=model_name,
+                contents=contents,
             )
-            parsed = self._extract_json_from_response(raw_response)
-            logger.info("JSON parsato con successo dalla risposta vision.")
-            return parsed
+            return self._extract_json_from_response(raw_response)
         except GeminiRateLimitError:
             if not use_fallback:
-                logger.warning(
-                    "Rate limit sul modello primario. Tentativo con modello fallback."
-                )
-                return self._call_vision_internal(contents, use_fallback=True)
-            raise
-        except GeminiParsingError as exc:
-            logger.error("Parsing fallito per la risposta vision (fallback=%s): %s", use_fallback, exc)
+                return self._call_vision_internal(self.config.model_fallback, contents, use_fallback=True)
             raise
 
     def call_vision(
@@ -292,19 +210,6 @@ class GeminiClient:
     ) -> dict | list:
         """
         Esegue una chiamata vision al modello con un'immagine allegata.
-
-        Args:
-            image_path: Percorso all'immagine del render da analizzare.
-            user_prompt: Prompt utente che descrive l'action di critica.
-            use_fallback: Se True, usa il modello fallback invece del primario.
-
-        Returns:
-            Struttura JSON con le correzioni suggerite dal modello.
-
-        Raises:
-            FileNotFoundError: Se il file immagine non esiste.
-            GeminiClientError: In caso di errori API non recuperabili.
-            GeminiParsingError: Se il JSON nella risposta non e' valido.
         """
         if not image_path.exists():
             raise FileNotFoundError(
@@ -315,29 +220,13 @@ class GeminiClient:
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
 
-        logger.info(
-            "Chiamata vision a Gemini (modello: %s). Immagine: %s",
-            model_name,
-            image_path,
-        )
+        logger.info("Chiamata vision a Gemini (%s).", model_name)
 
-        uploaded_file = None
         try:
-            uploaded_file = genai.upload_file(str(image_path))
-            contents = [uploaded_file, user_prompt]
-            return self._call_vision_internal(contents, use_fallback)
-
-        finally:
-            if uploaded_file is not None:
-                try:
-                    genai.delete_file(uploaded_file.name)
-                    logger.debug(
-                        "File immagine '%s' eliminato dai server Gemini.",
-                        uploaded_file.name,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Impossibile eliminare il file immagine '%s': %s",
-                        uploaded_file.name,
-                        exc,
-                    )
+            import PIL.Image
+            img = PIL.Image.open(image_path)
+            contents = [img, user_prompt]
+            return self._call_vision_internal(model_name, contents, use_fallback)
+        except Exception as exc:
+            logger.error("Errore nella chiamata vision: %s", exc)
+            raise GeminiClientError(f"Errore vision: {exc}") from exc

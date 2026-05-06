@@ -204,13 +204,26 @@ class SceneRandomizer:
         y_hi = room_bounds.y_max - half_y - margin
 
         # Se l'oggetto e' piu' grande della stanza, fallback al centro.
+        if self.config.jitter_ratio > 0.0:
+            jitter_x = (room_bounds.x_max - room_bounds.x_min) * self.config.jitter_ratio
+            jitter_y = (room_bounds.y_max - room_bounds.y_min) * self.config.jitter_ratio
+            x_lo = max(x_lo, original_location[0] - jitter_x)
+            x_hi = min(x_hi, original_location[0] + jitter_x)
+            y_lo = max(y_lo, original_location[1] - jitter_y)
+            y_hi = min(y_hi, original_location[1] + jitter_y)
+        else:
+            # Se jitter_ratio e' 0.0, l'oggetto non deve muoversi affatto dalla sua posizione.
+            # Tuttavia, dobbiamo comunque rispettare i bounds (clamp).
+            x_lo = x_hi = max(room_bounds.x_min + half_x + margin, min(room_bounds.x_max - half_x - margin, original_location[0]))
+            y_lo = y_hi = max(room_bounds.y_min + half_y + margin, min(room_bounds.y_max - half_y - margin, original_location[1]))
+
         if x_lo >= x_hi:
-            new_x = (room_bounds.x_min + room_bounds.x_max) / 2.0
+            new_x = (x_lo + x_hi) / 2.0
         else:
             new_x = self._rng.uniform(x_lo, x_hi)
 
         if y_lo >= y_hi:
-            new_y = (room_bounds.y_min + room_bounds.y_max) / 2.0
+            new_y = (y_lo + y_hi) / 2.0
         else:
             new_y = self._rng.uniform(y_lo, y_hi)
 
@@ -292,6 +305,26 @@ class SceneRandomizer:
             best_transform = None
             min_max_overlap = float('inf')
 
+            # Se l'oggetto e' piu' grande della stanza, marchiamolo come non piazzabile
+            # idealmente, ma la pipeline deve continuare.
+            half_x = obj.transform.dimensions[0] / 2.0
+            half_y = obj.transform.dimensions[1] / 2.0
+            margin = self.config.wall_margin
+            
+            # Se non c'e' spazio fisico per l'oggetto nella stanza
+            if (room_bounds.x_max - room_bounds.x_min < obj.transform.dimensions[0] + 2 * margin or 
+                room_bounds.y_max - room_bounds.y_min < obj.transform.dimensions[1] + 2 * margin):
+                logger.warning("Oggetto '%s' troppo grande per la stanza. Fallback al centro.", obj.name)
+                # Forza il calcolo della posizione (che sara' il centro)
+                new_obj.transform.location = self._randomize_location(
+                    obj.transform.location, obj.transform.dimensions, room_bounds
+                )
+                new_objects.append(new_obj)
+                placed_objects.append(new_obj)
+                failed_count += 1
+                randomized_count += 1
+                continue
+
             for attempt in range(self.config.max_placement_attempts):
                 candidate_location = self._randomize_location(
                     obj.transform.location,obj.transform.dimensions, room_bounds
@@ -366,6 +399,6 @@ class SceneRandomizer:
             metadata={
                 "randomizer_seed": self.config.seed,
                 "randomized_count": randomized_count,
-                "overlap_failures": failed_count,
+                "failed_placements": failed_count,
             },
         )

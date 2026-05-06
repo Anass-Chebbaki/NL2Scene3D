@@ -408,6 +408,19 @@ class AppConfig:
             Istanza di AppConfig completamente inizializzata.
         """
         toml_data = _load_toml_config()
+        return cls.from_dict(toml_data)
+
+    @classmethod
+    def from_dict(cls, toml_data: dict[str, Any]) -> "AppConfig":
+        """
+        Costruisce la configurazione da un dizionario (es. caricato da TOML).
+
+        Args:
+            toml_data: Dizionario con i dati di configurazione.
+
+        Returns:
+            Istanza di AppConfig.
+        """
         return cls(
             gemini=GeminiConfig.from_config(toml_data),
             render=RenderConfig.from_config(toml_data),
