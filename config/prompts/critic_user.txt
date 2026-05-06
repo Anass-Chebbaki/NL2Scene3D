@@ -9,6 +9,10 @@ suboptimal placements. Focus on:
 4. Objects that are too close to walls or other objects
 5. Furniture groups that could be better arranged
 
+IMPORTANT OPTICAL ILLUSION WARNING:
+You are looking at an ISOMETRIC projection. This flattens depth and height.
+Objects mounted high on a wall (like shelves, AC units, wall lamps) might visually appear to be "resting on" or "clipping" objects that are actually far behind or below them. DO NOT suggest moving wall-mounted objects just because they visually overlap with furniture below them. Assume they are mounted correctly at their Z height.
+
 Return a JSON object with the following structure:
 {{
   "quality_assessment": "brief overall assessment of the current layout",

@@ -48,11 +48,11 @@ class BlenderRenderer:
             output_dir: Directory dove salvare le immagini renderizzate.
             config: Configurazione del rendering caricata dal TOML.
         """
-        self.output_dir = output_dir
+        self.output_dir = output_dir.resolve()
         self.config = config
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "BlenderRenderer inizializzato. Output dir: %s.", self.output_dir
+            "BlenderRenderer inizializzato. Output dir assoluta: %s.", self.output_dir
         )
 
     def _configure_render_engine(

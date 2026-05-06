@@ -159,7 +159,16 @@ def _apply_corrections_to_state(
                 correction.new_rotation_euler
                 and len(correction.new_rotation_euler) == 3
             ):
-                new_rotation = [float(v) for v in correction.new_rotation_euler]
+                raw_rotation = [float(v) for v in correction.new_rotation_euler]
+                new_rotation = [
+                    target_obj.transform.rotation_euler[0],
+                    target_obj.transform.rotation_euler[1],
+                    raw_rotation[2]
+                ]
+                import math
+                multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+                best_z = min(multiples, key=lambda m: abs(m - (new_rotation[2] % (2 * math.pi))))
+                new_rotation[2] = best_z
 
         target_obj.transform = ObjectTransform(
             location=new_location,
@@ -262,16 +271,22 @@ class VisualCritic:
         with open(template_path, encoding="utf-8") as fh:
             template = fh.read()
 
+        movable_names = [obj.name for obj in state.movable_objects]
+        names_str = ", ".join(movable_names)
+        instruction = f"\n\nCRITICAL INSTRUCTION: When suggesting corrections, you MUST ONLY use exact object names from this list: [{names_str}]. Do NOT invent generic names like 'computer_case' or 'office_chair'. You must copy the exact internal name from this list to ensure the code can find the object."
+
         room_bounds = state.room_bounds
         if room_bounds is not None:
-            return template.format(
+            prompt = template.format(
                 x_min=room_bounds.x_min,
                 x_max=room_bounds.x_max,
                 y_min=room_bounds.y_min,
                 y_max=room_bounds.y_max,
             )
+        else:
+            prompt = template.format(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
 
-        return template.format(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
+        return prompt + instruction
 
     def critique_and_refine(
         self,

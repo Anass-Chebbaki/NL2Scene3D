@@ -60,7 +60,8 @@ def _build_scene_json_for_llm(state: SceneState) -> str:
         Stringa JSON della scena filtrata.
     """
     relevant_objects = [
-        obj for obj in state.objects if obj.category != "structural"
+        obj for obj in state.objects 
+        if obj.is_movable or "door" in obj.name.lower() or "window" in obj.name.lower()
     ]
     scene_dict = {
         "scene_name": state.scene_name,
@@ -178,7 +179,19 @@ def _validate_and_sanitize_llm_output(
                 )
 
             new_location = [float(v) for v in new_location]
-            new_rotation = [float(v) for v in new_rotation]
+            
+            raw_rotation = [float(v) for v in new_rotation]
+            # CLAMP X e Y alla rotazione originale per evitare inclinazioni fantasiose dell'LLM
+            new_rotation = [
+                original_obj.transform.rotation_euler[0],
+                original_obj.transform.rotation_euler[1],
+                raw_rotation[2]
+            ]
+            
+            # SNAP Z ai multipli di 90 gradi per posizionamenti ortogonali perfetti
+            multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+            best_z = min(multiples, key=lambda m: abs(m - (new_rotation[2] % (2 * math.pi))))
+            new_rotation[2] = best_z
 
         except (TypeError, ValueError, KeyError) as exc:
             logger.warning(
@@ -274,7 +287,7 @@ class SceneReorganizer:
         scene_json = _build_scene_json_for_llm(state)
 
         if room_bounds is not None:
-            return template.format(
+            prompt = template.format(
                 scene_name=state.scene_name,
                 x_min=room_bounds.x_min,
                 x_max=room_bounds.x_max,
@@ -285,6 +298,7 @@ class SceneReorganizer:
                 room_height=room_bounds.height,
                 scene_json=scene_json,
             )
+            return prompt + "\n\nCRITICAL INSTRUCTION: Your output JSON MUST ONLY include the objects that have 'is_movable': true. For each object, ONLY return the 'name', 'location', and 'rotation_euler' fields. DO NOT return structural objects (doors/windows), cameras, lights, or the 'dimensions', 'type', 'category' fields to save output tokens."
 
         return (
             "You are an interior designer. Please reorganize the following 3D scene JSON "

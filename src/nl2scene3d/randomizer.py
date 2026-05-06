@@ -42,14 +42,15 @@ class RandomizerConfig:
     jitter_ratio: float = 0.8
     rotate_z_only: bool = True
     check_overlaps: bool = True
-    wall_margin: float = 0.1
-    max_overlap_ratio: float = 0.5
-    max_placement_attempts: int = 10
+    wall_margin: float = 0.2
+    max_overlap_ratio: float = 0.05
+    max_placement_attempts: int = 50
 
 
 def _compute_aabb(obj: SceneObject) -> tuple[float, float, float, float]:
     """
     Calcola l'Axis-Aligned Bounding Box (AABB) 2D di un oggetto nel piano XY.
+    Tiene conto della rotazione sull'asse Z per calcolare l'ingombro reale.
 
     Args:
         obj: Oggetto di cui calcolare l'AABB.
@@ -59,8 +60,17 @@ def _compute_aabb(obj: SceneObject) -> tuple[float, float, float, float]:
     """
     loc = obj.transform.location
     dim = obj.transform.dimensions
-    half_x = dim[0] / 2.0
-    half_y = dim[1] / 2.0
+    rz = obj.transform.rotation_euler[2]
+
+    # Calcolo della dimensione effettiva (AABB) sul piano XY dopo la rotazione Z
+    cos_z = abs(math.cos(rz))
+    sin_z = abs(math.sin(rz))
+    
+    eff_x = dim[0] * cos_z + dim[1] * sin_z
+    eff_y = dim[0] * sin_z + dim[1] * cos_z
+
+    half_x = eff_x / 2.0
+    half_y = eff_y / 2.0
     return (
         loc[0] - half_x,
         loc[0] + half_x,
@@ -127,6 +137,15 @@ def _has_excessive_overlap(
     for other in placed_objects:
         if other.name == candidate.name:
             continue
+        
+        # Ignora la stanza intera, altrimenti ogni oggetto avra' sempre overlap 100%!
+        if other.category == "structural" and "door" not in other.name.lower() and "window" not in other.name.lower():
+            continue
+            
+        # Ignora camere e luci che non hanno ingombro fisico
+        if other.object_type in ("CAMERA", "LIGHT", "EMPTY", "SPEAKER"):
+            continue
+
         other_aabb = _compute_aabb(other)
         ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
         if ratio > max_overlap_ratio:
@@ -236,24 +255,18 @@ class SceneRandomizer:
         """
         Genera una nuova rotazione casuale per un oggetto.
 
-        Solo l'asse Z (yaw) viene randomizzato se rotate_z_only e' True,
-        in modo da mantenere gli oggetti verticali e realistici.
+        Solo l'asse Z (yaw) viene ruotato in multipli di 90 gradi.
+        Mantiene le rotazioni X e Y invariate.
 
         Args:
             original_rotation: Rotazione originale [rx, ry, rz] in radianti.
 
         Returns:
-            Nuova rotazione [rx, ry, rz] con Z randomizzata in [0, 2*pi].
+            Nuova rotazione [rx, ry, rz] con Z modificata.
         """
-        if self.config.rotate_z_only:
-            new_z = self._rng.uniform(0.0, 2.0 * math.pi)
-            return [original_rotation[0], original_rotation[1], new_z]
-
-        return [
-            self._rng.uniform(0.0, 2.0 * math.pi),
-            self._rng.uniform(0.0, 2.0 * math.pi),
-            self._rng.uniform(0.0, 2.0 * math.pi),
-        ]
+        multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+        new_z = original_rotation[2] + self._rng.choice(multiples)
+        return [original_rotation[0], original_rotation[1], new_z]
 
     def randomize(self, state: SceneState) -> SceneState:
         """
@@ -297,7 +310,12 @@ class SceneRandomizer:
         failed_count = 0
 
         movable_objects = list(state.movable_objects)
-        self._rng.shuffle(movable_objects)
+        # Ordiniamo gli oggetti per volume decrescente: i pezzi grossi (letti, armadi) 
+        # vengono piazzati per primi, rendendo piu' facile incastrare i piccoli dopo.
+        movable_objects.sort(
+            key=lambda o: o.transform.dimensions[0] * o.transform.dimensions[1] * o.transform.dimensions[2], 
+            reverse=True
+        )
 
         for obj in movable_objects:
             new_obj = obj.copy()
@@ -315,9 +333,19 @@ class SceneRandomizer:
             if (room_bounds.x_max - room_bounds.x_min < obj.transform.dimensions[0] + 2 * margin or 
                 room_bounds.y_max - room_bounds.y_min < obj.transform.dimensions[1] + 2 * margin):
                 logger.warning("Oggetto '%s' troppo grande per la stanza. Fallback al centro.", obj.name)
-                # Forza il calcolo della posizione (che sara' il centro)
+                
+                # Applichiamo una rotazione casuale
+                new_rotation = self._randomize_rotation(obj.transform.rotation_euler)
+                rz_diff = new_rotation[2] - obj.transform.rotation_euler[2]
+                cos_z = abs(math.cos(rz_diff))
+                sin_z = abs(math.sin(rz_diff))
+                eff_x = obj.transform.dimensions[0] * cos_z + obj.transform.dimensions[1] * sin_z
+                eff_y = obj.transform.dimensions[0] * sin_z + obj.transform.dimensions[1] * cos_z
+                eff_dimensions = [eff_x, eff_y, obj.transform.dimensions[2]]
+
+                new_obj.transform.rotation_euler = new_rotation
                 new_obj.transform.location = self._randomize_location(
-                    obj.transform.location, obj.transform.dimensions, room_bounds
+                    obj.transform.location, eff_dimensions, room_bounds
                 )
                 new_objects.append(new_obj)
                 placed_objects.append(new_obj)
@@ -326,12 +354,24 @@ class SceneRandomizer:
                 continue
 
             for attempt in range(self.config.max_placement_attempts):
-                candidate_location = self._randomize_location(
-                    obj.transform.location,obj.transform.dimensions, room_bounds
-                )
+                # Generiamo PRIMA la rotazione (solo a step di 90 gradi)
                 candidate_rotation = self._randomize_rotation(
                     obj.transform.rotation_euler
                 )
+                
+                # Calcoliamo le dimensioni EFFICACI dopo la rotazione
+                rz_diff = candidate_rotation[2] - obj.transform.rotation_euler[2]
+                cos_z = abs(math.cos(rz_diff))
+                sin_z = abs(math.sin(rz_diff))
+                eff_x = obj.transform.dimensions[0] * cos_z + obj.transform.dimensions[1] * sin_z
+                eff_y = obj.transform.dimensions[0] * sin_z + obj.transform.dimensions[1] * cos_z
+                eff_dimensions = [eff_x, eff_y, obj.transform.dimensions[2]]
+
+                # Usiamo le dimensioni efficaci per trovare una posizione che rispetti i bounds
+                candidate_location = self._randomize_location(
+                    obj.transform.location, eff_dimensions, room_bounds
+                )
+                
                 candidate_transform = ObjectTransform(
                     location=candidate_location,
                     rotation_euler=candidate_rotation,
@@ -348,6 +388,13 @@ class SceneRandomizer:
                 for other in placed_objects:
                     if other.name == new_obj.name:
                         continue
+                        
+                    # Ignora la stanza e le telecamere per il calcolo dell'overlap
+                    if other.category == "structural" and "door" not in other.name.lower() and "window" not in other.name.lower():
+                        continue
+                    if other.object_type in ("CAMERA", "LIGHT", "EMPTY", "SPEAKER"):
+                        continue
+                        
                     other_aabb = _compute_aabb(other)
                     ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
                     if ratio > current_max_overlap:

@@ -134,7 +134,7 @@ class GeminiConfig:
             timeout_seconds=int(
                 os.environ.get(
                     "GEMINI_TIMEOUT_SECONDS",
-                    str(gemini_toml.get("timeout_seconds", 120)),
+                    str(gemini_toml.get("timeout_seconds", 300)),
                 )
             ),
             temperature=float(
@@ -166,8 +166,8 @@ class RenderConfig:
     isometric_azimuth: float = 275.0
     isometric_focal_length: float = 50.0
     topdown_height_multiplier: float = 2.0
-    isometric_distance_multiplier: float = 1.7
-    topdown_ortho_scale_padding: float = 1.05
+    isometric_distance_multiplier: float = 2.2
+    topdown_ortho_scale_padding: float = 1.25
     pipeline_camera_prefix: str = "NL2Scene3D_Camera"
 
     @classmethod
@@ -262,10 +262,10 @@ class PipelineConfig:
     max_movable_objects: int
     randomizer_seed: int
     min_object_dimension: float = 0.05
-    wall_margin: float = 0.10
-    max_overlap_ratio: float = 0.50
-    jitter_ratio: float = 0.80
-    max_placement_attempts: int = 10
+    wall_margin: float = 0.20
+    max_overlap_ratio: float = 0.05
+    jitter_ratio: float = 0.50
+    max_placement_attempts: int = 100
     min_quality_score: int = 7
     max_corrections: int = 5
     non_mesh_types: frozenset[str] = field(default_factory=frozenset)
@@ -323,11 +323,11 @@ class PipelineConfig:
             min_object_dimension=float(
                 pipeline_toml.get("min_object_dimension_meters", 0.05)
             ),
-            wall_margin=float(pipeline_toml.get("wall_margin_meters", 0.10)),
-            max_overlap_ratio=float(pipeline_toml.get("max_overlap_ratio", 0.50)),
-            jitter_ratio=float(randomizer_toml.get("jitter_ratio", 0.80)),
+            wall_margin=float(pipeline_toml.get("wall_margin_meters", 0.20)),
+            max_overlap_ratio=float(pipeline_toml.get("max_overlap_ratio", 0.05)),
+            jitter_ratio=float(randomizer_toml.get("jitter_ratio", 0.50)),
             max_placement_attempts=int(
-                pipeline_toml.get("max_placement_attempts", 10)
+                pipeline_toml.get("max_placement_attempts", 100)
             ),
             min_quality_score=int(
                 pipeline_toml.get("min_quality_score_for_corrections", 7)

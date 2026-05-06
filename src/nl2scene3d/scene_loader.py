@@ -308,6 +308,11 @@ class SceneLoader:
                 )
                 is_movable = False
 
+            # Se l'oggetto usa quaternioni o axis_angle, forzalo in Euler per
+            # estrarre correttamente i valori che poi riapplicheremo.
+            if blender_obj.rotation_mode not in ('XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX'):
+                blender_obj.rotation_mode = 'XYZ'
+
             transform = ObjectTransform(
                 location=[
                     blender_obj.location.x,

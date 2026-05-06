@@ -57,10 +57,10 @@ wall_margin_meters = 0.10
 # Percentuale massima di sovrapposizione AABB consentita tra due oggetti
 # prima di considerare il posizionamento non valido e ritentare.
 # Valore in [0.0, 1.0].
-max_overlap_ratio = 0.50
+max_overlap_ratio = 0.05
 
 # Numero massimo di tentativi per posizionare un oggetto senza sovrapposizioni
-max_placement_attempts = 10
+max_placement_attempts = 500
 
 # Punteggio minimo (su 10) assegnato dal modello Vision affinche'
 # le correzioni vengano comunque applicate.
@@ -106,7 +106,7 @@ engine = "CYCLES"
 # Usato per il render finale di presentazione.
 [render.final]
 width = 1280
-height = 720
+height = 1280
 samples = 256
 engine = "CYCLES"
 

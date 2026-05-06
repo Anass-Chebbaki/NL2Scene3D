@@ -87,7 +87,7 @@ class SceneApplicator:
                 counters["not_found"] += 1
                 continue
 
-            if not scene_obj.is_movable:
+            if not scene_obj.is_movable or blender_obj.type in ('CAMERA', 'LIGHT'):
                 counters["skipped"] += 1
                 continue
 
@@ -125,6 +125,8 @@ class SceneApplicator:
             if any(
                 abs(new_rot[i] - current_rot[i]) > self.tolerance for i in range(3)
             ):
+                # Assicuriamoci che la modalita' di rotazione sia Euler XYZ
+                blender_obj.rotation_mode = 'XYZ'
                 blender_obj.rotation_euler.x = new_rot[0]
                 blender_obj.rotation_euler.y = new_rot[1]
                 blender_obj.rotation_euler.z = new_rot[2]

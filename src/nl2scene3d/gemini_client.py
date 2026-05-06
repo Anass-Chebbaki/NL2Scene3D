@@ -55,10 +55,14 @@ class GeminiClient:
             config: Oggetto di configurazione Gemini.
         """
         self.config = config
-        self._client = genai.Client(api_key=config.api_key)
+        self._client = genai.Client(
+            api_key=config.api_key,
+            http_options={'timeout': config.timeout_seconds * 1000}
+        )
         logger.info(
-            "GeminiClient inizializzato con successo. "
+            "GeminiClient inizializzato con successo (timeout: %ds). "
             "Modello primario: %s, fallback: %s",
+            config.timeout_seconds,
             config.model_primary,
             config.model_fallback,
         )
@@ -67,15 +71,18 @@ class GeminiClient:
         """
         Estrae e parsa il JSON dalla risposta testuale del modello.
         """
-        # Strategia 1: parse diretto della risposta pulita.
+        # Pulizia preliminare: rimuove eventuale testo prima del primo { o [
+        text = text.strip()
+        
+        # Strategia 1: parse diretto
         try:
-            return json.loads(text.strip())
+            return json.loads(text)
         except json.JSONDecodeError:
             pass
 
-        # Strategia 2: estrazione di blocchi ```json ... ```.
+        # Strategia 2: estrazione di blocchi ```json ... ``` (piu' robusta)
         json_block_pattern = re.compile(
-            r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL | re.IGNORECASE
+            r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE
         )
         match = json_block_pattern.search(text)
         if match:
@@ -84,18 +91,32 @@ class GeminiClient:
             except json.JSONDecodeError:
                 pass
 
-        # Strategia 3: ricerca greedy della struttura JSON piu' esterna.
-        brace_pattern = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
-        match = brace_pattern.search(text)
-        if match:
-            try:
-                return json.loads(match.group(1).strip())
-            except json.JSONDecodeError:
-                pass
+        # Strategia 3: ricerca della struttura più esterna { } o [ ]
+        # Gestisce il caso in cui il modello aggiunge spiegazioni prima o dopo
+        start_idx_dict = text.find('{')
+        start_idx_list = text.find('[')
+        
+        start_idx = -1
+        if start_idx_dict != -1 and (start_idx_list == -1 or start_idx_dict < start_idx_list):
+            start_idx = start_idx_dict
+            end_char = '}'
+        elif start_idx_list != -1:
+            start_idx = start_idx_list
+            end_char = ']'
+            
+        if start_idx != -1:
+            end_idx = text.rfind(end_char)
+            if end_idx > start_idx:
+                json_str = text[start_idx:end_idx + 1]
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
 
         raise GeminiParsingError(
             "Impossibile estrarre JSON valido dalla risposta del modello. "
-            f"Risposta ricevuta (primi 500 caratteri): {text[:500]}"
+            f"La risposta potrebbe essere stata troncata o contenere errori di sintassi. "
+            f"Anteprima: {text[:200]}..."
         )
 
     def _call_with_retry(
@@ -112,6 +133,7 @@ class GeminiClient:
             system_instruction=system_prompt,
             temperature=self.config.temperature,
             max_output_tokens=self.config.max_output_tokens,
+            response_mime_type="application/json",
             **(config_override or {}),
         )
 
@@ -130,12 +152,14 @@ class GeminiClient:
 
             except Exception as exc:
                 exc_str = str(exc).lower()
-                if "429" in exc_str or "quota" in exc_str or "exhausted" in exc_str:
+                # 429 (Rate Limit) o 503 (Model Overloaded/Unavailable)
+                if any(err in exc_str for err in ("429", "quota", "exhausted", "503", "unavailable", "demand")):
                     last_exception = exc
                     wait_seconds = 2 ** (attempt + 1)
                     logger.warning(
-                        "Rate limit raggiunto (tentativo %d/%d). "
+                        "API Gemini temporaneamente non disponibile (%s, tentativo %d/%d). "
                         "Attesa di %d secondi.",
+                        exc,
                         attempt + 1,
                         self.config.max_retries,
                         wait_seconds,
@@ -143,19 +167,24 @@ class GeminiClient:
                     if attempt < self.config.max_retries - 1:
                         time.sleep(wait_seconds)
                     else:
+                        # Se abbiamo esaurito i retry per un errore temporaneo,
+                        # solleviamo GeminiRateLimitError per innescare il fallback.
                         raise GeminiRateLimitError(
-                            "Rate limit persistente."
+                            f"Modello non disponibile dopo i retry: {exc}"
                         ) from exc
-                elif "400" in exc_str or "invalid" in exc_str:
-                    logger.error("Errore API permanente: %s", exc)
+                elif any(err in exc_str for err in ("400", "invalid", "401", "403")):
+                    logger.error("Errore API permanente (Client Error): %s", exc)
                     raise GeminiClientError(f"Errore API permanente: {exc}") from exc
                 else:
+                    # Altri errori (500, 502, 504 o errori di rete)
                     last_exception = exc
-                    logger.error("Errore API Gemini (tentativo %d/%d): %s", attempt + 1, self.config.max_retries, exc)
+                    logger.error("Errore API Gemini imprevisto (tentativo %d/%d): %s", attempt + 1, self.config.max_retries, exc)
                     if attempt < self.config.max_retries - 1:
                         time.sleep(2**attempt)
                     else:
-                        raise GeminiClientError(f"Errore API persistente: {exc}") from exc
+                        # Proviamo comunque il fallback per qualsiasi errore persistente
+                        # che non sia un errore 400 del client.
+                        raise GeminiRateLimitError(f"Errore API persistente: {exc}") from exc
 
         raise GeminiClientError(f"Tentativi esauriti. Ultimo errore: {last_exception}")
 

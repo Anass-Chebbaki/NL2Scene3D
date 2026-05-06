@@ -230,6 +230,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     logger.info("Chiamata LLM per riordino testuale.")
     reordered_state = reorganizer.reorganize(randomized_state)
+    # Forza l'uso dei bounds originali per evitare spostamenti della camera
+    reordered_state.room_bounds = original_state.room_bounds
     
     if reordered_state.pipeline_step == "reordered_failed":
         logger.warning("Il riordino ha fallito. Utilizzo stato randomizzato per i prossimi step. Salto critica visiva.")
@@ -254,6 +256,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
             reordered_state=reordered_state,
             render_iso_path=reordered_renders["iso"],
         )
+        # Forza l'uso dei bounds originali anche dopo la rifinitura visiva
+        refined_state.room_bounds = original_state.room_bounds
 
     loader.save_state_to_json(refined_state, args.output_dir / "scene_refined.json")
 
