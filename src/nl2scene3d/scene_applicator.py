@@ -61,10 +61,48 @@ class SceneApplicator:
         """
         try:
             import bpy  # noqa: PLC0415
+            import mathutils
         except ImportError as exc:
             raise ImportError(
                 "Il modulo 'bpy' richiede l'ambiente Blender."
             ) from exc
+
+        def _drop_object_to_surface(blender_obj: bpy.types.Object, scene: bpy.types.Scene) -> bool:
+            """
+            Lancia un raggio verso il basso per trovare la superficie di appoggio.
+            Il raggio parte dall'altezza corrente dell'oggetto (che l'reorganizer imposta
+            vicino al soffitto) per evitare di "nascere" gia' sotto i mobili.
+            """
+            matrix_world = blender_obj.matrix_world
+            bbox = [matrix_world @ mathutils.Vector(corner) for corner in blender_obj.bound_box]
+            z_min = min([v.z for v in bbox])
+            center_x = sum([v.x for v in bbox]) / 8.0
+            center_y = sum([v.y for v in bbox]) / 8.0
+            
+            # Parte da un punto leggermente sopra la base dell'oggetto
+            # Poiche' l'reorganizer mette gli oggetti in alto, questo raggio
+            # colpirà la prima superficie utile (tavolo o pavimento).
+            ray_origin = mathutils.Vector((center_x, center_y, z_min + 0.1))
+            ray_direction = mathutils.Vector((0, 0, -1))
+            
+            # Esclude l'oggetto stesso dal raycast per evitare di colpirsi da solo
+            hide_original = blender_obj.hide_viewport
+            blender_obj.hide_viewport = True
+            
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            hit, location, normal, index, hit_obj, matrix = scene.ray_cast(depsgraph, ray_origin, ray_direction)
+            
+            blender_obj.hide_viewport = hide_original
+            
+            if hit:
+                # Sposta l'oggetto in modo che la sua base tocchi il punto di hit
+                z_offset = location.z - z_min
+                blender_obj.location.z += z_offset
+                return True
+            
+            # Se non colpisce nulla, proviamo a farlo cadere dal soffitto assoluto
+            # come ultima spiaggia (magari l'oggetto era fuori dai bounds?)
+            return False
 
         counters: dict[str, int] = {"updated": 0, "not_found": 0, "skipped": 0}
         blender_scene = bpy.context.scene
@@ -139,6 +177,14 @@ class SceneApplicator:
                 )
 
             if updated:
+                # E' FONDAMENTALE aggiornare il view_layer PRIMA di fare il raycast,
+                # altrimenti matrix_world e bound_box avranno le coordinate VECCHIE 
+                # e il raggio partira' dalla posizione precedente dell'oggetto!
+                bpy.context.view_layer.update()
+                dropped = _drop_object_to_surface(blender_obj, blender_scene)
+                if dropped:
+                    scene_obj.transform.location[2] = blender_obj.location.z
+                    logger.debug("Oggetto '%s' fatto cadere sulla superficie sottostante via raycast.", scene_obj.name)
                 counters["updated"] += 1
             else:
                 counters["skipped"] += 1

@@ -196,6 +196,9 @@ class SceneLoader:
                 return "light_ceiling", False
             return "light_floor", True
 
+        if "decor_" in name_lower or has_keyword(("decor", "decoration", "ornament", "book", "bottle", "monitor", "pc", "computer", "keyboard", "mouse", "trashbin", "doorknob"), name_lower):
+            return "decoration", True
+
         # Structural priority
         if has_keyword(self.config.structural_patterns, name_lower):
             return STRUCTURAL_CATEGORY, False

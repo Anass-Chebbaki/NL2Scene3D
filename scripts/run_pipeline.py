@@ -105,6 +105,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory dei template dei prompt per Gemini.",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Nome del modello Gemini da usare (override config).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -170,6 +176,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     seed: int = (
         args.seed if args.seed is not None else pipeline_config.randomizer_seed
     )
+
+    if args.model:
+        app_config.gemini.model_primary = args.model
 
     gemini_client = GeminiClient(app_config.gemini)
     loader = SceneLoader(config=pipeline_config)

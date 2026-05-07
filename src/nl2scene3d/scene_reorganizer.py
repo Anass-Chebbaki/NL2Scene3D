@@ -203,11 +203,12 @@ def _validate_and_sanitize_llm_output(
             corrected_objects.append(copy.deepcopy(original_obj))
             continue
 
-        # Preserva la Z originale: gli oggetti restano sul pavimento.
+        # Preserviamo la Z originale. Se l'oggetto fluttua, l'applicatore lo farà cadere.
+        # Se l'oggetto finisce dentro un altro, has_collision lo rileverà.
         new_location[2] = original_obj.transform.location[2]
 
         if room_bounds is not None:
-            clamped_location = room_bounds.clamp_location(new_location)
+            clamped_location = room_bounds.clamp_location(new_location, original_obj.transform.dimensions)
             if clamped_location != new_location:
                 logger.debug(
                     "Oggetto '%s': coordinate clampate da %s a %s.",
@@ -233,9 +234,50 @@ def _validate_and_sanitize_llm_output(
         len(original_state.objects),
     )
 
+    # Passaggio finale: Risoluzione collisioni (Jittering)
+    from nl2scene3d.utils.geometry import has_collision
+    
+    final_objects: list[SceneObject] = []
+    # Prima aggiungiamo tutti gli oggetti non movibili (strutturali)
+    for obj in corrected_objects:
+        if not obj.is_movable:
+            final_objects.append(obj)
+            
+    # Poi aggiungiamo i movibili uno ad uno, risolvendo eventuali collisioni
+    for obj in corrected_objects:
+        if not obj.is_movable:
+            continue
+            
+        # Tenta di risolvere la collisione tramite jittering leggero (max 10 tentativi)
+        # Se fallisce, lo lascia li' (meglio un po' di overlap che spostarlo a caso)
+        # ATTENZIONE: le collisioni per le decorazioni (che vanno SOPRA i mobili) 
+        # risulterebbero sempre True (perche' toccano il mobile). Quindi facciamo
+        # jittering SOLO per i mobili principali contro altri mobili principali.
+        main_furniture_categories = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
+        
+        if obj.category in main_furniture_categories:
+            attempts = 0
+            original_loc = list(obj.transform.location)
+            # Filtra solo i mobili e la stanza
+            collidable_objects = [
+                o for o in final_objects 
+                if o.category in main_furniture_categories or (o.category == "structural" and "door" not in o.name.lower() and "window" not in o.name.lower())
+            ]
+            while has_collision(obj, collidable_objects) and attempts < 10:
+                import random
+                obj.transform.location[0] = original_loc[0] + random.uniform(-0.1, 0.1)
+                obj.transform.location[1] = original_loc[1] + random.uniform(-0.1, 0.1)
+                attempts += 1
+                
+            if attempts >= 10:
+                logger.warning("Impossibile risolvere collisione per '%s' dopo 10 tentativi.", obj.name)
+                obj.transform.location = original_loc # Ripristina posizione LLM se jitter fallisce
+            
+        final_objects.append(obj)
+
     return SceneState(
         scene_name=original_state.scene_name,
-        objects=corrected_objects,
+        objects=final_objects,
         room_bounds=original_state.room_bounds,
         pipeline_step="reordered",
         metadata={

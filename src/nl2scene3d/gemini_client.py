@@ -153,25 +153,32 @@ class GeminiClient:
             except Exception as exc:
                 exc_str = str(exc).lower()
                 # 429 (Rate Limit) o 503 (Model Overloaded/Unavailable)
-                if any(err in exc_str for err in ("429", "quota", "exhausted", "503", "unavailable", "demand")):
+                if any(err in exc_str for err in ("429", "quota", "exhausted")):
+                    last_exception = exc
+                    # Backoff più aggressivo per la quota: 10, 20, 40 secondi
+                    wait_seconds = 10 * (2 ** attempt)
+                    logger.warning(
+                        "Quota API esaurita (429). Attesa di %d secondi (tentativo %d/%d).",
+                        wait_seconds,
+                        attempt + 1,
+                        self.config.max_retries,
+                    )
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(wait_seconds)
+                    else:
+                        raise GeminiRateLimitError(f"Quota esaurita dopo i retry: {exc}") from exc
+                elif any(err in exc_str for err in ("503", "unavailable", "demand")):
                     last_exception = exc
                     wait_seconds = 2 ** (attempt + 1)
                     logger.warning(
-                        "API Gemini temporaneamente non disponibile (%s, tentativo %d/%d). "
+                        "API Gemini temporaneamente non disponibile (503, tentativo %d/%d). "
                         "Attesa di %d secondi.",
-                        exc,
                         attempt + 1,
                         self.config.max_retries,
                         wait_seconds,
                     )
                     if attempt < self.config.max_retries - 1:
                         time.sleep(wait_seconds)
-                    else:
-                        # Se abbiamo esaurito i retry per un errore temporaneo,
-                        # solleviamo GeminiRateLimitError per innescare il fallback.
-                        raise GeminiRateLimitError(
-                            f"Modello non disponibile dopo i retry: {exc}"
-                        ) from exc
                 elif any(err in exc_str for err in ("400", "invalid", "401", "403")):
                     logger.error("Errore API permanente (Client Error): %s", exc)
                     raise GeminiClientError(f"Errore API permanente: {exc}") from exc

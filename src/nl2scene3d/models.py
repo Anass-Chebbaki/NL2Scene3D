@@ -161,22 +161,17 @@ class RoomBounds:
         """Altezza della stanza."""
         return self.z_ceiling - self.z_floor
 
-    def clamp_location(self, location: list[float]) -> list[float]:
+    def clamp_location(self, location: list[float], dimensions: Optional[list[float]] = None) -> list[float]:
         """
-        Riporta le coordinate X e Y all'interno dei bounds della stanza.
-
-        La coordinata Z viene lasciata invariata per non alterare
-        la quota di appoggio degli oggetti.
-
-        Args:
-            location: Coordinate [x, y, z] da vincolare.
-
-        Returns:
-            Coordinate vincolate ai bounds della stanza.
+        Riporta le coordinate X e Y all'interno dei bounds della stanza,
+        tenendo conto delle dimensioni dell'oggetto se fornite.
         """
+        offset_x = dimensions[0] / 2.0 if dimensions else 0.0
+        offset_y = dimensions[1] / 2.0 if dimensions else 0.0
+        
         return [
-            max(self.x_min, min(self.x_max, location[0])),
-            max(self.y_min, min(self.y_max, location[1])),
+            max(self.x_min + offset_x, min(self.x_max - offset_x, location[0])),
+            max(self.y_min + offset_y, min(self.y_max - offset_y, location[1])),
             location[2],
         ]
 

@@ -124,37 +124,26 @@ def _has_excessive_overlap(
 ) -> bool:
     """
     Verifica se un oggetto ha sovrapposizioni eccessive con quelli gia' posizionati.
-
-    Args:
-        candidate: Oggetto da verificare.
-        placed_objects: Lista degli oggetti gia' posizionati.
-        max_overlap_ratio: Soglia massima di sovrapposizione consentita.
-
-    Returns:
-        True se almeno una sovrapposizione supera la soglia.
     """
+    from nl2scene3d.utils.geometry import has_collision
+    
+    # 1. Check mesh-exact collision if in Blender
+    if has_collision(candidate, placed_objects):
+        return True
+        
+    # 2. Fallback/Complement with AABB 2D for categories that might not be mesh-checked
     candidate_aabb = _compute_aabb(candidate)
     for other in placed_objects:
         if other.name == candidate.name:
             continue
-        
-        # Ignora la stanza intera, altrimenti ogni oggetto avra' sempre overlap 100%!
         if other.category == "structural" and "door" not in other.name.lower() and "window" not in other.name.lower():
             continue
-            
-        # Ignora camere e luci che non hanno ingombro fisico
         if other.object_type in ("CAMERA", "LIGHT", "EMPTY", "SPEAKER"):
             continue
 
         other_aabb = _compute_aabb(other)
         ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
         if ratio > max_overlap_ratio:
-            logger.debug(
-                "Sovrapposizione eccessiva: '%s' vs '%s' = %.2f.",
-                candidate.name,
-                other.name,
-                ratio,
-            )
             return True
     return False
 
@@ -383,32 +372,13 @@ class SceneRandomizer:
                     placed = True
                     break
 
-                candidate_aabb = _compute_aabb(new_obj)
-                current_max_overlap = 0.0
-                for other in placed_objects:
-                    if other.name == new_obj.name:
-                        continue
-                        
-                    # Ignora la stanza e le telecamere per il calcolo dell'overlap
-                    if other.category == "structural" and "door" not in other.name.lower() and "window" not in other.name.lower():
-                        continue
-                    if other.object_type in ("CAMERA", "LIGHT", "EMPTY", "SPEAKER"):
-                        continue
-                        
-                    other_aabb = _compute_aabb(other)
-                    ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
-                    if ratio > current_max_overlap:
-                        current_max_overlap = ratio
-                        if current_max_overlap > self.config.max_overlap_ratio:
-                            break
-
-                if current_max_overlap < min_max_overlap:
-                    min_max_overlap = current_max_overlap
-                    best_transform = candidate_transform
-
-                if current_max_overlap <= self.config.max_overlap_ratio:
+                from nl2scene3d.utils.geometry import has_collision
+                
+                # Usa il controllo di collisione esatto
+                if not has_collision(new_obj, placed_objects):
                     placed = True
                     break
+
 
                 logger.debug(
                     "Oggetto '%s': tentativo %d fallito per sovrapposizione.",
@@ -417,15 +387,13 @@ class SceneRandomizer:
                 )
 
             if not placed:
-                if best_transform is not None:
-                    new_obj.transform = best_transform
                 logger.warning(
-                    "Oggetto '%s': posizione senza sovrapposizioni non trovata "
-                    "dopo %d tentativi. Viene usata la posizione migliore (overlap max: %.2f).",
+                    "Oggetto '%s': posizione senza sovrapposizioni non trovata dopo %d tentativi. "
+                    "Mantenuta posizione originale.",
                     obj.name,
                     self.config.max_placement_attempts,
-                    min_max_overlap,
                 )
+                new_obj.transform = obj.transform.copy()
                 failed_count += 1
 
             new_objects.append(new_obj)
