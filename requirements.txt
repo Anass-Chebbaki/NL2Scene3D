@@ -3,3 +3,7 @@ google-genai>=1.0.0
 google-api-core>=2.15.0
 python-dotenv>=1.0.0
 tomli>=2.0.0; python_version < "3.11"
+
+# gui
+customtkinter>=5.2.2
+Pillow>=10.0.0
