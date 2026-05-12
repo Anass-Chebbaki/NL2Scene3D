@@ -15,23 +15,71 @@ bl_info = {
     "category": "3D View",
 }
 
+import sys
+from pathlib import Path
+
+# Set up sys.path BEFORE any other import:
+# - Add the add-on directory so 'core' is importable.
+# - Add the vendor/ subdirectory so bundled external libraries
+#   (dotenv, google-genai, Pillow, etc.) are available inside Blender.
+_ADDON_DIR = Path(__file__).resolve().parent
+_VENDOR_DIR = _ADDON_DIR / "vendor"
+
+for path in (_ADDON_DIR, _VENDOR_DIR):
+    path_str = str(path)
+    if path.exists() and path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
 import bpy
 from bpy.types import Panel, Operator
 
 
 # ----------------------------------------------------------------------
-# Operator: a simple hello world action to verify registration works
+# Operator: inspect the current Blender scene using core modules
 # ----------------------------------------------------------------------
-class NL2SCENE3D_OT_hello(Operator):
-    """Test operator to verify the add-on is loaded correctly."""
-    bl_idname = "nl2scene3d.hello"
-    bl_label = "Say Hello"
-    bl_description = "Print a hello message to confirm the add-on works"
+class NL2SCENE3D_OT_inspect_scene(Operator):
+    """Inspect the current scene using core pipeline modules."""
+    bl_idname = "nl2scene3d.inspect_scene"
+    bl_label = "Inspect Scene"
+    bl_description = "Analyze current scene objects using the core pipeline modules"
 
     def execute(self, context):
-        self.report({'INFO'}, "Hello from NL2Scene3D add-on!")
-        print("[NL2Scene3D] Hello from the add-on!")
-        return {'FINISHED'}
+        try:
+            from core.scene_loader import SceneLoader
+            from core.config import get_config
+
+            config = get_config()
+            loader = SceneLoader(config.pipeline)
+            state = loader.extract_scene_state(scene_name="inspected_scene")
+
+            total = len(state.objects)
+            movable = sum(1 for obj in state.objects if obj.is_movable)
+            bounds = state.room_bounds
+
+            msg = (
+                f"Scene has {total} objects ({movable} movable). "
+                f"Bounds: X[{bounds.x_min:.2f}, {bounds.x_max:.2f}] "
+                f"Y[{bounds.y_min:.2f}, {bounds.y_max:.2f}]"
+            )
+
+            self.report({'INFO'}, msg)
+            print(f"[NL2Scene3D] {msg}")
+
+            for obj in state.objects:
+                print(
+                    f"[NL2Scene3D]   {obj.name:30s} "
+                    f"category={obj.category:20s} movable={obj.is_movable}"
+                )
+
+            return {'FINISHED'}
+
+        except Exception as exc:
+            error_msg = f"Inspection failed: {exc}"
+            self.report({'ERROR'}, error_msg)
+            print(f"[NL2Scene3D] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
 
 
 # ----------------------------------------------------------------------
@@ -49,21 +97,22 @@ class NL2SCENE3D_PT_main_panel(Panel):
         layout = self.layout
 
         layout.label(text="Scene Reorganization", icon='SCENE_DATA')
-
         layout.separator()
 
-        layout.label(text="Add-on is working!", icon='CHECKMARK')
-
-        layout.separator()
-
-        layout.operator("nl2scene3d.hello", text="Say Hello", icon='INFO')
+        box = layout.box()
+        box.label(text="Scene Analysis", icon='VIEWZOOM')
+        box.operator(
+            "nl2scene3d.inspect_scene",
+            text="Inspect Scene",
+            icon='OUTLINER_OB_GROUP_INSTANCE',
+        )
 
 
 # ----------------------------------------------------------------------
 # Registration
 # ----------------------------------------------------------------------
 classes = (
-    NL2SCENE3D_OT_hello,
+    NL2SCENE3D_OT_inspect_scene,
     NL2SCENE3D_PT_main_panel,
 )
 
