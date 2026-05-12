@@ -1,149 +1,161 @@
 # gui/widgets/metrics_panel.py
 """
-Metrics panel — displays pipeline quality metrics from metrics.json.
+Metrics visualization panel.
 """
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QFrame,
+    QScrollArea,
+    QHBoxLayout,
+    QProgressBar,
+)
 
+_STEP_COLORS = {
+    "initial": "#94A3B8",
+    "reorganized": "#6366F1",
+    "final": "#34D399",
+}
 
 _METRIC_LABELS = {
     "mean_position_delta_meters": "Mean Position Delta",
     "mean_rotation_delta_radians": "Mean Rotation Delta",
-    "object_count_movable": "Movable Objects",
+    "max_position_delta_meters": "Max Position Delta",
     "improvement_score": "Improvement Score",
+    "collision_count": "Collision Count",
+    "out_of_bounds_count": "Out of Bounds",
 }
 
-_STEP_COLORS = {
-    "randomized": "#F59E0B",
-    "reordered":  "#60A5FA",
-    "refined":    "#34D399",
-}
+class MetricsPanel(QScrollArea):
+    """
+    Panel for visualizing pipeline performance metrics and quality analysis.
+    """
 
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self._container = QWidget()
+        self.setWidget(self._container)
+        
+        self._setup_ui()
 
-class MetricsPanel(ctk.CTkScrollableFrame):
-    """Displays pipeline quality metrics in a structured table."""
+    def _setup_ui(self) -> None:
+        self._main_layout = QVBoxLayout(self._container)
+        self._main_layout.setContentsMargins(20, 20, 20, 20)
+        self._main_layout.setSpacing(16)
 
-    def __init__(self, master: ctk.CTkBaseClass, **kwargs) -> None:
-        super().__init__(master, **kwargs)
-        self._empty_label: ctk.CTkLabel
-        self._content_frame: Optional[ctk.CTkFrame] = None
-        self._build_header()
+        header_layout = QHBoxLayout()
+        title = QLabel("PIPELINE PERFORMANCE & ANALYSIS")
+        title.setObjectName("section_header")
+        header_layout.addWidget(title)
+        self._main_layout.addLayout(header_layout)
 
-    def _build_header(self) -> None:
-        ctk.CTkLabel(
-            self, text="Quality Metrics",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=6, pady=(8, 2))
+        self._empty_label = QLabel("No metrics loaded yet. Run the pipeline to see results.")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("color: #64748B; font-style: italic; margin-top: 40px;")
+        self._main_layout.addWidget(self._empty_label)
 
-        sep = ctk.CTkFrame(self, height=1, fg_color="#374151")
-        sep.pack(fill="x", padx=6, pady=(0, 6))
+        self._content_frame = QWidget()
+        self._content_layout = QVBoxLayout(self._content_frame)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(12)
+        self._main_layout.addWidget(self._content_frame)
+        self._content_frame.hide()
 
-        self._empty_label = ctk.CTkLabel(
-            self, text="Metrics will appear here after the pipeline completes.",
-            text_color="#4B5563",
-        )
-        self._empty_label.pack(pady=20)
-
-    def load_from_file(self, metrics_path: Path) -> None:
-        """Load and render metrics from a metrics.json file."""
-        if not metrics_path.exists():
-            return
-        try:
-            with open(metrics_path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            return
-
-        self._empty_label.pack_forget()
-
-        if self._content_frame:
-            self._content_frame.destroy()
-
-        self._content_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self._content_frame.pack(fill="x", padx=6, pady=4)
-
-        for step_name, step_data in data.items():
-            self._render_step(step_name, step_data)
+        self._main_layout.addStretch()
 
     def clear(self) -> None:
-        if self._content_frame:
-            self._content_frame.destroy()
-            self._content_frame = None
-        self._empty_label.pack(pady=20)
+        while self._content_layout.count():
+            child = self._content_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._content_frame.hide()
+        self._empty_label.show()
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+    def load_from_file(self, path: Path) -> None:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._render_metrics(data)
+        except Exception as e:
+            self.clear()
+            self._empty_label.setText(f"Error loading metrics: {e}")
 
-    def _render_step(self, step_name: str, data: dict) -> None:
+    def _render_metrics(self, data: Dict[str, Any]) -> None:
+        self.clear()
+        self._empty_label.hide()
+        self._content_frame.show()
+
+        for step_name, step_data in data.items():
+            if isinstance(step_data, dict):
+                self._render_step(step_name, step_data)
+
+    def _render_step(self, step_name: str, data: Dict[str, Any]) -> None:
         color = _STEP_COLORS.get(step_name, "#9CA3AF")
+        
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        header = QLabel(f"  {step_name.upper()}")
+        header.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold; border-left: 3px solid {color};")
+        layout.addWidget(header)
+        layout.addSpacing(10)
 
-        # Step header
-        step_frame = ctk.CTkFrame(
-            self._content_frame,  # type: ignore[arg-type]
-            fg_color="#1F2937",
-            corner_radius=8,
-        )
-        step_frame.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(
-            step_frame,
-            text=f"  {step_name.upper()}",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=color,
-            anchor="w",
-        ).pack(fill="x", padx=8, pady=(8, 4))
-
-        # Metric rows
         for key, label in _METRIC_LABELS.items():
             val = data.get(key)
             if val is None:
                 continue
 
-            row = ctk.CTkFrame(step_frame, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=1)
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 2, 0, 2)
+            
+            k_lbl = QLabel(label)
+            k_lbl.setStyleSheet("color: #94A3B8; font-size: 11px;")
+            
+            v_lbl = QLabel(self._format_value(key, val))
+            v_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            v_lbl.setStyleSheet("color: #E5E7EB; font-weight: bold; font-size: 11px;")
+            
+            row_l.addWidget(k_lbl)
+            row_l.addWidget(v_lbl)
+            layout.addWidget(row_w)
 
-            ctk.CTkLabel(
-                row, text=label, width=200, anchor="w",
-                text_color="#9CA3AF", font=ctk.CTkFont(size=11),
-            ).pack(side="left")
+            if key == "improvement_score":
+                bar = QProgressBar()
+                bar.setRange(0, 100)
+                bar.setValue(int(float(val) * 100))
+                bar.setTextVisible(False)
+                bar.setFixedHeight(6)
+                layout.addWidget(bar)
+                layout.addSpacing(4)
 
-            formatted = self._format_value(key, val)
-            ctk.CTkLabel(
-                row, text=formatted, anchor="w",
-                font=ctk.CTkFont(size=11, weight="bold"),
-                text_color="#E5E7EB",
-            ).pack(side="left")
-
-        # Progress bar for improvement_score
-        score = data.get("improvement_score")
-        if score is not None:
-            bar_row = ctk.CTkFrame(step_frame, fg_color="transparent")
-            bar_row.pack(fill="x", padx=8, pady=(2, 8))
-
-            ctk.CTkLabel(
-                bar_row, text="Improvement", width=200, anchor="w",
-                text_color="#9CA3AF", font=ctk.CTkFont(size=11),
-            ).pack(side="left")
-
-            bar = ctk.CTkProgressBar(bar_row, width=160, height=8, corner_radius=4)
-            bar.pack(side="left", padx=4)
-            bar.set(float(score))
+        self._content_layout.addWidget(card)
 
     @staticmethod
-    def _format_value(key: str, value) -> str:
-        if value is None:
-            return "N/A"
-        if key == "mean_position_delta_meters":
-            return f"{float(value):.3f} m"
-        if key == "mean_rotation_delta_radians":
-            return f"{math.degrees(float(value)):.1f} deg"
-        if key == "improvement_score":
-            return f"{float(value):.3f}"
-        return str(value)
+    def _format_value(key: str, value: Any) -> str:
+        try:
+            if value is None:
+                return "N/A"
+            if key.endswith("_meters"):
+                return f"{float(value):.3f} m"
+            if key.endswith("_radians"):
+                return f"{math.degrees(float(value)):.1f}°"
+            if key == "improvement_score":
+                return f"{float(value):.3f}"
+            return str(value)
+        except Exception:
+            return str(value)

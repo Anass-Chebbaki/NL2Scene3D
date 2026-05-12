@@ -1,267 +1,287 @@
 # gui/widgets/config_panel.py
 """
-Configuration panel — exposes all pipeline parameters as editable fields.
-Writes back to a mutable GUIConfig object; does NOT write to disk.
+Configuration settings panel.
 """
 from __future__ import annotations
 
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
-from typing import Callable, Optional
+from typing import Optional
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QFormLayout,
+    QLineEdit,
+    QSpinBox,
+    QDoubleSpinBox,
+    QCheckBox,
+    QComboBox,
+    QLabel,
+    QScrollArea,
+    QFrame,
+    QHBoxLayout,
+    QPushButton,
+    QFileDialog,
+)
 
 from nl2scene3d.gui.core.config_bridge import GUIConfig
 
+class ConfigPanel(QScrollArea):
+    """
+    Settings panel containing all configurable parameters for the pipeline.
+    """
 
-class ConfigPanel(ctk.CTkScrollableFrame):
-    """Scrollable panel containing all pipeline configuration fields."""
-
-    def __init__(
-        self,
-        master: ctk.CTkBaseClass,
-        config: GUIConfig,
-        on_change: Optional[Callable[[], None]] = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(master, **kwargs)
+    def __init__(self, config: GUIConfig, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
         self._config = config
-        self._on_change = on_change
-        self._vars: dict[str, tk.Variable] = {}
-        self._build()
-
-    # ------------------------------------------------------------------
-    # Construction helpers
-    # ------------------------------------------------------------------
-
-    def _section(self, title: str) -> None:
-        ctk.CTkLabel(
-            self, text=title.upper(),
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#6366F1",
-        ).pack(anchor="w", padx=10, pady=(15, 2))
-        sep = ctk.CTkFrame(self, height=2, fg_color="#334155")
-        sep.pack(fill="x", padx=10, pady=(0, 10))
-
-    def _row(
-        self,
-        label: str,
-        var: tk.Variable,
-        tooltip: str = "",
-        entry_width: int = 220,
-    ) -> ctk.CTkEntry:
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=2)
-
-        lbl = ctk.CTkLabel(row, text=label, width=180, anchor="w", font=ctk.CTkFont(size=12))
-        lbl.pack(side="left")
-
-        entry = ctk.CTkEntry(row, textvariable=var, width=entry_width, height=28, fg_color="#1E293B", border_width=1, border_color="#334155")
-        entry.pack(side="left", padx=(4, 0))
-
-        if tooltip:
-            ctk.CTkLabel(
-                row, text=tooltip, text_color="#6B7280",
-                font=ctk.CTkFont(size=10), anchor="w",
-            ).pack(side="left", padx=6)
-
-        var.trace_add("write", lambda *_: self._on_change and self._on_change())
-        return entry
-
-    def _path_row(self, label: str, var: tk.StringVar, is_file: bool = False) -> None:
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=2)
-
-        ctk.CTkLabel(row, text=label, width=180, anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
-        ctk.CTkEntry(row, textvariable=var, width=180, height=28, fg_color="#1E293B", border_width=0).pack(side="left", padx=(4, 0))
-
-        def browse() -> None:
-            if is_file:
-                p = filedialog.askopenfilename(
-                    filetypes=[("Blender files", "*.blend"), ("All files", "*.*")]
-                )
-            else:
-                p = filedialog.askdirectory()
-            if p:
-                var.set(p)
-
-        ctk.CTkButton(
-            row, text="Browse", width=70, height=28,
-            command=browse,
-            fg_color="#475569", hover_color="#64748B",
-        ).pack(side="left", padx=4)
-
-        var.trace_add("write", lambda *_: self._on_change and self._on_change())
-
-    def _check_row(self, label: str, var: tk.Variable, tooltip: str = "") -> None:
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkCheckBox(row, text=label, variable=var).pack(side="left")
-        if tooltip:
-            ctk.CTkLabel(
-                row, text=tooltip, text_color="#6B7280",
-                font=ctk.CTkFont(size=10),
-            ).pack(side="left", padx=8)
-        var.trace_add("write", lambda *_: self._on_change and self._on_change())
-
-    # ------------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------------
-
-    def _build(self) -> None:
-        cfg = self._config
-
-        # ---- API ----
-        self._section("Gemini API")
-        self._v("api_key", tk.StringVar(value=cfg.api_key))
-        self._row("API Key", self._vars["api_key"], entry_width=260)
-
-        self._v("model_primary", tk.StringVar(value=cfg.model_primary))
-        self._row("Primary Model", self._vars["model_primary"])
-
-        self._v("model_fallback", tk.StringVar(value=cfg.model_fallback))
-        self._row("Fallback Model", self._vars["model_fallback"])
-
-        self._v("temperature", tk.StringVar(value=str(cfg.temperature)))
-        self._row("Temperature", self._vars["temperature"], "0.0 – 2.0")
-
-        self._v("max_output_tokens", tk.StringVar(value=str(cfg.max_output_tokens)))
-        self._row("Max Output Tokens", self._vars["max_output_tokens"])
-
-        self._v("max_retries", tk.StringVar(value=str(cfg.max_retries)))
-        self._row("Max Retries", self._vars["max_retries"])
-
-        self._v("timeout_seconds", tk.StringVar(value=str(cfg.timeout_seconds)))
-        self._row("Timeout (s)", self._vars["timeout_seconds"])
-
-        # ---- Pipeline ----
-        self._section("Pipeline")
-        self._v("max_movable_objects", tk.StringVar(value=str(cfg.max_movable_objects)))
-        self._row("Max Movable Objects", self._vars["max_movable_objects"])
-
-        self._v("randomizer_seed", tk.StringVar(value=str(cfg.randomizer_seed)))
-        self._row("Randomizer Seed", self._vars["randomizer_seed"], "0 = random")
-
-        self._v("wall_margin", tk.StringVar(value=str(cfg.wall_margin)))
-        self._row("Wall Margin (m)", self._vars["wall_margin"])
-
-        self._v("max_overlap_ratio", tk.StringVar(value=str(cfg.max_overlap_ratio)))
-        self._row("Max Overlap Ratio", self._vars["max_overlap_ratio"])
-
-        self._v("max_placement_attempts", tk.StringVar(value=str(cfg.max_placement_attempts)))
-        self._row("Max Placement Attempts", self._vars["max_placement_attempts"])
-
-        self._v("min_quality_score", tk.StringVar(value=str(cfg.min_quality_score)))
-        self._row("Min Quality Score", self._vars["min_quality_score"], "1 – 10")
         
-        self._v("good_quality_score", tk.StringVar(value=str(cfg.good_quality_score)))
-        self._row("Good Quality Score", self._vars["good_quality_score"], "Protection threshold")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self._container = QWidget()
+        self.setWidget(self._container)
+        
+        self._setup_ui()
+        self._load_config_to_ui()
 
-        self._v("max_corrections", tk.StringVar(value=str(cfg.max_corrections)))
-        self._row("Max Visual Corrections", self._vars["max_corrections"])
+    def _setup_ui(self) -> None:
+        main_layout = QVBoxLayout(self._container)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(24)
 
-        self._v("skip_vision", tk.BooleanVar(value=False))
-        self._check_row("Skip Visual Critique", self._vars["skip_vision"],
-                        "Disable the second LLM (vision) call")
+        # Gemini API Section
+        api_group, api_content_layout = self._create_section("GEMINI API")
+        api_f = QFormLayout()
+        api_content_layout.addLayout(api_f)
+        
+        self._api_key = QLineEdit()
+        self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        api_f.addRow("API Key:", self._api_key)
+        
+        self._model_primary = QLineEdit()
+        api_f.addRow("Primary Model:", self._model_primary)
+        
+        self._model_fallback = QLineEdit()
+        api_f.addRow("Fallback Model:", self._model_fallback)
+        
+        self._temp = QDoubleSpinBox()
+        self._temp.setRange(0.0, 2.0)
+        self._temp.setSingleStep(0.1)
+        api_f.addRow("Temperature (0.0 - 2.0):", self._temp)
+        
+        self._max_tokens = QSpinBox()
+        self._max_tokens.setRange(100, 32000)
+        self._max_tokens.setSingleStep(100)
+        api_f.addRow("Max Output Tokens:", self._max_tokens)
+        
+        self._max_retries = QSpinBox()
+        self._max_retries.setRange(0, 10)
+        api_f.addRow("Max Retries:", self._max_retries)
+        
+        self._timeout = QSpinBox()
+        self._timeout.setRange(10, 600)
+        api_f.addRow("Timeout (s):", self._timeout)
+        
+        main_layout.addWidget(api_group)
 
-        # ---- Render ----
-        self._section("Render — Preview")
-        self._v("preview_width", tk.StringVar(value=str(cfg.preview_width)))
-        self._row("Width (px)", self._vars["preview_width"])
-        self._v("preview_height", tk.StringVar(value=str(cfg.preview_height)))
-        self._row("Height (px)", self._vars["preview_height"])
-        self._v("preview_samples", tk.StringVar(value=str(cfg.preview_samples)))
-        self._row("Samples", self._vars["preview_samples"])
+        # Pipeline & Physics Section
+        pipe_group, pipe_content_layout = self._create_section("PIPELINE & PHYSICS")
+        pipe_f = QFormLayout()
+        pipe_content_layout.addLayout(pipe_f)
+        
+        self._max_objects = QSpinBox()
+        self._max_objects.setRange(1, 100)
+        pipe_f.addRow("Max Movable Objects:", self._max_objects)
+        
+        self._seed = QSpinBox()
+        self._seed.setRange(0, 999999)
+        pipe_f.addRow("Randomizer Seed (0=rand):", self._seed)
+        
+        self._wall_margin = QDoubleSpinBox()
+        self._wall_margin.setRange(0.0, 5.0)
+        self._wall_margin.setSingleStep(0.05)
+        pipe_f.addRow("Wall Margin (m):", self._wall_margin)
+        
+        self._max_overlap = QDoubleSpinBox()
+        self._max_overlap.setRange(0.0, 1.0)
+        self._max_overlap.setSingleStep(0.01)
+        pipe_f.addRow("Max Overlap Ratio:", self._max_overlap)
+        
+        self._placement_attempts = QSpinBox()
+        self._placement_attempts.setRange(1, 1000)
+        pipe_f.addRow("Max Placement Attempts:", self._placement_attempts)
+        
+        self._min_quality = QSpinBox()
+        self._min_quality.setRange(1, 10)
+        pipe_f.addRow("Min Quality Score (1-10):", self._min_quality)
+        
+        self._good_quality = QSpinBox()
+        self._good_quality.setRange(1, 10)
+        pipe_f.addRow("Good Quality Score (Threshold):", self._good_quality)
+        
+        self._max_corrections = QSpinBox()
+        self._max_corrections.setRange(0, 10)
+        pipe_f.addRow("Max Visual Corrections:", self._max_corrections)
 
-        self._section("Render — Final")
-        self._v("final_width", tk.StringVar(value=str(cfg.final_width)))
-        self._row("Width (px)", self._vars["final_width"])
-        self._v("final_height", tk.StringVar(value=str(cfg.final_height)))
-        self._row("Height (px)", self._vars["final_height"])
-        self._v("final_samples", tk.StringVar(value=str(cfg.final_samples)))
-        self._row("Samples", self._vars["final_samples"])
+        self._skip_vision = QCheckBox("Skip Visual Critique")
+        self._skip_vision.setToolTip("Disable the second LLM (vision) call for faster testing")
+        pipe_f.addRow("", self._skip_vision)
+        
+        main_layout.addWidget(pipe_group)
 
-        # ---- Paths ----
-        self._section("Paths")
-        self._v("blender_executable", tk.StringVar(value=cfg.blender_executable))
-        self._row("Blender Executable", self._vars["blender_executable"], entry_width=240)
+        # Render Settings Section
+        render_group, render_content_layout = self._create_section("RENDER SETTINGS")
+        render_f = QFormLayout()
+        render_content_layout.addLayout(render_f)
+        
+        # Preview
+        prev_l = QHBoxLayout()
+        self._prev_w = QSpinBox()
+        self._prev_w.setRange(64, 4096)
+        self._prev_w.setSingleStep(64)
+        self._prev_h = QSpinBox()
+        self._prev_h.setRange(64, 4096)
+        self._prev_h.setSingleStep(64)
+        self._prev_s = QSpinBox()
+        self._prev_s.setRange(1, 1024)
+        prev_l.addWidget(QLabel("W:"))
+        prev_l.addWidget(self._prev_w)
+        prev_l.addWidget(QLabel("H:"))
+        prev_l.addWidget(self._prev_h)
+        prev_l.addWidget(QLabel("Samples:"))
+        prev_l.addWidget(self._prev_s)
+        render_f.addRow("Preview (px/smp):", prev_l)
+        
+        # Final
+        final_l = QHBoxLayout()
+        self._final_w = QSpinBox()
+        self._final_w.setRange(64, 8192)
+        self._final_w.setSingleStep(64)
+        self._final_h = QSpinBox()
+        self._final_h.setRange(64, 8192)
+        self._final_h.setSingleStep(64)
+        self._final_s = QSpinBox()
+        self._final_s.setRange(1, 8192)
+        final_l.addWidget(QLabel("W:"))
+        final_l.addWidget(self._final_w)
+        final_l.addWidget(QLabel("H:"))
+        final_l.addWidget(self._final_h)
+        final_l.addWidget(QLabel("Samples:"))
+        final_l.addWidget(self._final_s)
+        render_f.addRow("Final (px/smp):", final_l)
+        
+        main_layout.addWidget(render_group)
 
-        self._v("scenes_dir", tk.StringVar(value=str(cfg.scenes_dir)))
-        self._path_row("Scenes Directory", self._vars["scenes_dir"])  # type: ignore
+        # Paths & Logging Section
+        sys_group, sys_content_layout = self._create_section("PATHS & LOGGING")
+        sys_f = QFormLayout()
+        sys_content_layout.addLayout(sys_f)
+        
+        self._blender_exe = self._add_path_row(sys_f, "Blender Executable:", True)
+        self._scenes_dir = self._add_path_row(sys_f, "Scenes Directory:", False)
+        self._outputs_dir = self._add_path_row(sys_f, "Outputs Directory:", False)
+        
+        self._log_level = QComboBox()
+        self._log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        sys_f.addRow("Log Level:", self._log_level)
+        
+        main_layout.addWidget(sys_group)
+        main_layout.addStretch()
 
-        self._v("outputs_dir", tk.StringVar(value=str(cfg.outputs_dir)))
-        self._path_row("Outputs Directory", self._vars["outputs_dir"])  # type: ignore
+    def _create_section(self, title: str) -> tuple[QFrame, QVBoxLayout]:
+        """Creates a styled card with a title and returns the inner layout."""
+        f = QFrame()
+        f.setObjectName("card")
+        l = QVBoxLayout(f)
+        l.setContentsMargins(16, 16, 16, 16)
+        l.setSpacing(12)
+        
+        h = QLabel(title)
+        h.setObjectName("section_header")
+        l.addWidget(h)
+        
+        return f, l
 
-        # ---- Logging ----
-        self._section("Logging")
-        self._v("log_level", tk.StringVar(value=cfg.log_level))
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(row, text="Log Level", width=180, anchor="w").pack(side="left")
-        ctk.CTkOptionMenu(
-            row,
-            variable=self._vars["log_level"],  # type: ignore
-            values=["DEBUG", "INFO", "WARNING", "ERROR"],
-            width=140,
-        ).pack(side="left")
-        self._vars["log_level"].trace_add("write", lambda *_: self._on_change and self._on_change())
+    def _add_path_row(self, form: QFormLayout, label: str, is_file: bool) -> QLineEdit:
+        edit = QLineEdit()
+        btn = QPushButton("...")
+        btn.setObjectName("btn_browse")
+        btn.setFixedWidth(32)
+        btn.clicked.connect(lambda: (self._browse_file if is_file else self._browse_dir)(edit))
+        row = QHBoxLayout()
+        row.addWidget(edit)
+        row.addWidget(btn)
+        form.addRow(label, row)
+        return edit
 
-    def _v(self, key: str, var: tk.Variable) -> None:
-        self._vars[key] = var
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _load_config_to_ui(self) -> None:
+        c = self._config
+        self._api_key.setText(c.api_key)
+        self._model_primary.setText(c.model_primary)
+        self._model_fallback.setText(c.model_fallback)
+        self._temp.setValue(c.temperature)
+        self._max_tokens.setValue(c.max_output_tokens)
+        self._max_retries.setValue(c.max_retries)
+        self._timeout.setValue(c.timeout_seconds)
+        self._max_objects.setValue(c.max_movable_objects)
+        self._seed.setValue(c.randomizer_seed)
+        self._wall_margin.setValue(c.wall_margin)
+        self._max_overlap.setValue(c.max_overlap_ratio)
+        self._placement_attempts.setValue(c.max_placement_attempts)
+        self._min_quality.setValue(c.min_quality_score)
+        self._good_quality.setValue(c.good_quality_score)
+        self._max_corrections.setValue(c.max_corrections)
+        self._skip_vision.setChecked(c.skip_vision)
+        self._prev_w.setValue(c.preview_width)
+        self._prev_h.setValue(c.preview_height)
+        self._prev_s.setValue(c.preview_samples)
+        self._final_w.setValue(c.final_width)
+        self._final_h.setValue(c.final_height)
+        self._final_s.setValue(c.final_samples)
+        self._blender_exe.setText(c.blender_executable)
+        self._scenes_dir.setText(str(c.scenes_dir))
+        self._outputs_dir.setText(str(c.outputs_dir))
+        idx = self._log_level.findText(c.log_level)
+        if idx >= 0:
+            self._log_level.setCurrentIndex(idx)
 
     def apply_to_config(self) -> None:
-        """Write widget values back into the shared GUIConfig object."""
-        cfg = self._config
-        v = self._vars
+        c = self._config
+        c.api_key = self._api_key.text()
+        c.model_primary = self._model_primary.text()
+        c.model_fallback = self._model_fallback.text()
+        c.temperature = self._temp.value()
+        c.max_output_tokens = self._max_tokens.value()
+        c.max_retries = self._max_retries.value()
+        c.timeout_seconds = self._timeout.value()
+        c.max_movable_objects = self._max_objects.value()
+        c.randomizer_seed = self._seed.value()
+        c.wall_margin = self._wall_margin.value()
+        c.max_overlap_ratio = self._max_overlap.value()
+        c.max_placement_attempts = self._placement_attempts.value()
+        c.min_quality_score = self._min_quality.value()
+        c.good_quality_score = self._good_quality.value()
+        c.max_corrections = self._max_corrections.value()
+        c.skip_vision = self._skip_vision.isChecked()
+        c.preview_width = self._prev_w.value()
+        c.preview_height = self._prev_h.value()
+        c.preview_samples = self._prev_s.value()
+        c.final_width = self._final_w.value()
+        c.final_height = self._final_h.value()
+        c.final_samples = self._final_s.value()
+        c.blender_executable = self._blender_exe.text()
+        c.scenes_dir = Path(self._scenes_dir.text())
+        c.outputs_dir = Path(self._outputs_dir.text())
+        c.log_level = self._log_level.currentText()
+        c.save()
 
-        def _str(key: str) -> str:
-            return v[key].get()  # type: ignore[union-attr]
+    def _browse_file(self, e: QLineEdit) -> None:
+        p, _ = QFileDialog.getOpenFileName(self, "Select File")
+        if p:
+            e.setText(p)
 
-        def _int(key: str, default: int = 0) -> int:
-            try:
-                return int(_str(key))
-            except ValueError:
-                return default
-
-        def _float(key: str, default: float = 0.0) -> float:
-            try:
-                return float(_str(key))
-            except ValueError:
-                return default
-
-        cfg.api_key = _str("api_key")
-        cfg.model_primary = _str("model_primary")
-        cfg.model_fallback = _str("model_fallback")
-        cfg.temperature = _float("temperature", cfg.temperature)
-        cfg.max_output_tokens = _int("max_output_tokens", cfg.max_output_tokens)
-        cfg.max_retries = _int("max_retries", cfg.max_retries)
-        cfg.timeout_seconds = _int("timeout_seconds", cfg.timeout_seconds)
-
-        cfg.max_movable_objects = _int("max_movable_objects", cfg.max_movable_objects)
-        cfg.randomizer_seed = _int("randomizer_seed", cfg.randomizer_seed)
-        cfg.wall_margin = _float("wall_margin", cfg.wall_margin)
-        cfg.max_overlap_ratio = _float("max_overlap_ratio", cfg.max_overlap_ratio)
-        cfg.max_placement_attempts = _int("max_placement_attempts", cfg.max_placement_attempts)
-        cfg.min_quality_score = _int("min_quality_score", cfg.min_quality_score)
-        cfg.good_quality_score = _int("good_quality_score", cfg.good_quality_score)
-        cfg.max_corrections = _int("max_corrections", cfg.max_corrections)
-
-        cfg.preview_width = _int("preview_width", cfg.preview_width)
-        cfg.preview_height = _int("preview_height", cfg.preview_height)
-        cfg.preview_samples = _int("preview_samples", cfg.preview_samples)
-        cfg.final_width = _int("final_width", cfg.final_width)
-        cfg.final_height = _int("final_height", cfg.final_height)
-        cfg.final_samples = _int("final_samples", cfg.final_samples)
-
-        cfg.blender_executable = _str("blender_executable")
-        cfg.scenes_dir = Path(_str("scenes_dir"))
-        cfg.outputs_dir = Path(_str("outputs_dir"))
-        cfg.log_level = _str("log_level")
-
-    def get_skip_vision(self) -> bool:
-        return bool(self._vars["skip_vision"].get())  # type: ignore[union-attr]
+    def _browse_dir(self, e: QLineEdit) -> None:
+        p = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if p:
+            e.setText(p)

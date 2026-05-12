@@ -1,435 +1,305 @@
 # gui/app.py
 """
 NL2Scene3D — Main application window.
-
-Entry point:
-    python gui/app.py
-    python -m gui.app
 """
 from __future__ import annotations
 
-import json
 import sys
-import threading
-import tkinter as tk
+import platform
+import subprocess
+import ctypes
 from pathlib import Path
 
-import customtkinter as ctk
+import PySide6
+import PySide6.QtSvg
+import PySide6.QtSvgWidgets
+from PySide6.QtCore import Qt, Slot, QSize, QCoreApplication
+import os
 
-# Resolve project root so relative imports work regardless of cwd
-_GUI_DIR = Path(__file__).resolve().parent
-_PACKAGE_ROOT = _GUI_DIR.parent
-_SRC_DIR = _PACKAGE_ROOT.parent
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
+# --- Fix for SVG/Image plugins in virtual environments ---
+_plugins_path = os.path.join(os.path.dirname(PySide6.__file__), "plugins")
+QCoreApplication.addLibraryPath(_plugins_path)
+os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(_plugins_path, "platforms")
+# ---------------------------------------------------------
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QSplitter,
+    QTabWidget,
+    QFrame,
+    QLabel,
+    QMenuBar,
+    QMenu,
+    QMessageBox,
+    QFileDialog,
+)
+from PySide6.QtGui import QAction, QIcon, QFont, QCloseEvent
 
 from nl2scene3d.gui.core.config_bridge import GUIConfig, load_gui_config
-from nl2scene3d.gui.core.image_watcher import ImageWatcher
 from nl2scene3d.gui.core.pipeline_runner import PipelineRunner
+from nl2scene3d.gui.core.image_watcher import ImageWatcher
 from nl2scene3d.gui.widgets.config_panel import ConfigPanel
 from nl2scene3d.gui.widgets.image_viewer import ImageViewer
 from nl2scene3d.gui.widgets.log_panel import LogPanel
 from nl2scene3d.gui.widgets.metrics_panel import MetricsPanel
 from nl2scene3d.gui.widgets.pipeline_panel import PipelinePanel
-
-# --------------------------------------------------------------------------
-# Theme
-# --------------------------------------------------------------------------
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
-
-# UI Constants
-COLOR_BG = "#0F172A"      # Slate 900
-COLOR_SIDEBAR = "#1E293B" # Slate 800
-COLOR_ACCENT = "#6366F1"  # Indigo 500
-COLOR_TEXT = "#F8FAFC"    # Slate 50
-COLOR_SUBTEXT = "#94A3B8" # Slate 400
+from nl2scene3d.gui.theme import STYLESHEET, C_ACCENT, C_SUBTEXT
 
 _APP_TITLE = "NL2Scene3D — Scene Reorganization Pipeline"
-_APP_VERSION = "0.1.0"
+_APP_VERSION = "0.2.0"
 
+def set_windows_dark_mode(window_id: int) -> None:
+    """Apply immersive dark mode to the Windows title bar."""
+    if platform.system() != "Windows":
+        return
+    try:
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 11 and later) or 19 (older Windows 10)
+        # We'll try 20 first as it's the standard for modern systems.
+        dwm = ctypes.windll.dwmapi
+        rendering_policy = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(window_id, 20, ctypes.byref(rendering_policy), ctypes.sizeof(rendering_policy))
+    except Exception:
+        pass
 
-class NL2Scene3DApp(ctk.CTk):
-    """Root application window."""
+class NL2Scene3DApp(QMainWindow):
+    """
+    Main application window managing the pipeline lifecycle and user interface.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-
-        self.title(f"{_APP_TITLE}  v{_APP_VERSION}")
-        self.geometry("1400x860")
-        self.minsize(1100, 680)
-
-        # Shared configuration object
         self._config: GUIConfig = load_gui_config()
+        
+        self.setWindowTitle(f"{_APP_TITLE}  v{_APP_VERSION}")
+        self.setMinimumSize(1100, 720)
+        self.resize(1400, 860)
+        self.setStyleSheet(STYLESHEET)
 
-        # Pipeline runner
-        self._runner = PipelineRunner(
-            config=self._config,
-            on_log=self._on_log,
-            on_image=self._on_image,
-            on_finished=self._on_finished,
-        )
+        self._runner = PipelineRunner(self._config, parent=self)
+        self._runner.log_emitted.connect(self._on_log)
+        self._runner.image_detected.connect(self._on_image)
+        self._runner.pipeline_finished.connect(self._handle_finished)
 
-        # Image watcher (secondary detection)
         self._watcher: ImageWatcher | None = None
 
         self._build_ui()
-        self._apply_config_to_ui()
-
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+        self._on_log("INFO", "Application initialized.")
+        
+        # Apply dark title bar
+        set_windows_dark_mode(self.winId())
 
     def _build_ui(self) -> None:
-        # ---- Menu bar ----
+        self._central = QWidget()
+        self.setCentralWidget(self._central)
+        layout = QVBoxLayout(self._central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         self._build_menu()
 
-        # ---- Root paned layout ----
-        # Left column: pipeline control + config
-        # Right column: log (top) + viewer (bottom-left) + metrics (bottom-right)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(self._splitter)
 
-        root_pane = ctk.CTkFrame(self, fg_color="transparent")
-        root_pane.pack(fill="both", expand=True, padx=6, pady=6)
-        root_pane.columnconfigure(1, weight=1)
-        root_pane.rowconfigure(0, weight=1)
+        self._sidebar = QFrame()
+        self._sidebar.setObjectName("sidebar")
+        self._sidebar.setFixedWidth(340)
+        self._build_sidebar(self._sidebar)
+        self._splitter.addWidget(self._sidebar)
 
-        # Left sidebar
-        left = ctk.CTkFrame(root_pane, width=320, fg_color=COLOR_SIDEBAR, corner_radius=12)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left.pack_propagate(False)
-        self._build_left_sidebar(left)
-
-        # Right area — notebook
-        self._notebook = ctk.CTkTabview(root_pane, corner_radius=8)
-        self._notebook.grid(row=0, column=1, sticky="nsew")
-
-        self._notebook.add("Pipeline")
-        self._notebook.add("Log")
-        self._notebook.add("Renders")
-        self._notebook.add("Metrics")
-        self._notebook.add("Settings")
-
-        self._build_pipeline_tab(self._notebook.tab("Pipeline"))
-        self._build_log_tab(self._notebook.tab("Log"))
-        self._build_renders_tab(self._notebook.tab("Renders"))
-        self._build_metrics_tab(self._notebook.tab("Metrics"))
-        self._build_settings_tab(self._notebook.tab("Settings"))
+        self._main_content = QFrame()
+        content_layout = QVBoxLayout(self._main_content)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        content_layout.addWidget(self._tabs)
+        self._build_tabs()
+        self._splitter.addWidget(self._main_content)
 
     def _build_menu(self) -> None:
-        menubar = tk.Menu(self, bg=COLOR_SIDEBAR, fg=COLOR_TEXT,
-                          activebackground=COLOR_ACCENT, activeforeground="white",
-                          relief="flat", bd=0)
-        self.configure(menu=menubar)
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("&File")
+        
+        open_action = QAction("Open .blend file...", self)
+        open_action.triggered.connect(self._menu_open_blend)
+        file_menu.addAction(open_action)
+        
+        out_action = QAction("Open Output Directory", self)
+        out_action.triggered.connect(self._open_output_dir)
+        file_menu.addAction(out_action)
+        
+        file_menu.addSeparator()
+        file_menu.addAction("Exit", self.close)
 
-        file_menu = tk.Menu(menubar, tearoff=0, bg=COLOR_SIDEBAR, fg=COLOR_TEXT,
-                            activebackground=COLOR_ACCENT)
-        file_menu.add_command(label="Open .blend file...", command=self._menu_open_blend)
-        file_menu.add_separator()
-        file_menu.add_command(label="Open Output Directory", command=self._open_output_dir)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
-        menubar.add_cascade(label="File", menu=file_menu)
+        run_menu = menubar.addMenu("&Run")
+        run_menu.addAction("Run Pipeline", self._run_pipeline, "F5")
+        run_menu.addAction("Stop", self._stop_pipeline)
 
-        run_menu = tk.Menu(menubar, tearoff=0, bg="#1F2937", fg="#D1D5DB",
-                           activebackground="#374151")
-        run_menu.add_command(label="Run Pipeline", command=self._run_pipeline)
-        run_menu.add_command(label="Stop", command=self._stop_pipeline)
-        menubar.add_cascade(label="Run", menu=run_menu)
+    def _build_sidebar(self, parent: QFrame) -> None:
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        brand = QFrame()
+        brand.setFixedHeight(100)
+        brand.setStyleSheet("background-color: #0F172A; border-bottom: 1px solid #334155;")
+        bl = QVBoxLayout(brand)
+        
+        t = QLabel("NL2Scene3D")
+        t.setObjectName("label_accent")
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bl.addWidget(t)
+        
+        s = QLabel("AI SCENE REORGANIZER")
+        s.setObjectName("label_subtext")
+        s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bl.addWidget(s)
+        
+        layout.addWidget(brand)
 
-        help_menu = tk.Menu(menubar, tearoff=0, bg="#1F2937", fg="#D1D5DB",
-                            activebackground="#374151")
-        help_menu.add_command(label="About", command=self._show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
+        self._pipeline_panel = PipelinePanel(self._config, on_run=self._run_pipeline, on_stop=self._stop_pipeline)
+        layout.addWidget(self._pipeline_panel)
+        layout.addStretch()
 
-    def _build_left_sidebar(self, parent: ctk.CTkFrame) -> None:
-        # App branding
-        brand = ctk.CTkFrame(parent, fg_color="#0F172A", corner_radius=0)
-        brand.pack(fill="x")
+    def _build_tabs(self) -> None:
+        p_tab = QWidget()
+        pl = QHBoxLayout(p_tab)
+        self._p_splitter = QSplitter(Qt.Orientation.Horizontal)
+        pl.addWidget(self._p_splitter)
+        
+        self._viewer_mini = ImageViewer()
+        self._p_splitter.addWidget(self._viewer_mini)
+        
+        self._log_mini = LogPanel()
+        self._p_splitter.addWidget(self._log_mini)
+        
+        self._p_splitter.setStretchFactor(0, 3)
+        self._p_splitter.setStretchFactor(1, 2)
+        self._tabs.addTab(p_tab, "Pipeline")
 
-        ctk.CTkLabel(
-            brand,
-            text="NL2Scene3D",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=COLOR_ACCENT,
-        ).pack(pady=(20, 2))
+        self._log_full = LogPanel()
+        self._tabs.addTab(self._log_full, "Full Log")
 
-        ctk.CTkLabel(
-            brand,
-            text="AI SCENE REORGANIZER",
-            font=ctk.CTkFont(size=11, weight="bold", slant="italic"),
-            text_color=COLOR_SUBTEXT,
-        ).pack(pady=(0, 20))
+        self._viewer_full = ImageViewer()
+        self._tabs.addTab(self._viewer_full, "Renders Gallery")
 
-        sep = ctk.CTkFrame(brand, height=2, fg_color="#334155")
-        sep.pack(fill="x", padx=20)
+        self._metrics_panel = MetricsPanel()
+        self._tabs.addTab(self._metrics_panel, "Metrics")
 
-        # Pipeline panel
-        self._pipeline_panel = PipelinePanel(
-            parent,
-            config=self._config,
-            on_run=self._run_pipeline,
-            on_stop=self._stop_pipeline,
-        )
-        self._pipeline_panel.pack(fill="both", expand=True)
+        self._config_panel = ConfigPanel(self._config)
+        self._tabs.addTab(self._config_panel, "Settings")
 
-    def _build_pipeline_tab(self, parent) -> None:
-        # This tab shows a combined view: top image + live log
-        parent.columnconfigure(0, weight=3)
-        parent.columnconfigure(1, weight=2)
-        parent.rowconfigure(0, weight=1)
-
-        self._viewer_mini = ImageViewer(parent)
-        self._viewer_mini.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
-
-        self._log_mini = LogPanel(parent)
-        self._log_mini.grid(row=0, column=1, sticky="nsew", padx=(2, 4), pady=4)
-
-    def _build_log_tab(self, parent) -> None:
-        self._log_full = LogPanel(parent)
-        self._log_full.pack(fill="both", expand=True, padx=4, pady=4)
-
-    def _build_renders_tab(self, parent) -> None:
-        self._viewer_full = ImageViewer(parent)
-        self._viewer_full.pack(fill="both", expand=True, padx=4, pady=4)
-
-    def _build_metrics_tab(self, parent) -> None:
-        self._metrics_panel = MetricsPanel(parent)
-        self._metrics_panel.pack(fill="both", expand=True, padx=4, pady=4)
-
-    def _build_settings_tab(self, parent) -> None:
-        self._config_panel = ConfigPanel(
-            parent,
-            config=self._config,
-            on_change=self._on_config_changed,
-        )
-        self._config_panel.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ------------------------------------------------------------------
-    # Pipeline callbacks (called from worker thread → marshal to main)
-    # ------------------------------------------------------------------
-
+    @Slot(str, str)
     def _on_log(self, level: str, message: str) -> None:
-        # Forward to both log panels
         self._log_mini.append(level, message)
         self._log_full.append(level, message)
-        # Update pipeline panel step tracker
-        self.after(0, self._pipeline_panel.update_from_log, message)
+        self._pipeline_panel.update_from_log(message)
 
-    def _on_image(self, path: Path) -> None:
+    @Slot(str)
+    def _on_image(self, path: str) -> None:
         self._viewer_mini.add_image(path)
         self._viewer_full.add_image(path)
-        # Switch to Pipeline tab to show the new image immediately
-        self.after(0, lambda: self._notebook.set("Pipeline"))
 
-    def _on_finished(self, success: bool, error_msg: str | None) -> None:
-        self.after(0, self._handle_finished, success, error_msg)
-
-    def _handle_finished(self, success: bool, error_msg: str | None) -> None:
+    @Slot(bool, str)
+    def _handle_finished(self, success: bool, error_msg: str) -> None:
         self._pipeline_panel.set_running(False)
         if self._watcher:
             self._watcher.stop()
-
+        
         if success:
-            self._pipeline_panel.set_status(
-                "Pipeline completed successfully.", "#34D399", "✓"
-            )
+            self._pipeline_panel.set_status("Pipeline completed successfully.", "#34D399")
             self._load_metrics()
-            self._notebook.set("Metrics")
+            self._tabs.setCurrentIndex(3)
         else:
-            msg = error_msg or "Pipeline failed."
-            self._pipeline_panel.set_status(msg, "#EF4444", "✗")
-            self._log_full.append("ERROR", f"Pipeline finished with error: {msg}")
-
-    # ------------------------------------------------------------------
-    # Run / Stop
-    # ------------------------------------------------------------------
+            self._pipeline_panel.set_status(error_msg or "Pipeline failed.", "#EF4444")
 
     def _run_pipeline(self) -> None:
-        if self._runner.is_running:
+        if self._runner.isRunning():
             return
-
+            
         self._config_panel.apply_to_config()
 
         blend = self._pipeline_panel.blend_file
         scene_name = self._pipeline_panel.scene_name
-
+        
         if not scene_name:
-            self._show_error("Scene name is required. Select a .blend file or enter a name.")
+            QMessageBox.warning(self, "Validation Error", "Scene name is required.")
             return
-
+            
         if not self._config.api_key:
-            self._show_error(
-                "GEMINI_API_KEY is not set.\n"
-                "Add it to the .env file in the project root or set it as an environment variable."
-            )
+            QMessageBox.critical(self, "Config Error", "API Key missing.")
             return
 
-        output_dir = self._pipeline_panel.output_dir or (
-            self._config.outputs_dir / scene_name
-        )
+        output_dir = self._pipeline_panel.output_dir or (self._config.outputs_dir / scene_name)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Reset UI
         self._log_mini.clear()
         self._log_full.clear()
         self._viewer_mini.clear()
         self._viewer_full.clear()
         self._metrics_panel.clear()
 
-        # Configure runner
-        self._runner._config = self._config
         self._runner.blend_file = blend
         self._runner.scene_name = scene_name
         self._runner.output_dir = output_dir
         self._runner.seed = self._config.randomizer_seed
-        self._runner.skip_vision = self._config_panel.get_skip_vision()
+        self._runner.skip_vision = self._config.skip_vision
         self._runner.max_objects = self._config.max_movable_objects
-        self._runner.model_override = ""
 
-        # Start watcher
-        self._watcher = ImageWatcher(output_dir, on_new_image=self._on_image)
+        self._watcher = ImageWatcher(output_dir)
+        self._watcher.new_image_found.connect(self._on_image)
         self._watcher.start()
 
-        # Start runner
         self._pipeline_panel.set_running(True)
-        self._pipeline_panel.set_status("Running...", "#60A5FA", "...")
-        self._notebook.set("Pipeline")
+        self._pipeline_panel.set_status("Running...", "#6366F1")
+        self._tabs.setCurrentIndex(0)
         self._runner.start()
 
     def _stop_pipeline(self) -> None:
-        self._runner.stop()
+        self._runner.request_stop()
         if self._watcher:
             self._watcher.stop()
         self._pipeline_panel.set_running(False)
-        self._pipeline_panel.set_status("Stopped by user.", "#F59E0B", "⏹")
+        self._pipeline_panel.set_status("Stopped.", "#F59E0B")
 
-    # ------------------------------------------------------------------
-    # Config
-    # ------------------------------------------------------------------
-
-    def _on_config_changed(self) -> None:
-        # Live sync without blocking
-        pass
-
-    def _apply_config_to_ui(self) -> None:
-        pass  # ConfigPanel reads directly from self._config on build
-
-    # ------------------------------------------------------------------
-    # Metrics
-    # ------------------------------------------------------------------
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._runner.request_stop()
+        if self._watcher:
+            self._watcher.stop()
+        event.accept()
 
     def _load_metrics(self) -> None:
         scene_name = self._pipeline_panel.scene_name
-        output_dir = self._pipeline_panel.output_dir or (
-            self._config.outputs_dir / scene_name
-        )
-        metrics_path = output_dir / "metrics.json"
-        if metrics_path.exists():
-            self._metrics_panel.load_from_file(metrics_path)
-
-    # ------------------------------------------------------------------
-    # Menu actions
-    # ------------------------------------------------------------------
+        out = self._pipeline_panel.output_dir or (self._config.outputs_dir / scene_name)
+        p = out / "metrics.json"
+        if p.exists():
+            self._metrics_panel.load_from_file(p)
 
     def _menu_open_blend(self) -> None:
-        from tkinter import filedialog
-        path = filedialog.askopenfilename(
-            title="Open .blend file",
-            filetypes=[("Blender files", "*.blend"), ("All files", "*.*")],
-            initialdir=str(self._config.scenes_dir),
-        )
-        if path:
-            p = Path(path)
-            self._pipeline_panel._blend_file = p
-            self._pipeline_panel._blend_var.set(path)
-            if not self._pipeline_panel._name_var.get():
-                self._pipeline_panel._name_var.set(p.stem)
+        p, _ = QFileDialog.getOpenFileName(self, "Open Blender File", str(self._config.scenes_dir), "Blender Files (*.blend)")
+        if p:
+            self._pipeline_panel.set_blend_file(Path(p))
 
     def _open_output_dir(self) -> None:
-        import subprocess, platform
         scene_name = self._pipeline_panel.scene_name
         out = self._pipeline_panel.output_dir or (self._config.outputs_dir / scene_name)
         out.mkdir(parents=True, exist_ok=True)
         if platform.system() == "Windows":
             subprocess.Popen(["explorer", str(out)])
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", str(out)])
         else:
-            subprocess.Popen(["xdg-open", str(out)])
-
-    def _show_about(self) -> None:
-        win = ctk.CTkToplevel(self)
-        win.title("About NL2Scene3D")
-        win.geometry("400x240")
-        win.resizable(False, False)
-        win.grab_set()
-
-        ctk.CTkLabel(
-            win, text="NL2Scene3D",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color="#60A5FA",
-        ).pack(pady=(24, 4))
-
-        ctk.CTkLabel(
-            win,
-            text="Scene Reorganization via Multimodal Language Models",
-            font=ctk.CTkFont(size=11),
-            text_color="#9CA3AF",
-        ).pack()
-
-        ctk.CTkLabel(
-            win, text=f"Version {_APP_VERSION}",
-            text_color="#6B7280",
-        ).pack(pady=(8, 0))
-
-        ctk.CTkButton(
-            win, text="Close", command=win.destroy,
-            width=100, height=32,
-        ).pack(pady=24)
-
-    def _show_error(self, message: str) -> None:
-        win = ctk.CTkToplevel(self)
-        win.title("Error")
-        win.geometry("440x180")
-        win.resizable(False, False)
-        win.grab_set()
-
-        ctk.CTkLabel(
-            win, text="Error",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#EF4444",
-        ).pack(pady=(20, 4))
-
-        ctk.CTkLabel(
-            win, text=message,
-            wraplength=400,
-            text_color="#D1D5DB",
-        ).pack(padx=20)
-
-        ctk.CTkButton(win, text="OK", command=win.destroy, width=80).pack(pady=16)
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def _on_close(self) -> None:
-        if self._runner.is_running:
-            self._runner.stop()
-        if self._watcher:
-            self._watcher.stop()
-        self.destroy()
-
-
-# --------------------------------------------------------------------------
-# Entry point
-# --------------------------------------------------------------------------
+            subprocess.Popen(["open" if platform.system() == "Darwin" else "xdg-open", str(out)])
 
 def main() -> None:
-    app = NL2Scene3DApp()
-    app.mainloop()
-
+    # Force SVG plugin loading
+    _ = PySide6.QtSvg.QSvgRenderer
+    
+    app = QApplication(sys.argv)
+    app.setApplicationName("NL2Scene3D")
+    app.setFont(QFont("Inter", 10))
+    window = NL2Scene3DApp()
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
