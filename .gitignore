@@ -17,6 +17,9 @@ ENV/
 scenes/outputs/
 scenes/originals/*.blend
 
+# File installazione plugin blender
+addon/*.zip
+
 # Log dell'applicazione
 logs/
 *.log
