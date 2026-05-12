@@ -152,8 +152,8 @@ class ImageViewer(ctk.CTkFrame):
     def _add_thumbnail(self, path: Path, index: int) -> None:
         try:
             img = Image.open(path).convert("RGBA")
-            img.thumbnail(_THUMB_SIZE, Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(img)
+            # Use CTkImage for scaling support
+            photo = ctk.CTkImage(light_image=img, dark_image=img, size=_THUMB_SIZE)
             self._photo_refs.append(photo)
         except Exception:
             return
@@ -184,13 +184,11 @@ class ImageViewer(ctk.CTkFrame):
             # Scale to fit the preview frame
             preview_w = max(self._preview_label.winfo_width(), 400)
             preview_h = max(self._preview_label.winfo_height(), 300)
-            img.thumbnail((preview_w - 8, preview_h - 8), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(img)
+            
+            photo = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_w - 8, preview_h - 8))
         except Exception:
             return
 
-        # Keep reference to avoid GC
-        self._preview_label._ctk_image = photo  # type: ignore[attr-defined]
         self._preview_label.configure(image=photo, text="")
 
         # Step label from filename
@@ -198,7 +196,13 @@ class ImageViewer(ctk.CTkFrame):
         step = _STEP_LABELS.get(
             next((k for k in _STEP_LABELS if k in stem), ""), stem
         )
-        view = "Top-Down" if stem.endswith("_top") else "Isometric" if stem.endswith("_iso") else ""
+        view_map = {
+            "_top": "Top-Down",
+            "_iso": "Isometric",
+            "_iso2": "Isometric 2",
+            "_front": "Frontal"
+        }
+        view = next((v for k, v in view_map.items() if stem.endswith(k)), "")
         self._step_label.configure(text=f"{step}  {view}".strip())
 
         self._update_nav()

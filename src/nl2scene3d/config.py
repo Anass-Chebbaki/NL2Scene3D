@@ -200,7 +200,7 @@ class RenderConfig:
                 os.environ.get("RENDER_FINAL_WIDTH", str(final_toml.get("width", 1280)))
             ),
             final_height=int(
-                os.environ.get("RENDER_FINAL_HEIGHT", str(final_toml.get("height", 720)))
+                os.environ.get("RENDER_FINAL_HEIGHT", str(final_toml.get("height", 1280)))
             ),
             final_samples=int(
                 os.environ.get("RENDER_FINAL_SAMPLES", str(final_toml.get("samples", 256)))
@@ -267,6 +267,7 @@ class PipelineConfig:
     jitter_ratio: float = 0.50
     max_placement_attempts: int = 100
     min_quality_score: int = 7
+    good_quality_score: int = 8
     max_corrections: int = 5
     non_mesh_types: frozenset[str] = field(default_factory=frozenset)
     structural_patterns: list[str] = field(default_factory=list)
@@ -331,6 +332,9 @@ class PipelineConfig:
             ),
             min_quality_score=int(
                 pipeline_toml.get("min_quality_score_for_corrections", 7)
+            ),
+            good_quality_score=int(
+                pipeline_toml.get("good_quality_score_for_protection", 8)
             ),
             max_corrections=int(
                 pipeline_toml.get("max_corrections_to_apply", 5)
@@ -427,6 +431,11 @@ class AppConfig:
             pipeline=PipelineConfig.from_config(toml_data),
             logging=LoggingConfig.from_config(toml_data),
         )
+
+    @property
+    def blender_executable(self) -> str:
+        """Restituisce il comando per lanciare Blender."""
+        return os.environ.get("BLENDER_EXECUTABLE", "blender")
 
 
 def get_config() -> AppConfig:

@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from gui.core.config_bridge import GUIConfig
+from nl2scene3d.gui.core.config_bridge import GUIConfig
 
 
 class PipelineRunner:
@@ -105,6 +105,8 @@ class PipelineRunner:
             "--log-level", cfg.log_level,
             "--max-objects", str(self.max_objects),
             "--seed", str(self.seed),
+            "--min-quality-score", str(self._config.min_quality_score),
+            "--good-quality-score", str(self._config.good_quality_score),
         ]
         if self.skip_vision:
             cmd.append("--skip-vision")

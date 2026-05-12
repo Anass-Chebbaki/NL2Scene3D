@@ -66,6 +66,10 @@ max_placement_attempts = 500
 # le correzioni vengano comunque applicate.
 min_quality_score_for_corrections = 7
 
+# Punteggio al di sopra del quale il layout e' considerato buono
+# e le correzioni NON vengono applicate (per proteggere il layout).
+good_quality_score_for_protection = 8
+
 # Numero massimo di correzioni da applicare in fase di refinement
 max_corrections_to_apply = 5
 

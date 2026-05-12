@@ -131,6 +131,15 @@ def _validate_and_sanitize_llm_output(
     for llm_obj_data in llm_objects_list:
         if isinstance(llm_obj_data, dict) and "name" in llm_obj_data:
             llm_objects_by_name[llm_obj_data["name"]] = llm_obj_data
+        elif isinstance(llm_obj_data, list) and len(llm_obj_data) >= 4:
+            # Formato compatto: [name, x, y, rz_degrees]
+            name = str(llm_obj_data[0])
+            rz_rad = float(llm_obj_data[3]) * (math.pi / 180.0)
+            llm_objects_by_name[name] = {
+                "name": name,
+                "location": [float(llm_obj_data[1]), float(llm_obj_data[2]), 0.0],
+                "rotation_euler": [0.0, 0.0, rz_rad],
+            }
 
     corrected_objects: list[SceneObject] = []
     clamped_count = 0
@@ -234,8 +243,9 @@ def _validate_and_sanitize_llm_output(
         len(original_state.objects),
     )
 
-    # Passaggio finale: Risoluzione collisioni (Jittering)
-    from nl2scene3d.utils.geometry import has_collision
+    # Passaggio finale: Risoluzione collisioni con separazione intelligente
+    from nl2scene3d.utils.geometry import has_collision, compute_aabb_2d
+    import random as _rng
     
     final_objects: list[SceneObject] = []
     # Prima aggiungiamo tutti gli oggetti non movibili (strutturali)
@@ -244,36 +254,77 @@ def _validate_and_sanitize_llm_output(
             final_objects.append(obj)
             
     # Poi aggiungiamo i movibili uno ad uno, risolvendo eventuali collisioni
+    # con separazione basata sul vettore di penetrazione anziché jitter casuale.
+    main_furniture_categories = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
+    jitter_resolved = 0
+    jitter_failed = 0
+    
     for obj in corrected_objects:
         if not obj.is_movable:
             continue
             
-        # Tenta di risolvere la collisione tramite jittering leggero (max 10 tentativi)
-        # Se fallisce, lo lascia li' (meglio un po' di overlap che spostarlo a caso)
-        # ATTENZIONE: le collisioni per le decorazioni (che vanno SOPRA i mobili) 
-        # risulterebbero sempre True (perche' toccano il mobile). Quindi facciamo
-        # jittering SOLO per i mobili principali contro altri mobili principali.
-        main_furniture_categories = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
-        
         if obj.category in main_furniture_categories:
-            attempts = 0
             original_loc = list(obj.transform.location)
-            # Filtra solo i mobili e la stanza
+            # Include sia i mobili che i muri per il check collisioni
             collidable_objects = [
                 o for o in final_objects 
-                if o.category in main_furniture_categories or (o.category == "structural" and "door" not in o.name.lower() and "window" not in o.name.lower())
+                if o.category in main_furniture_categories or o.category == "structural"
             ]
-            while has_collision(obj, collidable_objects) and attempts < 10:
-                import random
-                obj.transform.location[0] = original_loc[0] + random.uniform(-0.1, 0.1)
-                obj.transform.location[1] = original_loc[1] + random.uniform(-0.1, 0.1)
-                attempts += 1
+            
+            # Tenta di risolvere la collisione con step incrementali
+            # di dimensione crescente (0.1m, 0.2m, 0.3m)
+            max_attempts = 30
+            jitter_sizes = [0.15, 0.25, 0.35]  # Incrementi crescenti
+            attempt = 0
+            resolved = False
+            
+            while has_collision(obj, collidable_objects, check_walls=True) and attempt < max_attempts:
+                jitter_mag = jitter_sizes[min(attempt // 10, len(jitter_sizes) - 1)]
+                angle = _rng.uniform(0, 2 * math.pi)
+                dx = jitter_mag * math.cos(angle)
+                dy = jitter_mag * math.sin(angle)
                 
-            if attempts >= 10:
-                logger.warning("Impossibile risolvere collisione per '%s' dopo 10 tentativi.", obj.name)
-                obj.transform.location = original_loc # Ripristina posizione LLM se jitter fallisce
+                new_x = original_loc[0] + dx * (1 + attempt * 0.1)
+                new_y = original_loc[1] + dy * (1 + attempt * 0.1)
+                
+                # Clamp ai room bounds
+                if room_bounds is not None:
+                    half_dim_x = obj.transform.dimensions[0] / 2.0
+                    half_dim_y = obj.transform.dimensions[1] / 2.0
+                    new_x = max(room_bounds.x_min + half_dim_x + 0.05,
+                                min(room_bounds.x_max - half_dim_x - 0.05, new_x))
+                    new_y = max(room_bounds.y_min + half_dim_y + 0.05,
+                                min(room_bounds.y_max - half_dim_y - 0.05, new_y))
+                
+                obj.transform.location[0] = new_x
+                obj.transform.location[1] = new_y
+                attempt += 1
+            
+            if attempt > 0:
+                if not has_collision(obj, collidable_objects, check_walls=True):
+                    jitter_resolved += 1
+                    logger.debug(
+                        "Collisione per '%s' risolta dopo %d tentativi (spostamento: %.2fm).",
+                        obj.name, attempt,
+                        math.sqrt((obj.transform.location[0] - original_loc[0])**2 +
+                                  (obj.transform.location[1] - original_loc[1])**2),
+                    )
+                else:
+                    jitter_failed += 1
+                    logger.warning(
+                        "Impossibile risolvere collisione per '%s' dopo %d tentativi. "
+                        "Mantenuta posizione LLM.",
+                        obj.name, max_attempts,
+                    )
+                    obj.transform.location = original_loc
             
         final_objects.append(obj)
+
+    if jitter_resolved > 0 or jitter_failed > 0:
+        logger.info(
+            "Risoluzione collisioni post-LLM: %d risolte, %d irrisolvibili.",
+            jitter_resolved, jitter_failed,
+        )
 
     return SceneState(
         scene_name=original_state.scene_name,
@@ -283,6 +334,8 @@ def _validate_and_sanitize_llm_output(
         metadata={
             "clamped_count": clamped_count,
             "missing_count": missing_count,
+            "jitter_resolved": jitter_resolved,
+            "jitter_failed": jitter_failed,
         },
     )
 
@@ -312,6 +365,37 @@ class SceneReorganizer:
         self.prompts_dir = prompts_dir
         logger.info("SceneReorganizer inizializzato.")
 
+    def _build_footprint_table(self, state: SceneState) -> str:
+        """
+        Costruisce una tabella dei footprint AABB per ogni oggetto movibile.
+        Questo aiuta l'LLM a ragionare sullo spazio fisico occupato.
+        """
+        from nl2scene3d.utils.geometry import compute_aabb_2d
+        
+        lines = ["\nOBJECT FOOTPRINT TABLE (pre-computed AABB on XY plane):"]
+        lines.append("| Object Name | Width(X) | Depth(Y) | Height(Z) | Floor Area |")
+        lines.append("|-------------|----------|----------|-----------|------------|")
+        
+        for obj in state.movable_objects:
+            dim = obj.transform.dimensions
+            rz = obj.transform.rotation_euler[2]
+            cos_z = abs(math.cos(rz))
+            sin_z = abs(math.sin(rz))
+            eff_x = dim[0] * cos_z + dim[1] * sin_z
+            eff_y = dim[0] * sin_z + dim[1] * cos_z
+            area = eff_x * eff_y
+            lines.append(
+                f"| {obj.name} | {eff_x:.2f}m | {eff_y:.2f}m | {dim[2]:.2f}m | {area:.2f}m² |"
+            )
+        
+        lines.append("")
+        lines.append(
+            "USE THIS TABLE to avoid placing objects where their footprints would overlap. "
+            "For each object, its center must be at least (Width/2 + OtherWidth/2) apart "
+            "in X or (Depth/2 + OtherDepth/2) apart in Y from every other object."
+        )
+        return "\n".join(lines)
+
     def _build_user_prompt(self, state: SceneState) -> str:
         """
         Costruisce il prompt utente con i dati della scena disordinata.
@@ -327,6 +411,7 @@ class SceneReorganizer:
 
         room_bounds = state.room_bounds
         scene_json = _build_scene_json_for_llm(state)
+        footprint_table = self._build_footprint_table(state)
 
         if room_bounds is not None:
             prompt = template.format(
@@ -340,7 +425,13 @@ class SceneReorganizer:
                 room_height=room_bounds.height,
                 scene_json=scene_json,
             )
-            return prompt + "\n\nCRITICAL INSTRUCTION: Your output JSON MUST ONLY include the objects that have 'is_movable': true. For each object, ONLY return the 'name', 'location', and 'rotation_euler' fields. DO NOT return structural objects (doors/windows), cameras, lights, or the 'dimensions', 'type', 'category' fields to save output tokens."
+            compact_instr = (
+                "\n\nOUTPUT FORMAT (COMPACT JSON):"
+                "\nReturn a JSON list of lists, where each inner list is: [\"object_name\", x, y, rotation_z_degrees]"
+                "\nExample: [[\"furniture_bed\", 1.2, -0.5, 90], [\"furniture_desk\", -2.1, 1.0, 0]]"
+                "\n\nONLY include movable objects. DO NOT add any text, descriptions, or other fields."
+            )
+            return prompt + footprint_table + compact_instr
 
         return (
             "You are an interior designer. Please reorganize the following 3D scene JSON "

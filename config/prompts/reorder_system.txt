@@ -33,5 +33,14 @@ STRICT CONSTRAINTS:
 - All coordinates must be within the provided room bounds.
 - Rotation is in radians; only modify the Z axis (index 2) for yaw rotation (0 = East, PI/2 = North, counter-clockwise).
 
+ANTI-OVERLAP RULES (CRITICAL):
+You will receive an OBJECT FOOTPRINT TABLE with pre-computed floor areas for each object.
+USE IT to calculate minimum spacing. For two objects A and B:
+- Minimum X distance between centers: (A.Width/2 + B.Width/2) + 0.05m margin
+- Minimum Y distance between centers: (A.Depth/2 + B.Depth/2) + 0.05m margin
+- At least ONE of these conditions must be satisfied (X-separation OR Y-separation).
+- Large furniture (beds, sofas, wardrobes) should be placed first, near walls.
+- Smaller items should be placed relative to the larger furniture.
+
 OUTPUT FORMAT:
 Return a JSON object containing an "objects" array. Each object must have its "name", your chosen "spatial_relation", and the new "location" and "rotation_euler".

@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from gui.core.config_bridge import GUIConfig
+from nl2scene3d.gui.core.config_bridge import GUIConfig
 
 
 class ConfigPanel(ctk.CTkScrollableFrame):
@@ -37,12 +37,12 @@ class ConfigPanel(ctk.CTkScrollableFrame):
 
     def _section(self, title: str) -> None:
         ctk.CTkLabel(
-            self, text=title,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#60A5FA",
-        ).pack(anchor="w", padx=6, pady=(12, 2))
-        sep = ctk.CTkFrame(self, height=1, fg_color="#374151")
-        sep.pack(fill="x", padx=6, pady=(0, 6))
+            self, text=title.upper(),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#6366F1",
+        ).pack(anchor="w", padx=10, pady=(15, 2))
+        sep = ctk.CTkFrame(self, height=2, fg_color="#334155")
+        sep.pack(fill="x", padx=10, pady=(0, 10))
 
     def _row(
         self,
@@ -52,12 +52,12 @@ class ConfigPanel(ctk.CTkScrollableFrame):
         entry_width: int = 220,
     ) -> ctk.CTkEntry:
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=6, pady=2)
+        row.pack(fill="x", padx=10, pady=2)
 
-        lbl = ctk.CTkLabel(row, text=label, width=180, anchor="w")
+        lbl = ctk.CTkLabel(row, text=label, width=180, anchor="w", font=ctk.CTkFont(size=12))
         lbl.pack(side="left")
 
-        entry = ctk.CTkEntry(row, textvariable=var, width=entry_width)
+        entry = ctk.CTkEntry(row, textvariable=var, width=entry_width, height=28, fg_color="#1E293B", border_width=1, border_color="#334155")
         entry.pack(side="left", padx=(4, 0))
 
         if tooltip:
@@ -71,10 +71,10 @@ class ConfigPanel(ctk.CTkScrollableFrame):
 
     def _path_row(self, label: str, var: tk.StringVar, is_file: bool = False) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=6, pady=2)
+        row.pack(fill="x", padx=10, pady=2)
 
-        ctk.CTkLabel(row, text=label, width=180, anchor="w").pack(side="left")
-        ctk.CTkEntry(row, textvariable=var, width=180).pack(side="left", padx=(4, 0))
+        ctk.CTkLabel(row, text=label, width=180, anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
+        ctk.CTkEntry(row, textvariable=var, width=180, height=28, fg_color="#1E293B", border_width=0).pack(side="left", padx=(4, 0))
 
         def browse() -> None:
             if is_file:
@@ -89,7 +89,7 @@ class ConfigPanel(ctk.CTkScrollableFrame):
         ctk.CTkButton(
             row, text="Browse", width=70, height=28,
             command=browse,
-            fg_color="#374151", hover_color="#4B5563",
+            fg_color="#475569", hover_color="#64748B",
         ).pack(side="left", padx=4)
 
         var.trace_add("write", lambda *_: self._on_change and self._on_change())
@@ -154,6 +154,9 @@ class ConfigPanel(ctk.CTkScrollableFrame):
 
         self._v("min_quality_score", tk.StringVar(value=str(cfg.min_quality_score)))
         self._row("Min Quality Score", self._vars["min_quality_score"], "1 – 10")
+        
+        self._v("good_quality_score", tk.StringVar(value=str(cfg.good_quality_score)))
+        self._row("Good Quality Score", self._vars["good_quality_score"], "Protection threshold")
 
         self._v("max_corrections", tk.StringVar(value=str(cfg.max_corrections)))
         self._row("Max Visual Corrections", self._vars["max_corrections"])
@@ -245,6 +248,7 @@ class ConfigPanel(ctk.CTkScrollableFrame):
         cfg.max_overlap_ratio = _float("max_overlap_ratio", cfg.max_overlap_ratio)
         cfg.max_placement_attempts = _int("max_placement_attempts", cfg.max_placement_attempts)
         cfg.min_quality_score = _int("min_quality_score", cfg.min_quality_score)
+        cfg.good_quality_score = _int("good_quality_score", cfg.good_quality_score)
         cfg.max_corrections = _int("max_corrections", cfg.max_corrections)
 
         cfg.preview_width = _int("preview_width", cfg.preview_width)

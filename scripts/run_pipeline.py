@@ -72,9 +72,11 @@ def parse_args() -> argparse.Namespace:
     """
     argv = sys.argv
     if "--" in argv:
+        # Launching via Blender: args are after '--'
         argv = argv[argv.index("--") + 1:]
     else:
-        argv = []
+        # Launching via direct Python: args are standard
+        argv = argv[1:]
 
     parser = argparse.ArgumentParser(
         description="NL2Scene3D Pipeline - Scene reorganization via MLLM",
@@ -133,6 +135,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Livello di verbosita' del logging (override config).",
     )
+    parser.add_argument(
+        "--min-quality-score",
+        type=int,
+        default=None,
+        help="Soglia minima per applicare correzioni visive (1-10).",
+    )
+    parser.add_argument(
+        "--good-quality-score",
+        type=int,
+        default=None,
+        help="Soglia oltre la quale il layout e' protetto (1-10).",
+    )
     return parser.parse_args(argv)
 
 
@@ -148,6 +162,39 @@ def run_pipeline(args: argparse.Namespace) -> None:
     except EnvironmentError as exc:
         print(f"CRITICAL: Errore di configurazione: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    # --- AUTO-WRAPPER LOGIC ---
+    try:
+        import bpy
+    except ImportError:
+        # We are outside Blender! Let's launch it.
+        import subprocess
+        
+        blender_bin = app_config.blender_executable
+        logger.info("Esecuzione esterna rilevata. Lancio Blender: %s", blender_bin)
+        
+        # Build the command: blender --background [blend_file] --python scripts/run_pipeline.py -- [args]
+        cmd = [blender_bin, "--background"]
+        if args.blend_file:
+            cmd.extend([str(args.blend_file)])
+        
+        cmd.extend(["--python", str(Path(__file__).resolve())])
+        cmd.append("--")
+        
+        # Add all original arguments
+        cmd.extend(sys.argv[1:])
+        
+        try:
+            # Run and wait
+            result = subprocess.run(cmd, check=False)
+            sys.exit(result.returncode)
+        except FileNotFoundError:
+            logger.error("Impossibile trovare l'eseguibile di Blender: '%s'. Assicurati che sia nel PATH o impostato in .env (BLENDER_EXECUTABLE).", blender_bin)
+            sys.exit(1)
+        except Exception as exc:
+            logger.error("Errore durante il lancio di Blender: %s", exc)
+            sys.exit(1)
+    # --- END AUTO-WRAPPER ---
 
     log_level = args.log_level or app_config.logging.level
     setup_logging(level=log_level)
@@ -171,6 +218,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     pipeline_config = copy.deepcopy(app_config.pipeline)
     if args.max_objects is not None:
         pipeline_config.max_movable_objects = args.max_objects
+
+    if args.min_quality_score is not None:
+        pipeline_config.min_quality_score = args.min_quality_score
+
+    if args.good_quality_score is not None:
+        pipeline_config.good_quality_score = args.good_quality_score
 
     prompts_dir: Path = args.prompts_dir or (_PROJECT_ROOT / "config" / "prompts")
     seed: int = (
@@ -250,13 +303,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         reordered_state, args.output_dir / "scene_reordered.json"
     )
 
-    logger.info("Applicazione coordinate riordinate e render.")
+    logger.info("Applicazione coordinate riordinate e render multi-vista.")
     applicator.apply_state(reordered_state)
     reordered_renders = renderer.render_step(
-        step_name="reordered", state=reordered_state, quality="preview"
+        step_name="reordered", state=reordered_state, quality="preview",
+        multi_view=True,  # 4 viste per il visual critic
     )
 
-    logger.info("Critica visiva.")
+    logger.info("Critica visiva (multi-vista: %d immagini).", len(reordered_renders))
     if args.skip_vision or visual_critic is None:
         refined_state = reordered_state.copy()
         refined_state.pipeline_step = "refined"
@@ -264,6 +318,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         refined_state = visual_critic.critique_and_refine(
             reordered_state=reordered_state,
             render_iso_path=reordered_renders["iso"],
+            render_paths=reordered_renders,
         )
         # Forza l'uso dei bounds originali anche dopo la rifinitura visiva
         refined_state.room_bounds = original_state.room_bounds

@@ -1,17 +1,43 @@
 You are reviewing a 3D room scene that has been reorganized by an AI system.
-The attached image shows the current state of the room from an isometric view.
+You are given MULTIPLE VIEWS of the same scene to help you understand the spatial layout:
 
-Please analyze the room layout and identify any visual imperfections or
+IMAGE 1 (Top-Down Orthographic): Shows the room from directly above. Use this view to verify:
+- Correct XY positions (no overlapping footprints)
+- Proper spacing between objects
+- Objects within room boundaries
+- Functional groupings (desk near chair, nightstand near bed, etc.)
+
+IMAGE 2 (Isometric View - Primary Angle): Shows the room from an elevated diagonal angle. Use this to verify:
+- Objects appear naturally placed (not floating, not clipping)
+- Rotations look correct for each object type
+- Visual balance of the room
+
+IMAGE 3 (Isometric View - Opposite Angle): Shows the OPPOSITE side of the room. Use this to verify:
+- Objects hidden in the primary view are correctly placed
+- The back of the room is not cluttered or empty
+
+IMAGE 4 (Front Low View): Shows the room from a low, near-horizontal angle. Use this to verify:
+- Objects are resting on the floor (Z height is correct)
+- Nothing is floating unreasonably high
+- Wall-mounted objects are at appropriate heights
+
+Please analyze ALL VIEWS together and identify any visual imperfections or
 suboptimal placements. Focus on:
-1. Objects that appear misaligned with nearby furniture
-2. Objects that seem to be floating or overlapping
-3. Rotations that look unnatural for the object type
-4. Objects that are too close to walls or other objects
-5. Furniture groups that could be better arranged
+1. Objects whose FOOTPRINTS overlap when seen from top-down view
+2. Objects that seem to be floating or clipping into other objects
+3. Rotations that look unnatural for the object type (e.g. a desk facing a wall with no space to sit)
+4. Objects that are inside or too close to walls
+5. Furniture groups that could be better arranged functionally
 
-IMPORTANT OPTICAL ILLUSION WARNING:
-You are looking at an ISOMETRIC projection. This flattens depth and height.
-Objects mounted high on a wall (like shelves, AC units, wall lamps) might visually appear to be "resting on" or "clipping" objects that are actually far behind or below them. DO NOT suggest moving wall-mounted objects just because they visually overlap with furniture below them. Assume they are mounted correctly at their Z height.
+IMPORTANT GUIDELINES:
+- Use the TOP-DOWN view as your PRIMARY reference for positions and overlaps.
+  The isometric views can create optical illusions about collisions.
+- Wall-mounted objects (shelves, lamps, AC units) at high Z will visually overlap
+  with floor furniture in isometric views. This is NORMAL. DO NOT move them.
+- Only suggest corrections you are HIGHLY CONFIDENT about from multiple views.
+- Prefer SMALL adjustments (< 0.5m) over large repositioning.
+- If the layout looks generally good, give it a HIGH SCORE (8+) and return
+  an EMPTY corrections list. DO NOT make corrections just for the sake of it.
 
 Return a JSON object with the following structure:
 {{
@@ -23,7 +49,7 @@ Return a JSON object with the following structure:
       "action": "<move|rotate|move_and_rotate>",
       "new_location": [x, y, z],
       "new_rotation_euler": [rx, ry, rz],
-      "reason": "<brief explanation>"
+      "reason": "<brief explanation referencing which VIEW revealed the issue>"
     }}
   ]
 }}

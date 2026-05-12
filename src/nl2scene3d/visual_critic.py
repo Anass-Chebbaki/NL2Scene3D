@@ -2,15 +2,20 @@
 """
 Critica visiva del layout riordinato tramite chiamata LLM Vision.
 
-Questo modulo analizza il render isometrico della scena riordinata
+Questo modulo analizza render multi-vista della scena riordinata
 e produce una lista di correzioni suggerite per migliorare il layout.
-Include logica di confronto qualitativo: se il modello assegna uno score
-elevato o non suggerisce correzioni, lo stato viene restituito invariato.
+
+Miglioramenti rispetto alla versione precedente:
+- Supporto multi-vista (4 immagini: top, iso, iso2, front)
+- Protezione dei layout buoni: score >= 8 → nessuna correzione
+- Post-validazione delle correzioni con collision check
+- Limite allo spostamento massimo per correzione (evita spostamenti catastrofici)
 """
 from __future__ import annotations
 
 import copy
 import logging
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -24,8 +29,16 @@ logger = logging.getLogger(__name__)
 # le correzioni per ottimizzare ulteriormente il layout.
 _DEFAULT_MIN_QUALITY_SCORE: int = 7
 
+# Score al di sopra del quale il layout viene considerato buono
+# e le correzioni NON vengono applicate (per evitare di peggiorarlo).
+_DEFAULT_GOOD_QUALITY_SCORE: int = 8
+
 # Numero massimo default di correzioni da applicare per singola iterazione.
 _DEFAULT_MAX_CORRECTIONS: int = 5
+
+# Spostamento massimo consentito per una singola correzione (in metri).
+# Previene spostamenti catastrofici che distruggono il layout.
+_MAX_CORRECTION_DISPLACEMENT: float = 1.5
 
 
 def _parse_corrections_from_llm(
@@ -86,6 +99,38 @@ def _parse_corrections_from_llm(
     return score, quality_assessment, corrections
 
 
+def _validate_correction_displacement(
+    correction: LLMCorrection,
+    original_obj: SceneObject,
+    max_displacement: float = _MAX_CORRECTION_DISPLACEMENT,
+) -> bool:
+    """
+    Verifica che una correzione non sposti l'oggetto oltre il limite consentito.
+    Previene spostamenti catastrofici che distruggerebbero il layout.
+    
+    Args:
+        correction: Correzione da validare.
+        original_obj: Oggetto nella sua posizione corrente.
+        max_displacement: Spostamento massimo in metri.
+        
+    Returns:
+        True se la correzione e' entro i limiti, False altrimenti.
+    """
+    if correction.new_location and len(correction.new_location) == 3:
+        dx = correction.new_location[0] - original_obj.transform.location[0]
+        dy = correction.new_location[1] - original_obj.transform.location[1]
+        displacement = math.sqrt(dx * dx + dy * dy)
+        if displacement > max_displacement:
+            logger.warning(
+                "Correzione per '%s' rifiutata: spostamento di %.2fm eccede il limite di %.2fm.",
+                correction.object_name,
+                displacement,
+                max_displacement,
+            )
+            return False
+    return True
+
+
 def _apply_corrections_to_state(
     state: SceneState,
     corrections: list[LLMCorrection],
@@ -142,6 +187,11 @@ def _apply_corrections_to_state(
             skipped_count += 1
             continue
 
+        # Valida che lo spostamento non sia catastrofico
+        if not _validate_correction_displacement(correction, target_obj):
+            skipped_count += 1
+            continue
+
         new_location = list(target_obj.transform.location)
         new_rotation = list(target_obj.transform.rotation_euler)
 
@@ -165,7 +215,6 @@ def _apply_corrections_to_state(
                     target_obj.transform.rotation_euler[1],
                     raw_rotation[2]
                 ]
-                import math
                 multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
                 best_z = min(multiples, key=lambda m: abs(m - (new_rotation[2] % (2 * math.pi))))
                 new_rotation[2] = best_z
@@ -185,21 +234,64 @@ def _apply_corrections_to_state(
         )
         applied_count += 1
 
+    # Post-validazione: risolvi collisioni create dalle correzioni
+    from nl2scene3d.utils.geometry import has_collision
+
+    final_objects: list[SceneObject] = []
+    # Prima aggiungiamo tutti gli oggetti non movibili (strutturali)
+    for obj in objects_by_name.values():
+        if not obj.is_movable:
+            final_objects.append(obj)
+
+    # Poi aggiungiamo i movibili uno ad uno, verificando collisioni
+    collision_reverted = 0
+    for obj in objects_by_name.values():
+        if not obj.is_movable:
+            continue
+
+        # Per gli oggetti corretti, verifica che la nuova posizione non crei collisioni
+        main_furniture_categories = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
+        if obj.category in main_furniture_categories:
+            collidable_objects = [
+                o for o in final_objects
+                if o.category in main_furniture_categories or o.category == "structural"
+            ]
+            if has_collision(obj, collidable_objects, check_walls=True):
+                # La correzione ha creato una collisione: ripristina posizione originale
+                original_obj = state.get_object_by_name(obj.name)
+                if original_obj is not None:
+                    obj.transform = original_obj.transform.copy()
+                    collision_reverted += 1
+                    logger.warning(
+                        "Correzione per '%s' annullata: la nuova posizione crea collisioni.",
+                        obj.name,
+                    )
+
+        final_objects.append(obj)
+
+    if collision_reverted > 0:
+        logger.info(
+            "Post-validazione: %d correzioni annullate per collisioni.",
+            collision_reverted,
+        )
+
     logger.info(
-        "Correzioni applicate: %d su %d richieste (%d saltate).",
-        applied_count,
+        "Correzioni applicate: %d su %d richieste (%d saltate, %d annullate per collisioni).",
+        applied_count - collision_reverted,
         len(corrections_to_apply),
         skipped_count,
+        collision_reverted,
     )
 
     return SceneState(
         scene_name=state.scene_name,
-        objects=list(objects_by_name.values()),
+        objects=final_objects,
         room_bounds=state.room_bounds,
         pipeline_step="refined",
         metadata={
-            "applied_corrections": applied_count,
+            "applied_corrections": applied_count - collision_reverted,
             "skipped_corrections": skipped_count,
+            "collision_reverted": collision_reverted,
         },
     )
 
@@ -213,6 +305,8 @@ class VisualCritic:
         prompts_dir: Directory contenente i template dei prompt.
         config: Configurazione della pipeline (opzionale).
         min_quality_score: Score minimo al di sopra del quale si applicano correzioni.
+        good_quality_score: Score al di sopra del quale il layout e' considerato buono
+            e le correzioni NON vengono applicate.
         max_corrections: Numero massimo di correzioni per iterazione.
     """
 
@@ -236,25 +330,29 @@ class VisualCritic:
         self.config = config
 
         if config is not None:
-            self.min_quality_score: int = config.min_quality_score
-            self.max_corrections: int = config.max_corrections
+            self.min_quality_score = config.min_quality_score
+            self.good_quality_score = config.good_quality_score
+            self.max_corrections = config.max_corrections
         else:
             self.min_quality_score = _DEFAULT_MIN_QUALITY_SCORE
+            self.good_quality_score = _DEFAULT_GOOD_QUALITY_SCORE
             self.max_corrections = _DEFAULT_MAX_CORRECTIONS
 
         logger.info(
             "VisualCritic inizializzato. "
-            "min_quality_score=%d, max_corrections=%d.",
+            "min_quality_score=%d, good_quality_score=%d, max_corrections=%d.",
             self.min_quality_score,
+            self.good_quality_score,
             self.max_corrections,
         )
 
-    def _build_critic_prompt(self, state: SceneState) -> str:
+    def _build_critic_prompt(self, state: SceneState, num_views: int = 1) -> str:
         """
         Costruisce il prompt per la critica visiva caricandolo dal template.
 
         Args:
             state: Stato della scena riordinata.
+            num_views: Numero di viste allegate alla richiesta.
 
         Returns:
             Prompt formattato con le informazioni della stanza.
@@ -292,17 +390,22 @@ class VisualCritic:
         self,
         reordered_state: SceneState,
         render_iso_path: Path,
+        render_paths: Optional[dict[str, Path]] = None,
     ) -> SceneState:
         """
-        Analizza il render isometrico e applica le correzioni suggerite.
+        Analizza i render della scena e applica le correzioni suggerite.
 
-        Se il modello non suggerisce correzioni, lo stato viene restituito
-        invariato con pipeline_step="refined". Se la chiamata LLM fallisce,
-        viene restituito lo stato invariato con i metadati dell'errore.
+        Se render_paths e' fornito con viste multiple, usa la chiamata
+        multi-immagine per dare al modello una visione completa della scena.
+        Altrimenti, usa la singola vista isometrica per retrocompatibilita'.
+
+        Se il modello assegna un punteggio >= good_quality_score (8),
+        le correzioni NON vengono applicate: il layout e' gia' buono.
 
         Args:
             reordered_state: Stato della scena dopo il riordino LLM.
-            render_iso_path: Percorso al render isometrico da analizzare.
+            render_iso_path: Percorso al render isometrico (fallback singola vista).
+            render_paths: Dizionario opzionale con tutte le viste disponibili.
 
         Returns:
             SceneState raffinato, oppure invariato se le correzioni non sono
@@ -314,10 +417,31 @@ class VisualCritic:
             render_iso_path,
         )
 
-        user_prompt = self._build_critic_prompt(reordered_state)
+        # Determina quali immagini inviare
+        image_paths: list[Path] = []
+        if render_paths:
+            # Ordine importante per il prompt: top, iso, iso2, front
+            for key in ["top", "iso", "iso2", "front"]:
+                if key in render_paths and render_paths[key].exists():
+                    image_paths.append(render_paths[key])
+        
+        if not image_paths:
+            # Fallback: singola vista isometrica
+            image_paths = [render_iso_path]
+
+        num_views = len(image_paths)
+        user_prompt = self._build_critic_prompt(reordered_state, num_views)
 
         try:
-            llm_output = self.client.call_vision(render_iso_path, user_prompt)
+            if num_views > 1:
+                logger.info(
+                    "Invio %d viste al modello vision: %s",
+                    num_views,
+                    [p.name for p in image_paths],
+                )
+                llm_output = self.client.call_vision_multi(image_paths, user_prompt)
+            else:
+                llm_output = self.client.call_vision(image_paths[0], user_prompt)
         except GeminiParsingError as exc:
             logger.error(
                 "Parsing della risposta vision fallito: %s. "
@@ -350,11 +474,34 @@ class VisualCritic:
             }
             return refined
 
+        # PROTEZIONE LAYOUT BUONI: se lo score è alto, non applicare correzioni
+        if score >= self.good_quality_score:
+            logger.info(
+                "Score %d >= soglia qualita' buona %d. "
+                "Correzioni NON applicate per proteggere il layout gia' buono. "
+                "(Suggerimenti ignorati: %d)",
+                score,
+                self.good_quality_score,
+                len(corrections),
+            )
+            refined = reordered_state.copy()
+            refined.pipeline_step = "refined"
+            refined.metadata = {
+                "quality_score": score,
+                "quality_assessment": quality_assessment,
+                "applied_corrections": 0,
+                "corrections_suppressed": len(corrections),
+                "reason": "Score above good_quality_score threshold",
+            }
+            return refined
+
         if score >= self.min_quality_score:
             logger.info(
-                "Score %d >= soglia %d. Correzioni applicate per ottimizzare il layout.",
+                "Score %d >= soglia minima %d ma < soglia buona %d. "
+                "Correzioni applicate con cautela.",
                 score,
                 self.min_quality_score,
+                self.good_quality_score,
             )
         else:
             logger.info(

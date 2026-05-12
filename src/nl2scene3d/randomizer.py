@@ -124,28 +124,14 @@ def _has_excessive_overlap(
 ) -> bool:
     """
     Verifica se un oggetto ha sovrapposizioni eccessive con quelli gia' posizionati.
+    Delega al modulo geometry.has_collision che gestisce sia muri (AABB) che mobili (BVH).
     """
     from nl2scene3d.utils.geometry import has_collision
     
-    # 1. Check mesh-exact collision if in Blender
-    if has_collision(candidate, placed_objects):
-        return True
-        
-    # 2. Fallback/Complement with AABB 2D for categories that might not be mesh-checked
-    candidate_aabb = _compute_aabb(candidate)
-    for other in placed_objects:
-        if other.name == candidate.name:
-            continue
-        if other.category == "structural" and "door" not in other.name.lower() and "window" not in other.name.lower():
-            continue
-        if other.object_type in ("CAMERA", "LIGHT", "EMPTY", "SPEAKER"):
-            continue
-
-        other_aabb = _compute_aabb(other)
-        ratio = _compute_overlap_ratio(candidate_aabb, other_aabb)
-        if ratio > max_overlap_ratio:
-            return True
-    return False
+    # Il nuovo has_collision gestisce correttamente:
+    # - Muri: AABB 2D + Z-overlap (non li salta più!)
+    # - Mobili: BVH mesh-esatto + fallback AABB
+    return has_collision(candidate, placed_objects, check_walls=True)
 
 
 class SceneRandomizer:
@@ -178,6 +164,31 @@ class SceneRandomizer:
             effective_seed,
             self.config.jitter_ratio,
         )
+
+    def _is_surface(self, obj: SceneObject) -> bool:
+        """Determina se un oggetto puo' ospitare altri oggetti sopra di se'."""
+        name = obj.name.lower()
+        cat = (obj.category or "").lower()
+        return any(k in name or k in cat for k in ["table", "desk", "bed", "shelf", "nightstand", "counter", "structural"])
+
+    def _is_snappable(self, obj: SceneObject) -> bool:
+        """Determina se un oggetto deve essere appoggiato su una superficie."""
+        name = obj.name.lower()
+        cat = (obj.category or "").lower()
+        return any(k in name or k in cat for k in ["decor", "electronics", "book", "lamp", "monitor", "keyboard", "mouse", "bottle", "bin"])
+
+    def _get_surface_z_at(self, x: float, y: float, surfaces: List[SceneObject]) -> float:
+        """Trova la quota Z della superficie piu' alta in posizione (x,y)."""
+        from nl2scene3d.utils.geometry import compute_aabb_2d
+        max_z = 0.0 # Default: pavimento
+        for surf in surfaces:
+            surf_aabb = compute_aabb_2d(surf)
+            # Se il centro del candidato cade dentro la superficie
+            if (surf_aabb[0] <= x <= surf_aabb[1] and surf_aabb[2] <= y <= surf_aabb[3]):
+                surf_z_top = surf.transform.location[2] + (surf.transform.dimensions[2] / 2.0)
+                if surf_z_top > max_z:
+                    max_z = surf_z_top
+        return max_z
 
     def _randomize_location(
             self,
@@ -298,6 +309,9 @@ class SceneRandomizer:
         randomized_count = 0
         failed_count = 0
 
+        # Identifichiamo le superfici disponibili per lo snapping
+        potential_surfaces = [obj for obj in state.objects if self._is_surface(obj)]
+
         movable_objects = list(state.movable_objects)
         # Ordiniamo gli oggetti per volume decrescente: i pezzi grossi (letti, armadi) 
         # vengono piazzati per primi, rendendo piu' facile incastrare i piccoli dopo.
@@ -368,32 +382,51 @@ class SceneRandomizer:
                 )
                 new_obj.transform = candidate_transform
 
+                # --- VERTICAL PROJECTION / SURFACE SNAPPING ---
+                if self._is_snappable(obj):
+                    target_z = self._get_surface_z_at(candidate_location[0], candidate_location[1], potential_surfaces)
+                    # Appoggiamo l'oggetto: Z = superficie_top + mezza_altezza_oggetto
+                    new_obj.transform.location[2] = target_z + (obj.transform.dimensions[2] / 2.0)
+                # ----------------------------------------------
+
                 if not self.config.check_overlaps:
                     placed = True
                     break
 
-                from nl2scene3d.utils.geometry import has_collision
-                
                 # Usa il controllo di collisione esatto
-                if not has_collision(new_obj, placed_objects):
+                from nl2scene3d.utils.geometry import compute_scene_collision_ratio
+                overlap_ratio = compute_scene_collision_ratio(new_obj, placed_objects)
+                
+                if overlap_ratio < 0.001: # Quasi zero
                     placed = True
                     break
-
+                
+                # Se non è perfetto, teniamo traccia del "meno peggio"
+                if overlap_ratio < min_max_overlap:
+                    min_max_overlap = overlap_ratio
+                    best_transform = candidate_transform.copy()
 
                 logger.debug(
-                    "Oggetto '%s': tentativo %d fallito per sovrapposizione.",
+                    "Oggetto '%s': tentativo %d fallito per sovrapposizione (%.2f).",
                     obj.name,
                     attempt + 1,
+                    overlap_ratio
                 )
 
             if not placed:
-                logger.warning(
-                    "Oggetto '%s': posizione senza sovrapposizioni non trovata dopo %d tentativi. "
-                    "Mantenuta posizione originale.",
-                    obj.name,
-                    self.config.max_placement_attempts,
-                )
-                new_obj.transform = obj.transform.copy()
+                if best_transform:
+                    logger.warning(
+                        "Oggetto '%s': posizione perfetta non trovata. Uso la migliore (overlap: %.2f).",
+                        obj.name,
+                        min_max_overlap,
+                    )
+                    new_obj.transform = best_transform
+                else:
+                    logger.warning(
+                        "Oggetto '%s': impossibile spostare. Mantenuta posizione originale.",
+                        obj.name,
+                    )
+                    new_obj.transform = obj.transform.copy()
                 failed_count += 1
 
             new_objects.append(new_obj)

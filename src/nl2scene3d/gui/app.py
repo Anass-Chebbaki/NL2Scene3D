@@ -18,24 +18,32 @@ import customtkinter as ctk
 
 # Resolve project root so relative imports work regardless of cwd
 _GUI_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _GUI_DIR.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_PACKAGE_ROOT = _GUI_DIR.parent
+_SRC_DIR = _PACKAGE_ROOT.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-from gui.core.config_bridge import GUIConfig, load_gui_config
-from gui.core.image_watcher import ImageWatcher
-from gui.core.pipeline_runner import PipelineRunner
-from gui.widgets.config_panel import ConfigPanel
-from gui.widgets.image_viewer import ImageViewer
-from gui.widgets.log_panel import LogPanel
-from gui.widgets.metrics_panel import MetricsPanel
-from gui.widgets.pipeline_panel import PipelinePanel
+from nl2scene3d.gui.core.config_bridge import GUIConfig, load_gui_config
+from nl2scene3d.gui.core.image_watcher import ImageWatcher
+from nl2scene3d.gui.core.pipeline_runner import PipelineRunner
+from nl2scene3d.gui.widgets.config_panel import ConfigPanel
+from nl2scene3d.gui.widgets.image_viewer import ImageViewer
+from nl2scene3d.gui.widgets.log_panel import LogPanel
+from nl2scene3d.gui.widgets.metrics_panel import MetricsPanel
+from nl2scene3d.gui.widgets.pipeline_panel import PipelinePanel
 
 # --------------------------------------------------------------------------
 # Theme
 # --------------------------------------------------------------------------
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+# UI Constants
+COLOR_BG = "#0F172A"      # Slate 900
+COLOR_SIDEBAR = "#1E293B" # Slate 800
+COLOR_ACCENT = "#6366F1"  # Indigo 500
+COLOR_TEXT = "#F8FAFC"    # Slate 50
+COLOR_SUBTEXT = "#94A3B8" # Slate 400
 
 _APP_TITLE = "NL2Scene3D — Scene Reorganization Pipeline"
 _APP_VERSION = "0.1.0"
@@ -88,8 +96,8 @@ class NL2Scene3DApp(ctk.CTk):
         root_pane.rowconfigure(0, weight=1)
 
         # Left sidebar
-        left = ctk.CTkFrame(root_pane, width=310, fg_color="#111827", corner_radius=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        left = ctk.CTkFrame(root_pane, width=320, fg_color=COLOR_SIDEBAR, corner_radius=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         left.pack_propagate(False)
         self._build_left_sidebar(left)
 
@@ -110,13 +118,13 @@ class NL2Scene3DApp(ctk.CTk):
         self._build_settings_tab(self._notebook.tab("Settings"))
 
     def _build_menu(self) -> None:
-        menubar = tk.Menu(self, bg="#1F2937", fg="#D1D5DB",
-                          activebackground="#374151", activeforeground="white",
+        menubar = tk.Menu(self, bg=COLOR_SIDEBAR, fg=COLOR_TEXT,
+                          activebackground=COLOR_ACCENT, activeforeground="white",
                           relief="flat", bd=0)
         self.configure(menu=menubar)
 
-        file_menu = tk.Menu(menubar, tearoff=0, bg="#1F2937", fg="#D1D5DB",
-                            activebackground="#374151")
+        file_menu = tk.Menu(menubar, tearoff=0, bg=COLOR_SIDEBAR, fg=COLOR_TEXT,
+                            activebackground=COLOR_ACCENT)
         file_menu.add_command(label="Open .blend file...", command=self._menu_open_blend)
         file_menu.add_separator()
         file_menu.add_command(label="Open Output Directory", command=self._open_output_dir)
@@ -143,19 +151,19 @@ class NL2Scene3DApp(ctk.CTk):
         ctk.CTkLabel(
             brand,
             text="NL2Scene3D",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            text_color="#60A5FA",
-        ).pack(pady=(14, 0))
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=COLOR_ACCENT,
+        ).pack(pady=(20, 2))
 
         ctk.CTkLabel(
             brand,
-            text="Scene Reorganization via MLLM",
-            font=ctk.CTkFont(size=10),
-            text_color="#6B7280",
-        ).pack(pady=(0, 14))
+            text="AI SCENE REORGANIZER",
+            font=ctk.CTkFont(size=11, weight="bold", slant="italic"),
+            text_color=COLOR_SUBTEXT,
+        ).pack(pady=(0, 20))
 
-        sep = ctk.CTkFrame(brand, height=1, fg_color="#1F2937")
-        sep.pack(fill="x")
+        sep = ctk.CTkFrame(brand, height=2, fg_color="#334155")
+        sep.pack(fill="x", padx=20)
 
         # Pipeline panel
         self._pipeline_panel = PipelinePanel(

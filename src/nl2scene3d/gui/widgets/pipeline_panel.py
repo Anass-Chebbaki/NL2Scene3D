@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from gui.core.config_bridge import GUIConfig
+from nl2scene3d.gui.core.config_bridge import GUIConfig
 
 _PIPELINE_STEPS = [
     "Extracting scene state",
@@ -85,114 +85,87 @@ class PipelinePanel(ctk.CTkFrame):
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        # Title
-        ctk.CTkLabel(
-            self, text="Pipeline Control",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(10, 4))
+        # --- SESSION SECTION ---
+        session_card = ctk.CTkFrame(self, fg_color="#334155", corner_radius=10)
+        session_card.pack(fill="x", padx=10, pady=(10, 5))
 
-        sep = ctk.CTkFrame(self, height=1, fg_color="#374151")
-        sep.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(
+            session_card, text="SESSION SETUP",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=12, pady=(10, 5))
 
         # Scene selection
-        scene_frame = ctk.CTkFrame(self, fg_color="transparent")
-        scene_frame.pack(fill="x", padx=10, pady=2)
-
-        ctk.CTkLabel(scene_frame, text="Scene (.blend):", width=130, anchor="w").pack(side="left")
-
+        scene_row = ctk.CTkFrame(session_card, fg_color="transparent")
+        scene_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(scene_row, text="Scene File", width=80, anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
         self._blend_var = tk.StringVar(value="No file selected")
-        self._blend_entry = ctk.CTkEntry(
-            scene_frame, textvariable=self._blend_var, state="disabled", width=240,
-        )
-        self._blend_entry.pack(side="left", padx=4)
+        ctk.CTkEntry(scene_row, textvariable=self._blend_var, state="disabled", height=28, fg_color="#1E293B", border_width=0).pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkButton(scene_row, text="...", width=32, height=28, command=self._browse_blend, fg_color="#475569").pack(side="left")
 
-        ctk.CTkButton(
-            scene_frame, text="Browse", width=80, height=30,
-            command=self._browse_blend,
-            fg_color="#374151", hover_color="#4B5563",
-        ).pack(side="left", padx=4)
-
-        # Scene name override
-        name_frame = ctk.CTkFrame(self, fg_color="transparent")
-        name_frame.pack(fill="x", padx=10, pady=2)
-
-        ctk.CTkLabel(name_frame, text="Scene Name:", width=130, anchor="w").pack(side="left")
+        # Name selection
+        name_row = ctk.CTkFrame(session_card, fg_color="transparent")
+        name_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(name_row, text="Name ID", width=80, anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
         self._name_var = tk.StringVar()
-        ctk.CTkEntry(name_frame, textvariable=self._name_var, width=200).pack(side="left", padx=4)
-        ctk.CTkLabel(
-            name_frame, text="(auto-filled from filename)",
-            text_color="#6B7280", font=ctk.CTkFont(size=10),
-        ).pack(side="left", padx=6)
+        ctk.CTkEntry(name_row, textvariable=self._name_var, height=28, fg_color="#1E293B", border_width=1, border_color="#475569").pack(side="left", fill="x", expand=True, padx=4)
 
-        # Output dir override
-        out_frame = ctk.CTkFrame(self, fg_color="transparent")
-        out_frame.pack(fill="x", padx=10, pady=2)
-
-        ctk.CTkLabel(out_frame, text="Output Directory:", width=130, anchor="w").pack(side="left")
+        # Output selection
+        out_row = ctk.CTkFrame(session_card, fg_color="transparent")
+        out_row.pack(fill="x", padx=10, pady=(2, 12))
+        ctk.CTkLabel(out_row, text="Output", width=80, anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
         self._outdir_var = tk.StringVar()
-        ctk.CTkEntry(out_frame, textvariable=self._outdir_var, width=200).pack(side="left", padx=4)
+        ctk.CTkEntry(out_row, textvariable=self._outdir_var, height=28, fg_color="#1E293B", border_width=0).pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkButton(out_row, text="...", width=32, height=28, command=self._browse_outdir, fg_color="#475569").pack(side="left")
 
-        ctk.CTkButton(
-            out_frame, text="Browse", width=80, height=30,
-            command=self._browse_outdir,
-            fg_color="#374151", hover_color="#4B5563",
-        ).pack(side="left", padx=4)
+        # --- PROGRESS SECTION ---
+        progress_card = ctk.CTkFrame(self, fg_color="#1E293B", border_width=1, border_color="#334155", corner_radius=10)
+        progress_card.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Status bar
-        status_frame = ctk.CTkFrame(self, fg_color="#1F2937", corner_radius=6)
-        status_frame.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(
+            progress_card, text="PIPELINE STATUS",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=12, pady=(10, 0))
 
-        self._status_icon = ctk.CTkLabel(
-            status_frame, text="  ", width=24,
-            font=ctk.CTkFont(size=14),
-        )
-        self._status_icon.pack(side="left", padx=4, pady=6)
-
-        self._status_label = ctk.CTkLabel(
-            status_frame, text="Ready",
-            font=ctk.CTkFont(size=12),
-            anchor="w",
-        )
-        self._status_label.pack(side="left", fill="x", expand=True)
+        # Status & Icon
+        status_line = ctk.CTkFrame(progress_card, fg_color="transparent")
+        status_line.pack(fill="x", padx=12, pady=5)
+        self._status_icon = ctk.CTkLabel(status_line, text="●", text_color="#475569", font=ctk.CTkFont(size=16))
+        self._status_icon.pack(side="left")
+        self._status_label = ctk.CTkLabel(status_line, text="System Ready", font=ctk.CTkFont(size=13, weight="bold"))
+        self._status_label.pack(side="left", padx=8)
 
         # Progress bar
-        self._progress = ctk.CTkProgressBar(self, height=6, corner_radius=3)
-        self._progress.pack(fill="x", padx=10, pady=(0, 4))
+        self._progress = ctk.CTkProgressBar(progress_card, height=8, corner_radius=4, progress_color="#6366F1", fg_color="#0F172A")
+        self._progress.pack(fill="x", padx=12, pady=8)
         self._progress.set(0)
 
-        # Step tracker
+        # Active Step
         self._step_label = ctk.CTkLabel(
-            self, text="", text_color="#9CA3AF",
-            font=ctk.CTkFont(size=10), anchor="w",
+            progress_card, text="Waiting for initiation...",
+            text_color="#94A3B8", font=ctk.CTkFont(size=11, slant="italic"),
         )
-        self._step_label.pack(fill="x", padx=10)
+        self._step_label.pack(fill="x", padx=12, pady=(0, 10))
 
-        # Action buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=10, pady=10)
+        # --- ACTIONS SECTION ---
+        action_card = ctk.CTkFrame(self, fg_color="transparent")
+        action_card.pack(fill="x", padx=10, pady=(5, 10))
 
         self._run_btn = ctk.CTkButton(
-            btn_frame,
-            text="Run Pipeline",
-            width=140, height=36,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._on_run,
-            fg_color="#2563EB",
-            hover_color="#1D4ED8",
+            action_card, text="START PIPELINE",
+            height=45, font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_run, fg_color="#6366F1", hover_color="#4F46E5",
         )
-        self._run_btn.pack(side="left")
+        self._run_btn.pack(fill="x", side="top", pady=2)
 
         self._stop_btn = ctk.CTkButton(
-            btn_frame,
-            text="Stop",
-            width=100, height=36,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._on_stop,
-            fg_color="#7F1D1D",
-            hover_color="#991B1B",
+            action_card, text="ABORT MISSION",
+            height=32, font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_stop, fg_color="#991B1B", hover_color="#B91C1C",
             state="disabled",
         )
-        self._stop_btn.pack(side="left", padx=8)
+        self._stop_btn.pack(fill="x", side="top", pady=2)
 
     # ------------------------------------------------------------------
     # Public API

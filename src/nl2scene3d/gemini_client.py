@@ -111,7 +111,32 @@ class GeminiClient:
                 try:
                     return json.loads(json_str)
                 except json.JSONDecodeError:
-                    pass
+                    # Se fallisce ancora, proviamo a pulire i commenti se presenti
+                    json_str_clean = re.sub(r'//.*?\n|/\*.*?\*/', '', json_str, flags=re.DOTALL)
+                    try:
+                        return json.loads(json_str_clean)
+                    except json.JSONDecodeError:
+                        pass
+
+        # Strategia 4: Se sembra troncato (mancano le chiusure), proviamo a chiuderlo manualmente
+        if start_idx != -1:
+            logger.warning("Il JSON sembra troncato. Tentativo di chiusura manuale.")
+            # Conta le parentesi aperte/chiuse
+            open_braces = text.count('{')
+            close_braces = text.count('}')
+            open_brackets = text.count('[')
+            close_brackets = text.count(']')
+            
+            repaired_text = text[start_idx:]
+            if open_brackets > close_brackets:
+                repaired_text += ']' * (open_brackets - close_brackets)
+            if open_braces > close_braces:
+                repaired_text += '}' * (open_braces - close_braces)
+                
+            try:
+                return json.loads(repaired_text)
+            except json.JSONDecodeError:
+                pass
 
         raise GeminiParsingError(
             "Impossibile estrarre JSON valido dalla risposta del modello. "
@@ -266,3 +291,52 @@ class GeminiClient:
         except Exception as exc:
             logger.error("Errore nella chiamata vision: %s", exc)
             raise GeminiClientError(f"Errore vision: {exc}") from exc
+
+    def call_vision_multi(
+        self,
+        image_paths: list[Path],
+        user_prompt: str,
+        use_fallback: bool = False,
+    ) -> dict | list:
+        """
+        Esegue una chiamata vision al modello con piu' immagini allegate.
+        
+        Ogni immagine viene passata come elemento separato nella lista contents,
+        seguita dal prompt testuale. Questo permette al modello di analizzare
+        viste multiple della stessa scena in un singolo contesto.
+
+        Args:
+            image_paths: Lista di percorsi alle immagini da analizzare.
+            user_prompt: Prompt testuale per l'analisi.
+            use_fallback: Se True, usa il modello fallback.
+
+        Returns:
+            Output JSON parsato dal modello.
+        """
+        for path in image_paths:
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Immagine per la chiamata vision non trovata: {path}"
+                )
+
+        model_name = (
+            self.config.model_fallback if use_fallback else self.config.model_primary
+        )
+
+        logger.info(
+            "Chiamata vision multi-immagine a Gemini (%s). Immagini: %d.",
+            model_name,
+            len(image_paths),
+        )
+
+        try:
+            import PIL.Image
+            contents: list = []
+            for i, path in enumerate(image_paths):
+                img = PIL.Image.open(path)
+                contents.append(img)
+            contents.append(user_prompt)
+            return self._call_vision_internal(model_name, contents, use_fallback)
+        except Exception as exc:
+            logger.error("Errore nella chiamata vision multi: %s", exc)
+            raise GeminiClientError(f"Errore vision multi: {exc}") from exc

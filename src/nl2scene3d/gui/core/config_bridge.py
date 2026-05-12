@@ -14,9 +14,15 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-# Locate project root: gui/ is one level below project root
-_GUI_DIR = Path(__file__).resolve().parent.parent
-_PROJECT_ROOT = _GUI_DIR.parent
+# Locate project root
+# config_bridge.py is in src/nl2scene3d/gui/core/
+# Path(__file__) -> config_bridge.py
+# .parent -> core/
+# .parent.parent -> gui/
+# .parent.parent.parent -> nl2scene3d/
+# .parent.parent.parent.parent -> src/
+# .parent.parent.parent.parent.parent -> ROOT
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -60,6 +66,7 @@ class GUIConfig:
     max_overlap_ratio: float = 0.05
     max_placement_attempts: int = 500
     min_quality_score: int = 7
+    good_quality_score: int = 8
     max_corrections: int = 5
 
     # Render preview
@@ -121,6 +128,7 @@ def load_gui_config() -> GUIConfig:
     cfg.max_overlap_ratio = float(pipeline.get("max_overlap_ratio", cfg.max_overlap_ratio))
     cfg.max_placement_attempts = int(pipeline.get("max_placement_attempts", cfg.max_placement_attempts))
     cfg.min_quality_score = int(pipeline.get("min_quality_score_for_corrections", cfg.min_quality_score))
+    cfg.good_quality_score = int(pipeline.get("good_quality_score_for_protection", cfg.good_quality_score))
     cfg.max_corrections = int(pipeline.get("max_corrections_to_apply", cfg.max_corrections))
 
     # Render
