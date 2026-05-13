@@ -2,91 +2,200 @@
 """
 NL2Scene3D Blender Add-on.
 
-Scene reorganization from random to ordered via Multimodal Language Models.
+Professional integration of the NL2Scene3D pipeline:
+- Randomize scene (disorganize)
+- Reorganize scene via Multimodal Language Models (Gemini)
+- API configuration via Addon Preferences
 """
 
+import sys
+import os
+import traceback
+from pathlib import Path
+
+# Addon metadata for Blender
 bl_info = {
     "name": "NL2Scene3D",
     "author": "NL2Scene3D Team",
     "version": (0, 1, 0),
-    "blender": (4, 0, 0),
+    "blender": (5, 1, 0),
     "location": "View3D > Sidebar > NL2Scene3D",
-    "description": "Reorganize 3D scenes via Multimodal Language Models",
+    "description": "Reorganize 3D scenes via Multimodal Language Models (Gemini)",
     "category": "3D View",
 }
 
-import sys
-from pathlib import Path
-
-# Set up sys.path BEFORE any other import:
-# - Add the add-on directory so 'core' is importable.
-# - Add the vendor/ subdirectory so bundled external libraries
-#   (dotenv, google-genai, Pillow, etc.) are available inside Blender.
+# ----------------------------------------------------------------------
+# PATH SETUP: Ensure bundled packages and vendor libs are discoverable
+# ----------------------------------------------------------------------
 _ADDON_DIR = Path(__file__).resolve().parent
 _VENDOR_DIR = _ADDON_DIR / "vendor"
 
-for path in (_ADDON_DIR, _VENDOR_DIR):
-    path_str = str(path)
-    if path.exists() and path_str not in sys.path:
-        sys.path.insert(0, path_str)
+# Add vendor directory to sys.path
+if _VENDOR_DIR.exists() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
 
-import bpy
-from bpy.types import Panel, Operator
+# Add the addon directory itself so 'nl2scene3d' (the core package) is importable
+if str(_ADDON_DIR) not in sys.path:
+    sys.path.insert(0, str(_ADDON_DIR))
+
+
+import bpy  # type: ignore
+from bpy.types import Panel, Operator, AddonPreferences  # type: ignore
+from bpy.props import StringProperty, EnumProperty  # type: ignore
+
+# ----------------------------------------------------------------------
+# PREFERENCES: Store API keys and user settings
+# ----------------------------------------------------------------------
+class NL2SCENE3D_AddonPreferences(AddonPreferences):
+    bl_idname = __package__
+
+    api_key: StringProperty( # type: ignore
+        name="Gemini API Key",
+        description="Enter your Google Gemini API Key",
+        default="",
+        subtype='PASSWORD',
+    )
+
+    model_name: EnumProperty( # type: ignore
+        name="Model",
+        description="Choose the Gemini model to use",
+        items=[
+            ('gemini-3-flash-preview', "Gemini 3 Flash Preview", "Latest high-speed model"),
+            ('gemini-2.5-flash', "Gemini 2.5 Flash", "Standard flash model"),
+            ('gemini-1.5-pro', "Gemini 1.5 Pro", "High intelligence model"),
+        ],
+        default='gemini-3-flash-preview',
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "api_key")
+        layout.prop(self, "model_name")
+        
+        if not self.api_key:
+            layout.label(text="Get an API key at aistudio.google.com", icon='INFO')
 
 
 # ----------------------------------------------------------------------
-# Operator: inspect the current Blender scene using core modules
+# HELPER: Get core components with correct config
 # ----------------------------------------------------------------------
-class NL2SCENE3D_OT_inspect_scene(Operator):
-    """Inspect the current scene using core pipeline modules."""
-    bl_idname = "nl2scene3d.inspect_scene"
-    bl_label = "Inspect Scene"
-    bl_description = "Analyze current scene objects using the core pipeline modules"
+def get_pipeline_context():
+    """Initialize core components using current addon settings."""
+    addon_id = __package__
+    try:
+        prefs = bpy.context.preferences.addons[addon_id].preferences
+    except KeyError:
+        print(f"[NL2Scene3D] Errore: preferenze per '{addon_id}' non trovate.")
+        return None, None, None, None, None
+    
+    # Set environment variables BEFORE importing core modules that validate them
+    if prefs.api_key:
+        os.environ["GEMINI_API_KEY"] = prefs.api_key
+    
+    from nl2scene3d.config import get_config, reset_config
+    from nl2scene3d.gemini_client import GeminiClient
+    from nl2scene3d.scene_loader import SceneLoader
+    from nl2scene3d.scene_applicator import SceneApplicator
+    from nl2scene3d.randomizer import SceneRandomizer, RandomizerConfig
+    from nl2scene3d.scene_reorganizer import SceneReorganizer
+    
+    reset_config()
+    config = get_config()
+    
+    # Apply UI overrides to config
+    config.gemini.model_primary = prefs.model_name
+    
+    client = GeminiClient(config.gemini)
+    loader = SceneLoader(config.pipeline)
+    applicator = SceneApplicator()
+    
+    # Bridge PipelineConfig to RandomizerConfig
+    rand_config = RandomizerConfig(
+        seed=config.pipeline.randomizer_seed,
+        jitter_ratio=config.pipeline.jitter_ratio,
+        wall_margin=config.pipeline.wall_margin,
+        max_overlap_ratio=config.pipeline.max_overlap_ratio,
+        max_placement_attempts=config.pipeline.max_placement_attempts
+    )
+    randomizer = SceneRandomizer(rand_config)
+    
+    import nl2scene3d
+    # Nuovo percorso: i prompt sono dentro config/prompts nel pacchetto
+    prompts_dir = Path(nl2scene3d.__file__).parent / "config" / "prompts"
+    reorganizer = SceneReorganizer(client, prompts_dir)
+    
+    return config, loader, applicator, randomizer, reorganizer
+
+
+# ----------------------------------------------------------------------
+# OPERATOR: Randomize Scene (Disorganize)
+# ----------------------------------------------------------------------
+class NL2SCENE3D_OT_randomize(Operator):
+    """Randomly scatter movable objects within room bounds."""
+    bl_idname = "nl2scene3d.randomize"
+    bl_label = "Randomize Scene"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         try:
-            from core.scene_loader import SceneLoader
-            from core.config import get_config
-
-            config = get_config()
-            loader = SceneLoader(config.pipeline)
-            state = loader.extract_scene_state(scene_name="inspected_scene")
-
-            total = len(state.objects)
-            movable = sum(1 for obj in state.objects if obj.is_movable)
-            bounds = state.room_bounds
-
-            msg = (
-                f"Scene has {total} objects ({movable} movable). "
-                f"Bounds: X[{bounds.x_min:.2f}, {bounds.x_max:.2f}] "
-                f"Y[{bounds.y_min:.2f}, {bounds.y_max:.2f}]"
-            )
-
-            self.report({'INFO'}, msg)
-            print(f"[NL2Scene3D] {msg}")
-
-            for obj in state.objects:
-                print(
-                    f"[NL2Scene3D]   {obj.name:30s} "
-                    f"category={obj.category:20s} movable={obj.is_movable}"
-                )
-
+            config_data = get_pipeline_context()
+            if not config_data or not config_data[0]:
+                self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
+                return {'CANCELLED'}
+                
+            _, loader, applicator, randomizer, _ = config_data
+            
+            state = loader.extract_scene_state()
+            randomized_state = randomizer.randomize(state)
+            applicator.apply_state(randomized_state)
+            
+            self.report({'INFO'}, f"Randomized {len(state.movable_objects)} objects.")
             return {'FINISHED'}
-
-        except Exception as exc:
-            error_msg = f"Inspection failed: {exc}"
-            self.report({'ERROR'}, error_msg)
-            print(f"[NL2Scene3D] {error_msg}")
-            import traceback
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Randomization failed: {e}")
             traceback.print_exc()
             return {'CANCELLED'}
 
 
 # ----------------------------------------------------------------------
-# Panel: appears in the 3D View sidebar (press N to toggle)
+# OPERATOR: Reorganize Scene (Core AI Feature)
+# ----------------------------------------------------------------------
+class NL2SCENE3D_OT_reorganize(Operator):
+    """Reorganize the scene using Multimodal LLM logic."""
+    bl_idname = "nl2scene3d.reorganize"
+    bl_label = "Reorganize Scene"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        try:
+            config_data = get_pipeline_context()
+            if not config_data or not config_data[0]:
+                self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
+                return {'CANCELLED'}
+                
+            self.report({'INFO'}, "Reorganizing scene via Gemini... (Blender may pause)")
+            
+            _, loader, applicator, _, reorganizer = config_data
+            
+            state = loader.extract_scene_state()
+            new_state = reorganizer.reorganize(state)
+            applicator.apply_state(new_state)
+            
+            msg = f"Reorganization complete. Clamped: {new_state.metadata.get('clamped_count', 0)}"
+            self.report({'INFO'}, msg)
+            return {'FINISHED'}
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Reorganization failed: {e}")
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+
+# ----------------------------------------------------------------------
+# PANEL: Main UI in Sidebar
 # ----------------------------------------------------------------------
 class NL2SCENE3D_PT_main_panel(Panel):
-    """Main panel of the NL2Scene3D add-on."""
     bl_label = "NL2Scene3D"
     bl_idname = "NL2SCENE3D_PT_main_panel"
     bl_space_type = 'VIEW_3D'
@@ -95,41 +204,76 @@ class NL2SCENE3D_PT_main_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-
-        layout.label(text="Scene Reorganization", icon='SCENE_DATA')
-        layout.separator()
-
-        box = layout.box()
-        box.label(text="Scene Analysis", icon='VIEWZOOM')
-        box.operator(
-            "nl2scene3d.inspect_scene",
-            text="Inspect Scene",
-            icon='OUTLINER_OB_GROUP_INSTANCE',
-        )
+        addon_id = __package__
+        
+        try:
+            # Recupero preferenze
+            if addon_id not in context.preferences.addons:
+                layout.label(text="Add-on not enabled properly", icon='ERROR')
+                return
+                
+            prefs = context.preferences.addons[addon_id].preferences
+            
+            # Header
+            layout.label(text="Smart Reorganization", icon='OUTLINER_OB_GROUP_INSTANCE')
+            
+            # Status Box
+            box = layout.box()
+            if not prefs.api_key:
+                box.label(text="API Key Missing!", icon='ERROR')
+                box.operator("wm.url_open", text="Get Key").url = "https://aistudio.google.com/"
+            else:
+                box.label(text=f"Model: {prefs.model_name}", icon='CHECKMARK')
+            
+            layout.separator()
+            
+            # Controls Header
+            layout.label(text="Scene Controls", icon='SCENE_DATA')
+            
+            # Step 1
+            col1 = layout.column(align=True)
+            col1.label(text="Step 1: Disorganize (Optional)")
+            col1.operator("nl2scene3d.randomize", text="Randomize Layout", icon='RECOVER_LAST')
+            
+            layout.separator()
+            
+            # Step 2
+            col2 = layout.column(align=True)
+            col2.label(text="Step 2: Reorganize")
+            # Usiamo un'icona super sicura 'PLAY' invece di 'MOD_SIMULATE'
+            col2.operator("nl2scene3d.reorganize", text="AI Reorder", icon='PLAY')
+            col2.scale_y = 1.4
+            
+        except Exception as e:
+            # Mostriamo l'errore reale nel pannello
+            err_msg = str(e)
+            layout.label(text=f"Error: {err_msg[:30]}...", icon='ERROR')
+            print(f"[NL2Scene3D] UI Error: {traceback.format_exc()}")
 
 
 # ----------------------------------------------------------------------
-# Registration
+# REGISTRATION
 # ----------------------------------------------------------------------
 classes = (
-    NL2SCENE3D_OT_inspect_scene,
+    NL2SCENE3D_AddonPreferences,
+    NL2SCENE3D_OT_randomize,
+    NL2SCENE3D_OT_reorganize,
     NL2SCENE3D_PT_main_panel,
 )
 
-
 def register():
-    """Register all add-on classes with Blender."""
     for cls in classes:
-        bpy.utils.register_class(cls)
-    print("[NL2Scene3D] Add-on registered.")
-
+        try:
+            bpy.utils.register_class(cls)
+        except Exception as e:
+            print(f"[NL2Scene3D] Registration error for {cls}: {e}")
 
 def unregister():
-    """Unregister all add-on classes from Blender."""
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    print("[NL2Scene3D] Add-on unregistered.")
-
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception as e:
+            pass
 
 if __name__ == "__main__":
     register()

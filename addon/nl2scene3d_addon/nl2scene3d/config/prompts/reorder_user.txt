@@ -1,0 +1,20 @@
+ROOM INFORMATION:
+- Scene name: {scene_name}
+- Room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}]
+- Room dimensions: {room_width:.2f}m x {room_depth:.2f}m x {room_height:.2f}m
+
+DISORGANIZED SCENE STATE:
+The following JSON describes the current disorganized state of the room.
+Please reorganize the movable objects (is_movable: true) following the
+interior design principles provided in the system prompt.
+
+{scene_json}
+
+IMPORTANT REMINDERS AND GEOMETRIC CONSTRAINTS:
+- For EACH object, use the 'spatial_relation' field to explicitly state your geometric intent using the Holodeck constraint vocabulary (e.g. "edge | near, desk-0 | face_to, wall").
+- For large furniture (bed, desk, shelf), carefully calculate their physical footprint using their "dimensions" array. Avoid X/Y collisions.
+- For smaller objects (monitor, lamp, vase), define their 'spatial_relation' as "on_top_of, [furniture_name]", and place their X,Y coordinates inside the X,Y bounds of that furniture. The Blender raycast physics engine will drop them to the correct Z height!
+- Keep all Z coordinates unchanged in the JSON output. Only modify X and Y.
+- Stay strictly within the room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}].
+- Return a complete JSON with ALL objects (both movable and non-movable).
+- For non-movable objects, keep their original location and rotation_euler perfectly unchanged.
