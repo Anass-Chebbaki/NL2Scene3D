@@ -30,13 +30,24 @@ bl_info = {
 _ADDON_DIR = Path(__file__).resolve().parent
 _VENDOR_DIR = _ADDON_DIR / "vendor"
 
+print(f"[NL2Scene3D DEBUG] _ADDON_DIR = {_ADDON_DIR}")
+print(f"[NL2Scene3D DEBUG] _VENDOR_DIR = {_VENDOR_DIR}")
+print(f"[NL2Scene3D DEBUG] _VENDOR_DIR exists = {_VENDOR_DIR.exists()}")
+print(f"[NL2Scene3D DEBUG] dotenv folder exists = {(_VENDOR_DIR / 'dotenv').exists()}")
+
 # Add vendor directory to sys.path
 if _VENDOR_DIR.exists() and str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
-# Add the addon directory itself so 'nl2scene3d' (the core package) is importable
 if str(_ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(_ADDON_DIR))
+
+# Verifica che dotenv sia importabile
+try:
+    from dotenv import load_dotenv
+    print(f"[NL2Scene3D DEBUG] dotenv import OK, location: {load_dotenv.__module__}")
+except ImportError as e:
+    print(f"[NL2Scene3D DEBUG] dotenv import FAILED: {e}")
 
 
 import bpy  # type: ignore
@@ -173,19 +184,19 @@ class NL2SCENE3D_OT_reorganize(Operator):
             if not config_data or not config_data[0]:
                 self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
                 return {'CANCELLED'}
-                
+
             self.report({'INFO'}, "Reorganizing scene via Gemini... (Blender may pause)")
-            
+
             _, loader, applicator, _, reorganizer = config_data
-            
+
             state = loader.extract_scene_state()
             new_state = reorganizer.reorganize(state)
             applicator.apply_state(new_state)
-            
+
             msg = f"Reorganization complete. Clamped: {new_state.metadata.get('clamped_count', 0)}"
             self.report({'INFO'}, msg)
             return {'FINISHED'}
-            
+
         except Exception as e:
             self.report({'ERROR'}, f"Reorganization failed: {e}")
             traceback.print_exc()

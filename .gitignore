@@ -20,6 +20,9 @@ scenes/originals/*.blend
 # File installazione plugin blender
 addon/*.zip
 
+#structure root 4 debugging
+structure.txt
+
 # Log dell'applicazione
 logs/
 *.log
