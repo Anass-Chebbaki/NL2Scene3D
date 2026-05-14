@@ -225,7 +225,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if args.good_quality_score is not None:
         pipeline_config.good_quality_score = args.good_quality_score
 
-    prompts_dir: Path = args.prompts_dir or (_PROJECT_ROOT / "config" / "prompts")
+    prompts_dir: Path = args.prompts_dir or (_SRC_DIR / "nl2scene3d" / "config" / "prompts")
     seed: int = (
         args.seed if args.seed is not None else pipeline_config.randomizer_seed
     )

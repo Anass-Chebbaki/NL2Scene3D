@@ -23,41 +23,50 @@ logger = logging.getLogger(__name__)
 def compute_aabb_2d(obj: "SceneObject") -> Tuple[float, float, float, float]:
     """
     Calcola l'Axis-Aligned Bounding Box (AABB) 2D di un oggetto nel piano XY.
-    Tiene conto della rotazione sull'asse Z per calcolare l'ingombro reale.
-
-    Args:
-        obj: Oggetto di cui calcolare l'AABB.
-
-    Returns:
-        Tupla (x_min, x_max, y_min, y_max).
+    Tiene conto della rotazione sull'asse Z e dell'offset dell'origine.
     """
     loc = obj.transform.location
     dim = obj.transform.dimensions
     rz = obj.transform.rotation_euler[2]
+    off = obj.transform.origin_offset
 
-    cos_z = abs(math.cos(rz))
-    sin_z = abs(math.sin(rz))
-    
-    eff_x = dim[0] * cos_z + dim[1] * sin_z
-    eff_y = dim[0] * sin_z + dim[1] * cos_z
+    # Ruotiamo l'offset locale per trovare il centro geometrico in coordinate mondo
+    cos_z_rot = math.cos(rz)
+    sin_z_rot = math.sin(rz)
+    world_off_x = off[0] * cos_z_rot - off[1] * sin_z_rot
+    world_off_y = off[0] * sin_z_rot + off[1] * cos_z_rot
+
+    # Centro reale dell'AABB
+    center_x = loc[0] + world_off_x
+    center_y = loc[1] + world_off_y
+
+    # Ingombro dell'AABB ruotata
+    cos_z_abs = abs(cos_z_rot)
+    sin_z_abs = abs(sin_z_rot)
+    eff_x = dim[0] * cos_z_abs + dim[1] * sin_z_abs
+    eff_y = dim[0] * sin_z_abs + dim[1] * cos_z_abs
 
     half_x = eff_x / 2.0
     half_y = eff_y / 2.0
+    
     return (
-        loc[0] - half_x,
-        loc[0] + half_x,
-        loc[1] - half_y,
-        loc[1] + half_y,
+        center_x - half_x,
+        center_x + half_x,
+        center_y - half_y,
+        center_y + half_y,
     )
 
 
 def compute_z_range(obj: "SceneObject") -> Tuple[float, float]:
     """
-    Calcola il range Z dell'oggetto (quota_min, quota_max).
+    Calcola il range Z dell'oggetto (quota_min, quota_max) considerando l'offset.
     """
     loc_z = obj.transform.location[2]
+    off_z = obj.transform.origin_offset[2]
     half_h = obj.transform.dimensions[2] / 2.0
-    return (loc_z - half_h, loc_z + half_h)
+    
+    center_z = loc_z + off_z
+    return (center_z - half_h, center_z + half_h)
 
 
 def aabb_overlap_ratio(
@@ -114,8 +123,8 @@ def _check_wall_collision(
     
     for wall in wall_objects:
         name_lower = wall.name.lower()
-        # Porte e finestre sono aperture, non ostacoli
-        if "door" in name_lower or "window" in name_lower:
+        # Porte, finestre e la stanza stessa sono aperture o contenitori, non ostacoli AABB solidi
+        if "door" in name_lower or "window" in name_lower or "room" in name_lower:
             continue
         # Solo i muri veri (non pavimento/soffitto che sono in Z diverso)
         # Un muro ha tipicamente una dimensione molto sottile in una delle due direzioni XY
@@ -303,6 +312,9 @@ def compute_scene_collision_ratio(
     
     for other in placed_objects:
         if other.name == candidate.name:
+            continue
+            
+        if other.category == "structural" and "room" in other.name.lower():
             continue
             
         other_aabb = compute_aabb_2d(other)
