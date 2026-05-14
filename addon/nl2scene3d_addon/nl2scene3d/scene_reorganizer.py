@@ -496,3 +496,98 @@ class SceneReorganizer:
         )
 
         return reordered_state
+
+    def reorganize_with_image(
+            self,
+            disordered_state: SceneState,
+            image_path: Path,
+    ) -> SceneState:
+        """
+        Esegue il riordino della scena con prompt multimodale (testo + immagine).
+
+        A differenza di 'reorganize', questo metodo manda al modello sia
+        i dati JSON della scena sia uno screenshot del viewport corrente.
+        Permette al LLM di "vedere" effettivamente la stanza e di prendere
+        decisioni piu' contestuali (orientamento muri, posizione finestre, ecc.).
+
+        Args:
+            disordered_state: Stato disordinato della scena.
+            image_path: Percorso allo screenshot della viewport corrente.
+
+        Returns:
+            Nuovo SceneState con le posizioni suggerite dall'LLM,
+            validate e sanitizzate.
+        """
+        logger.info(
+            "Avvio riordino LLM multimodale per scena '%s'. "
+            "Oggetti movibili: %d. Immagine: %s",
+            disordered_state.scene_name,
+            len(disordered_state.movable_objects),
+            image_path,
+        )
+
+        # Caricamento del system prompt classico
+        system_prompt_path = self.prompts_dir / "reorder_system.txt"
+        system_prompt = _load_prompt_template(system_prompt_path)
+
+        # Costruzione del user prompt classico (bounds, JSON, footprint)
+        user_prompt_body = self._build_user_prompt(disordered_state)
+
+        # Aggiunta istruzioni specifiche per la modalita' visiva
+        vision_instructions = (
+            "\n\n=== VISUAL CONTEXT ===\n"
+            "Along with this textual data, you are receiving an image showing "
+            "the CURRENT state of the room from a representative viewpoint.\n"
+            "Use the image to understand information that coordinates alone cannot convey:\n"
+            "- The actual orientation and layout of walls\n"
+            "- The position of doors, windows, and other openings\n"
+            "- The real proportions and shape of the room (may not be a perfect rectangle)\n"
+            "- Natural focal points (windows for desks, walls for beds, etc.)\n"
+            "\nBase your reorganization on BOTH the numerical data AND the visual context.\n"
+            "For example: place the bed with headboard against an empty wall visible in "
+            "the image, position the desk near a window if present, leave space in front "
+            "of doors."
+        )
+
+        # call_vision accetta un singolo prompt (non system + user separati).
+        # Concateniamo system + user + istruzioni visive in un unico prompt.
+        combined_prompt = (
+            f"{system_prompt}\n\n"
+            f"{user_prompt_body}\n"
+            f"{vision_instructions}"
+        )
+
+        logger.debug(
+            "Lunghezza combined_prompt: %d caratteri.",
+            len(combined_prompt),
+        )
+
+        try:
+            llm_output = self.client.call_vision(
+                image_path=image_path,
+                user_prompt=combined_prompt,
+            )
+        except GeminiParsingError as exc:
+            logger.error(
+                "Parsing della risposta LLM (multimodale) fallito: %s. "
+                "Restituisce lo stato disordinato invariato.",
+                exc,
+            )
+            return SceneState(
+                scene_name=disordered_state.scene_name,
+                objects=copy.deepcopy(disordered_state.objects),
+                room_bounds=disordered_state.room_bounds,
+                pipeline_step="reordered_failed",
+                metadata={"error": str(exc), "mode": "multimodal"},
+            )
+
+        reordered_state = _validate_and_sanitize_llm_output(
+            llm_output, disordered_state
+        )
+
+        logger.info(
+            "Riordino LLM multimodale completato per scena '%s'.",
+            reordered_state.scene_name,
+        )
+
+        return reordered_state

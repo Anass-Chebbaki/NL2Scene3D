@@ -153,17 +153,49 @@ class NL2SCENE3D_OT_randomize(Operator):
             if not config_data or not config_data[0]:
                 self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
                 return {'CANCELLED'}
-                
+
             _, loader, applicator, randomizer, _ = config_data
-            
+
+            wm = context.window_manager
+            wm.progress_begin(0, 100)
+            for window in wm.windows:
+                window.cursor_set('WAIT')
+
+            wm.progress_update(20)
+            self.report({'INFO'}, "Extracting scene state...")
+            print("[NL2Scene3D] Extracting scene state...")
             state = loader.extract_scene_state()
+
+            wm.progress_update(50)
+            self.report({'INFO'}, "Randomizing layout...")
+            print("[NL2Scene3D] Randomizing layout...")
             randomized_state = randomizer.randomize(state)
+
+            wm.progress_update(80)
+            self.report({'INFO'}, "Applying randomized state...")
+            print("[NL2Scene3D] Applying randomized state...")
             applicator.apply_state(randomized_state)
-            
-            self.report({'INFO'}, f"Randomized {len(state.movable_objects)} objects.")
+
+            wm.progress_update(100)
+            wm.progress_end()
+            for window in wm.windows:
+                window.cursor_set('DEFAULT')
+
+            count = len(state.movable_objects)
+            msg = f"Randomized {count} objects."
+            self.report({'INFO'}, msg)
+            print(f"[NL2Scene3D] {msg}")
             return {'FINISHED'}
-            
+
         except Exception as e:
+            try:
+                wm = context.window_manager
+                wm.progress_end()
+                for window in wm.windows:
+                    window.cursor_set('DEFAULT')
+            except Exception:
+                pass
+
             self.report({'ERROR'}, f"Randomization failed: {e}")
             traceback.print_exc()
             return {'CANCELLED'}
@@ -179,25 +211,112 @@ class NL2SCENE3D_OT_reorganize(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        import tempfile
+        from pathlib import Path
+
         try:
             config_data = get_pipeline_context()
             if not config_data or not config_data[0]:
                 self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
                 return {'CANCELLED'}
 
-            self.report({'INFO'}, "Reorganizing scene via Gemini... (Blender may pause)")
-
             _, loader, applicator, _, reorganizer = config_data
 
+            # ----------------------------------------------------------
+            # Feedback visivo: cursore "wait"
+            # ----------------------------------------------------------
+            wm = context.window_manager
+            wm.progress_begin(0, 100)
+            for window in wm.windows:
+                window.cursor_set('WAIT')
+
+            # ----------------------------------------------------------
+            # Step 1: Estrazione stato scena
+            # ----------------------------------------------------------
+            wm.progress_update(10)
+            self.report({'INFO'}, "Extracting scene state...")
+            print("[NL2Scene3D] Extracting scene state...")
             state = loader.extract_scene_state()
-            new_state = reorganizer.reorganize(state)
+
+            # ----------------------------------------------------------
+            # Step 2: Cattura viewport corrente come immagine
+            # ----------------------------------------------------------
+            wm.progress_update(25)
+            self.report({'INFO'}, "Capturing viewport snapshot...")
+            print("[NL2Scene3D] Capturing viewport snapshot for Gemini...")
+
+            temp_dir = Path(tempfile.gettempdir())
+            snapshot_path = temp_dir / "nl2scene3d_viewport_snapshot.png"
+
+            scene = context.scene
+            original_filepath = scene.render.filepath
+            scene.render.filepath = str(snapshot_path)
+
+            try:
+                bpy.ops.render.opengl(write_still=True, view_context=True)
+            finally:
+                scene.render.filepath = original_filepath
+
+            if not snapshot_path.exists():
+                raise RuntimeError(
+                    f"Viewport snapshot not created at: {snapshot_path}"
+                )
+
+            print(f"[NL2Scene3D] Snapshot saved to: {snapshot_path}")
+
+            # ----------------------------------------------------------
+            # Step 3: Chiamata Gemini con immagine + JSON
+            # ----------------------------------------------------------
+            wm.progress_update(40)
+            self.report({'INFO'}, "Calling Gemini AI with viewport... (10-30s)")
+            print("[NL2Scene3D] Calling Gemini AI with viewport snapshot...")
+
+            new_state = reorganizer.reorganize_with_image(state, snapshot_path)
+
+            # ----------------------------------------------------------
+            # Step 4: Applicazione risultato
+            # ----------------------------------------------------------
+            wm.progress_update(80)
+            self.report({'INFO'}, "Applying reorganized state...")
+            print("[NL2Scene3D] Applying reorganized state...")
             applicator.apply_state(new_state)
 
-            msg = f"Reorganization complete. Clamped: {new_state.metadata.get('clamped_count', 0)}"
-            self.report({'INFO'}, msg)
+            # ----------------------------------------------------------
+            # Cleanup feedback
+            # ----------------------------------------------------------
+            wm.progress_update(100)
+            wm.progress_end()
+            for window in wm.windows:
+                window.cursor_set('DEFAULT')
+
+            clamped = new_state.metadata.get('clamped_count', 0)
+            missing = new_state.metadata.get('missing_count', 0)
+            mode = new_state.metadata.get('mode', 'text')
+
+            if new_state.pipeline_step == "reordered_failed":
+                error = new_state.metadata.get('error', 'unknown')
+                msg = f"Reorganization failed ({mode}): {error}"
+                self.report({'WARNING'}, msg)
+                print(f"[NL2Scene3D] {msg}")
+            else:
+                msg = (
+                    f"Reorganization complete. "
+                    f"Clamped: {clamped}, Missing: {missing}."
+                )
+                self.report({'INFO'}, msg)
+                print(f"[NL2Scene3D] {msg}")
+
             return {'FINISHED'}
 
         except Exception as e:
+            try:
+                wm = context.window_manager
+                wm.progress_end()
+                for window in wm.windows:
+                    window.cursor_set('DEFAULT')
+            except Exception:
+                pass
+
             self.report({'ERROR'}, f"Reorganization failed: {e}")
             traceback.print_exc()
             return {'CANCELLED'}
