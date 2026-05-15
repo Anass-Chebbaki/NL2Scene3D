@@ -201,74 +201,20 @@ def has_collision(
         if _check_wall_collision(candidate, wall_objects, wall_margin):
             return True
     
-    # 2. Check collisioni con mobili (BVH mesh + fallback AABB)
-    try:
-        import bpy  # noqa: PLC0415
-        import mathutils
-        blender_env = True
-    except ImportError:
-        blender_env = False
-
-    if blender_env and furniture_objects:
-        # Cache per i BVHTree per evitare ricalcoli costosi nello stesso loop
-        if not hasattr(has_collision, "_bvh_cache"):
-            has_collision._bvh_cache = {}
-            
-        def get_bvh(obj_name, state_obj, depsgraph):
-            cache_key = (obj_name, tuple(state_obj.transform.location), tuple(state_obj.transform.rotation_euler))
-            if cache_key in has_collision._bvh_cache:
-                return has_collision._bvh_cache[cache_key]
-            
-            blender_obj = bpy.data.objects.get(obj_name)
-            if not blender_obj or blender_obj.type != 'MESH':
-                return None
-                
-            loc = mathutils.Vector(state_obj.transform.location)
-            rot = mathutils.Euler(state_obj.transform.rotation_euler, 'XYZ')
-            scale = blender_obj.scale
-            mat = mathutils.Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
-            mat = mat @ mathutils.Matrix.Diagonal(scale.to_4d())
-            
-            eval_obj = blender_obj.evaluated_get(depsgraph)
-            mesh = eval_obj.to_mesh()
-            verts = [mat @ v.co for v in mesh.vertices]
-            polys = [p.vertices for p in mesh.polygons]
-            
-            if polys:
-                bvh = mathutils.bvhtree.BVHTree.FromPolygons(verts, polys)
-                eval_obj.to_mesh_clear()
-                has_collision._bvh_cache[cache_key] = bvh
-                return bvh
-            eval_obj.to_mesh_clear()
-            return None
-
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        bvh_cand = get_bvh(candidate.name, candidate, depsgraph)
+    # 2. Check collisioni con mobili
+    # Strategia: solo AABB 2D. Se due bounding box si sovrappongono sul piano XY, è collisione.
+    # Non consideriamo la quota Z, perché gli oggetti non raggruppati non devono stare
+    # uno sopra l'altro.
+    cand_aabb = compute_aabb_2d(candidate)
+    
+    for other in furniture_objects:
+        other_aabb = compute_aabb_2d(other)
         
-        if bvh_cand:
-            for other in furniture_objects:
-                if other.object_type != "MESH":
-                    continue
-                
-                bvh_other = get_bvh(other.name, other, depsgraph)
-                if bvh_other and bvh_cand.overlap(bvh_other):
-                    return True
-        else:
-            # Fallback AABB 2D per oggetti non-mesh
-            cand_aabb = compute_aabb_2d(candidate)
-            for other in furniture_objects:
-                other_aabb = compute_aabb_2d(other)
-                ratio = aabb_overlap_ratio(cand_aabb, other_aabb)
-                if ratio > 0.05:
-                    return True
-    elif furniture_objects:
-        # Fuori da Blender: solo AABB 2D
-        cand_aabb = compute_aabb_2d(candidate)
-        for other in furniture_objects:
-            other_aabb = compute_aabb_2d(other)
-            ratio = aabb_overlap_ratio(cand_aabb, other_aabb)
-            if ratio > 0.05:
-                return True
+        # Check sovrapposizione XY rigorosa
+        xy_overlap = aabb_overlap_ratio(cand_aabb, other_aabb)
+        if xy_overlap > 0.05: # Tolleranza minima 5% per lievi contatti
+            logger.debug("Collisione AABB 2D rigida tra %s e %s (XY overlap: %.2f)", candidate.name, other.name, xy_overlap)
+            return True
 
     return False
 

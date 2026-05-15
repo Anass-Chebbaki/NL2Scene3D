@@ -27,10 +27,11 @@ class ObjectTransform:
     location: list[float]
     rotation_euler: list[float]
     dimensions: list[float]
+    origin_offset: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
 
     def __post_init__(self) -> None:
         """Verifica che ogni lista contenga esattamente 3 componenti."""
-        for attr_name in ("location", "rotation_euler", "dimensions"):
+        for attr_name in ("location", "rotation_euler", "dimensions", "origin_offset"):
             value = getattr(self, attr_name)
             if len(value) != 3:
                 raise ValueError(
@@ -44,6 +45,7 @@ class ObjectTransform:
             "location": self.location,
             "rotation_euler": self.rotation_euler,
             "dimensions": self.dimensions,
+            "origin_offset": self.origin_offset,
         }
 
     def copy(self) -> "ObjectTransform":
@@ -52,6 +54,7 @@ class ObjectTransform:
             location=list(self.location),
             rotation_euler=list(self.rotation_euler),
             dimensions=list(self.dimensions),
+            origin_offset=list(self.origin_offset),
         )
 
     @classmethod
@@ -61,6 +64,7 @@ class ObjectTransform:
             location=list(data["location"]),
             rotation_euler=list(data["rotation_euler"]),
             dimensions=list(data["dimensions"]),
+            origin_offset=list(data.get("origin_offset", [0.0, 0.0, 0.0])),
         )
 
 
@@ -91,6 +95,7 @@ class SceneObject:
             "location": self.transform.location,
             "rotation_euler": self.transform.rotation_euler,
             "dimensions": self.transform.dimensions,
+            "origin_offset": self.transform.origin_offset,
             "category": self.category,
             "is_movable": self.is_movable,
         }
@@ -112,6 +117,7 @@ class SceneObject:
             location=list(data["location"]),
             rotation_euler=list(data["rotation_euler"]),
             dimensions=list(data["dimensions"]),
+            origin_offset=list(data.get("origin_offset", [0.0, 0.0, 0.0])),
         )
         return cls(
             name=data["name"],

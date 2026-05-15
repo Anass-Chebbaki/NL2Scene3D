@@ -181,8 +181,7 @@ class SceneLoader:
         name_lower = name.lower()
 
         def has_keyword(kws: tuple[str, ...] | list[str], text: str) -> bool:
-            pattern = r"(?:^|[_\W])(" + "|".join(re.escape(kw) for kw in kws) + r")(?=[_\W]|$)"
-            return re.search(pattern, text) is not None
+            return any(kw in text for kw in kws)
 
         if object_type in self.config.non_mesh_types:
             return "technical", False
@@ -196,7 +195,10 @@ class SceneLoader:
                 return "light_ceiling", False
             return "light_floor", True
 
-        if "decor_" in name_lower or has_keyword(("decor", "decoration", "ornament", "book", "bottle", "monitor", "pc", "computer", "keyboard", "mouse", "trashbin", "doorknob"), name_lower):
+        if "decor_" in name_lower or has_keyword(("decor", "decoration", "ornament", "book", "bottle", "monitor", "pc", "computer", "keyboard", "mouse", "trashbin"), name_lower):
+            # Pomelli e maniglie non sono decorazioni mobili, sono fissi
+            if has_keyword(("knob", "pomello", "handle", "maniglia"), name_lower):
+                return "technical", False
             return "decoration", True
 
         # Structural priority
@@ -316,6 +318,16 @@ class SceneLoader:
             if blender_obj.rotation_mode not in ('XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX'):
                 blender_obj.rotation_mode = 'XYZ'
 
+            # Calcola l'offset dell'origine rispetto al centro del bounding box in coordinate LOCALI
+            import mathutils
+            local_center = sum((mathutils.Vector(p) for p in blender_obj.bound_box), mathutils.Vector()) / 8
+            # Moltiplica per la scala dell'oggetto per ottenere l'offset in metri (coerente con le dimensioni)
+            origin_offset = [
+                local_center.x * blender_obj.scale.x,
+                local_center.y * blender_obj.scale.y,
+                local_center.z * blender_obj.scale.z
+            ]
+
             transform = ObjectTransform(
                 location=[
                     blender_obj.location.x,
@@ -328,6 +340,7 @@ class SceneLoader:
                     blender_obj.rotation_euler.z,
                 ],
                 dimensions=dimensions,
+                origin_offset=origin_offset,
             )
 
             scene_obj = SceneObject(

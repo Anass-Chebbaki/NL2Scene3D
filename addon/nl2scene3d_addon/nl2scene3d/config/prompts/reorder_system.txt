@@ -29,7 +29,7 @@ STRICT CONSTRAINTS:
 - Return ONLY a valid JSON object with no additional text.
 - Do NOT add or remove objects from the scene.
 - For each object, add a 'spatial_relation' string field explaining your layout using the Spatial Constraints listed above.
-- Modify 'location' (X, Y) and 'rotation_euler' fields. Z coordinate can remain unchanged, it will be automatically fixed by the physics engine.
+- MUST KEEP THE ORIGINAL Z COORDINATE UNCHANGED in the JSON output! Only modify X and Y.
 - All coordinates must be within the provided room bounds.
 - Rotation is in radians; only modify the Z axis (index 2) for yaw rotation (0 = East, PI/2 = North, counter-clockwise).
 
@@ -43,4 +43,20 @@ USE IT to calculate minimum spacing. For two objects A and B:
 - Smaller items should be placed relative to the larger furniture.
 
 OUTPUT FORMAT:
-Return a JSON object containing an "objects" array. Each object must have its "name", your chosen "spatial_relation", and the new "location" and "rotation_euler".
+Return a JSON object containing an "objects" array. Each object MUST be a dictionary with these fields:
+- "name": String (exact object name)
+- "spatial_relation": String (briefly explain the logic: what it's near to, which wall, etc.)
+- "location": [X, Y, Z] (Float array. MUST copy the EXACT ORIGINAL Z value! Only modify X and Y).
+- "rotation_euler": [0.0, 0.0, Z_Rotation_Radians] (Float array. Only modify the Z axis in radians).
+
+Example:
+{
+  "objects": [
+    {
+      "name": "furniture_bed",
+      "spatial_relation": "placed against the North wall, far from the door",
+      "location": [1.5, -2.0, 0.3],
+      "rotation_euler": [0.0, 0.0, 1.5708]
+    }
+  ]
+}

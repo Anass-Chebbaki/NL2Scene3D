@@ -324,9 +324,7 @@ class SceneRandomizer:
         for obj in movable_objects:
             new_obj = obj.copy()
             placed = False
-            best_transform = None
-            min_max_overlap = float('inf')
-
+            
             # Se l'oggetto e' piu' grande della stanza, marchiamolo come non piazzabile
             # idealmente, ma la pipeline deve continuare.
             half_x = obj.transform.dimensions[0] / 2.0
@@ -358,7 +356,7 @@ class SceneRandomizer:
                 randomized_count += 1
                 continue
 
-            for attempt in range(self.config.max_placement_attempts):
+            for attempt in range(500):
                 # Generiamo PRIMA la rotazione (solo a step di 90 gradi)
                 candidate_rotation = self._randomize_rotation(
                     obj.transform.rotation_euler
@@ -386,24 +384,9 @@ class SceneRandomizer:
                 )
                 new_obj.transform = candidate_transform
 
-                # --- VERTICAL PROJECTION / SURFACE SNAPPING ---
-                is_ground_only = has_keyword(("trashbin", "chair", "bed", "desk", "carpet", "rug", "table", "basket"), obj.name.lower())
-                
-                if self._is_snappable(obj) and not is_ground_only:
-                    # USIAMO placed_objects PERCHE' I MOBILI POTREBBERO ESSERE STATI SPOSTATI!
-                    current_surfaces = [o for o in placed_objects if self._is_surface(o)]
-                    target_z = self._get_surface_z_at(candidate_location[0], candidate_location[1], current_surfaces)
-                    # Appoggiamo l'oggetto: Z = superficie_top - offset_z_centro
-                    half_h = obj.transform.dimensions[2] / 2.0
-                    off_z = obj.transform.origin_offset[2]
-                    new_obj.transform.location[2] = target_z + (half_h - off_z)
-                else:
-                    # Ritorna a terra (Z=0) o mantiene la sua Z originale se non e' a terra
-                    if is_ground_only or obj.transform.location[2] < 0.5:
-                         half_h = obj.transform.dimensions[2] / 2.0
-                         off_z = obj.transform.origin_offset[2]
-                         new_obj.transform.location[2] = 0.0 + (half_h - off_z)
-                # ----------------------------------------------
+                # Nessuno snapping verticale. L'oggetto mantiene la sua quota Z originale
+                # come richiesto: "tutti gli oggetti devono avere la stessa altezza"
+                # (la coordinata Z è già stata mantenuta da _randomize_location)
 
                 if not self.config.check_overlaps:
                     placed = True

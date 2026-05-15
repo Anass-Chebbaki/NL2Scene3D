@@ -23,41 +23,50 @@ logger = logging.getLogger(__name__)
 def compute_aabb_2d(obj: "SceneObject") -> Tuple[float, float, float, float]:
     """
     Calcola l'Axis-Aligned Bounding Box (AABB) 2D di un oggetto nel piano XY.
-    Tiene conto della rotazione sull'asse Z per calcolare l'ingombro reale.
-
-    Args:
-        obj: Oggetto di cui calcolare l'AABB.
-
-    Returns:
-        Tupla (x_min, x_max, y_min, y_max).
+    Tiene conto della rotazione sull'asse Z e dell'offset dell'origine.
     """
     loc = obj.transform.location
     dim = obj.transform.dimensions
     rz = obj.transform.rotation_euler[2]
+    off = obj.transform.origin_offset
 
-    cos_z = abs(math.cos(rz))
-    sin_z = abs(math.sin(rz))
-    
-    eff_x = dim[0] * cos_z + dim[1] * sin_z
-    eff_y = dim[0] * sin_z + dim[1] * cos_z
+    # Ruotiamo l'offset locale per trovare il centro geometrico in coordinate mondo
+    cos_z_rot = math.cos(rz)
+    sin_z_rot = math.sin(rz)
+    world_off_x = off[0] * cos_z_rot - off[1] * sin_z_rot
+    world_off_y = off[0] * sin_z_rot + off[1] * cos_z_rot
+
+    # Centro reale dell'AABB
+    center_x = loc[0] + world_off_x
+    center_y = loc[1] + world_off_y
+
+    # Ingombro dell'AABB ruotata
+    cos_z_abs = abs(cos_z_rot)
+    sin_z_abs = abs(sin_z_rot)
+    eff_x = dim[0] * cos_z_abs + dim[1] * sin_z_abs
+    eff_y = dim[0] * sin_z_abs + dim[1] * cos_z_abs
 
     half_x = eff_x / 2.0
     half_y = eff_y / 2.0
+    
     return (
-        loc[0] - half_x,
-        loc[0] + half_x,
-        loc[1] - half_y,
-        loc[1] + half_y,
+        center_x - half_x,
+        center_x + half_x,
+        center_y - half_y,
+        center_y + half_y,
     )
 
 
 def compute_z_range(obj: "SceneObject") -> Tuple[float, float]:
     """
-    Calcola il range Z dell'oggetto (quota_min, quota_max).
+    Calcola il range Z dell'oggetto (quota_min, quota_max) considerando l'offset.
     """
     loc_z = obj.transform.location[2]
+    off_z = obj.transform.origin_offset[2]
     half_h = obj.transform.dimensions[2] / 2.0
-    return (loc_z - half_h, loc_z + half_h)
+    
+    center_z = loc_z + off_z
+    return (center_z - half_h, center_z + half_h)
 
 
 def aabb_overlap_ratio(
@@ -114,8 +123,8 @@ def _check_wall_collision(
     
     for wall in wall_objects:
         name_lower = wall.name.lower()
-        # Porte e finestre sono aperture, non ostacoli
-        if "door" in name_lower or "window" in name_lower:
+        # Porte, finestre e la stanza stessa sono aperture o contenitori, non ostacoli AABB solidi
+        if "door" in name_lower or "window" in name_lower or "room" in name_lower:
             continue
         # Solo i muri veri (non pavimento/soffitto che sono in Z diverso)
         # Un muro ha tipicamente una dimensione molto sottile in una delle due direzioni XY
@@ -192,74 +201,20 @@ def has_collision(
         if _check_wall_collision(candidate, wall_objects, wall_margin):
             return True
     
-    # 2. Check collisioni con mobili (BVH mesh + fallback AABB)
-    try:
-        import bpy  # noqa: PLC0415
-        import mathutils
-        blender_env = True
-    except ImportError:
-        blender_env = False
-
-    if blender_env and furniture_objects:
-        # Cache per i BVHTree per evitare ricalcoli costosi nello stesso loop
-        if not hasattr(has_collision, "_bvh_cache"):
-            has_collision._bvh_cache = {}
-            
-        def get_bvh(obj_name, state_obj, depsgraph):
-            cache_key = (obj_name, tuple(state_obj.transform.location), tuple(state_obj.transform.rotation_euler))
-            if cache_key in has_collision._bvh_cache:
-                return has_collision._bvh_cache[cache_key]
-            
-            blender_obj = bpy.data.objects.get(obj_name)
-            if not blender_obj or blender_obj.type != 'MESH':
-                return None
-                
-            loc = mathutils.Vector(state_obj.transform.location)
-            rot = mathutils.Euler(state_obj.transform.rotation_euler, 'XYZ')
-            scale = blender_obj.scale
-            mat = mathutils.Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
-            mat = mat @ mathutils.Matrix.Diagonal(scale.to_4d())
-            
-            eval_obj = blender_obj.evaluated_get(depsgraph)
-            mesh = eval_obj.to_mesh()
-            verts = [mat @ v.co for v in mesh.vertices]
-            polys = [p.vertices for p in mesh.polygons]
-            
-            if polys:
-                bvh = mathutils.bvhtree.BVHTree.FromPolygons(verts, polys)
-                eval_obj.to_mesh_clear()
-                has_collision._bvh_cache[cache_key] = bvh
-                return bvh
-            eval_obj.to_mesh_clear()
-            return None
-
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        bvh_cand = get_bvh(candidate.name, candidate, depsgraph)
+    # 2. Check collisioni con mobili
+    # Strategia: solo AABB 2D. Se due bounding box si sovrappongono sul piano XY, è collisione.
+    # Non consideriamo la quota Z, perché gli oggetti non raggruppati non devono stare
+    # uno sopra l'altro.
+    cand_aabb = compute_aabb_2d(candidate)
+    
+    for other in furniture_objects:
+        other_aabb = compute_aabb_2d(other)
         
-        if bvh_cand:
-            for other in furniture_objects:
-                if other.object_type != "MESH":
-                    continue
-                
-                bvh_other = get_bvh(other.name, other, depsgraph)
-                if bvh_other and bvh_cand.overlap(bvh_other):
-                    return True
-        else:
-            # Fallback AABB 2D per oggetti non-mesh
-            cand_aabb = compute_aabb_2d(candidate)
-            for other in furniture_objects:
-                other_aabb = compute_aabb_2d(other)
-                ratio = aabb_overlap_ratio(cand_aabb, other_aabb)
-                if ratio > 0.05:
-                    return True
-    elif furniture_objects:
-        # Fuori da Blender: solo AABB 2D
-        cand_aabb = compute_aabb_2d(candidate)
-        for other in furniture_objects:
-            other_aabb = compute_aabb_2d(other)
-            ratio = aabb_overlap_ratio(cand_aabb, other_aabb)
-            if ratio > 0.05:
-                return True
+        # Check sovrapposizione XY rigorosa
+        xy_overlap = aabb_overlap_ratio(cand_aabb, other_aabb)
+        if xy_overlap > 0.05: # Tolleranza minima 5% per lievi contatti
+            logger.debug("Collisione AABB 2D rigida tra %s e %s (XY overlap: %.2f)", candidate.name, other.name, xy_overlap)
+            return True
 
     return False
 
@@ -303,6 +258,9 @@ def compute_scene_collision_ratio(
     
     for other in placed_objects:
         if other.name == candidate.name:
+            continue
+            
+        if other.category == "structural" and "room" in other.name.lower():
             continue
             
         other_aabb = compute_aabb_2d(other)

@@ -61,7 +61,7 @@ def _build_scene_json_for_llm(state: SceneState) -> str:
     """
     relevant_objects = [
         obj for obj in state.objects 
-        if obj.is_movable or "door" in obj.name.lower() or "window" in obj.name.lower()
+        if obj.is_movable
     ]
     scene_dict = {
         "scene_name": state.scene_name,
@@ -127,6 +127,17 @@ def _validate_and_sanitize_llm_output(
         )
         return original_state
 
+    # --- INTEGRAZIONE GROUPING ---
+    from nl2scene3d.utils.grouping import find_object_groups, apply_group_transform
+    groups = find_object_groups(original_state.objects)
+    
+    grouped_children = set()
+    for root_name, children in groups.items():
+        for c in children:
+            obj_c = original_state.get_object_by_name(c)
+            if obj_c and obj_c.is_movable:
+                grouped_children.add(c)
+
     llm_objects_by_name: dict[str, dict] = {}
     for llm_obj_data in llm_objects_list:
         if isinstance(llm_obj_data, dict) and "name" in llm_obj_data:
@@ -146,6 +157,10 @@ def _validate_and_sanitize_llm_output(
     missing_count = 0
 
     for original_obj in original_state.objects:
+        if original_obj.name in grouped_children:
+            # Ignoriamo i figli movibili, verranno posizionati basandosi sul genitore
+            continue
+            
         llm_obj_data = llm_objects_by_name.get(original_obj.name)
 
         if llm_obj_data is None:
@@ -155,11 +170,17 @@ def _validate_and_sanitize_llm_output(
                     original_obj.name,
                 )
             else:
-                logger.warning(
-                    "Oggetto movibile '%s' assente dalla risposta LLM. Mantenuta posizione originale.",
-                    original_obj.name,
-                )
-                missing_count += 1
+                if original_obj.is_movable:
+                    logger.warning(
+                        "Oggetto movibile '%s' assente dalla risposta LLM. Mantenuta posizione originale.",
+                        original_obj.name,
+                    )
+                    missing_count += 1
+                else:
+                    logger.debug(
+                        "Oggetto non strutturale fisso '%s' assente dalla risposta LLM (comportamento atteso).",
+                        original_obj.name,
+                    )
             corrected_objects.append(copy.deepcopy(original_obj))
             continue
 
@@ -233,6 +254,7 @@ def _validate_and_sanitize_llm_output(
             location=new_location,
             rotation_euler=new_rotation,
             dimensions=original_obj.transform.dimensions,
+            origin_offset=list(original_obj.transform.origin_offset),
         )
         corrected_objects.append(new_obj)
 
@@ -252,6 +274,22 @@ def _validate_and_sanitize_llm_output(
     for obj in corrected_objects:
         if not obj.is_movable:
             final_objects.append(obj)
+            
+            # --- SPOSTA I FIGLI CON IL GENITORE (Static) ---
+            if obj.name in groups:
+                orig_root = original_state.get_object_by_name(obj.name)
+                for child_name in groups[obj.name]:
+                    if child_name in grouped_children:
+                        orig_child = original_state.get_object_by_name(child_name)
+                        new_child = copy.deepcopy(orig_child)
+                        apply_group_transform(
+                            new_child,
+                            orig_root.transform.location,
+                            orig_root.transform.rotation_euler,
+                            obj.transform.location,
+                            obj.transform.rotation_euler
+                        )
+                        final_objects.append(new_child)
             
     # Poi aggiungiamo i movibili uno ad uno, risolvendo eventuali collisioni
     # con separazione basata sul vettore di penetrazione anziché jitter casuale.
@@ -318,7 +356,46 @@ def _validate_and_sanitize_llm_output(
                     )
                     obj.transform.location = original_loc
             
-        final_objects.append(obj)
+        # --- SPOSTA I FIGLI CON IL GENITORE (Movable) ---
+        if obj.name in groups:
+            orig_root = original_state.get_object_by_name(obj.name)
+            temp_children = []
+            move_valid = True
+            
+            for child_name in groups[obj.name]:
+                if child_name in grouped_children:
+                    orig_child = original_state.get_object_by_name(child_name)
+                    new_child = copy.deepcopy(orig_child)
+                    apply_group_transform(
+                        new_child,
+                        orig_root.transform.location,
+                        orig_root.transform.rotation_euler,
+                        obj.transform.location,
+                        obj.transform.rotation_euler
+                    )
+                    
+                    # Verifica se il figlio è fuori dai muri
+                    from nl2scene3d.utils.geometry import compute_aabb_2d
+                    c_aabb = compute_aabb_2d(new_child)
+                    if (c_aabb[0] < room_bounds.x_min or c_aabb[1] > room_bounds.x_max or
+                        c_aabb[2] < room_bounds.y_min or c_aabb[3] > room_bounds.y_max):
+                        logger.warning("Figlio '%s' fuori dai muri. Annullato spostamento di '%s'.", new_child.name, obj.name)
+                        move_valid = False
+                        break
+                    temp_children.append(new_child)
+            
+            if move_valid:
+                final_objects.append(obj)
+                final_objects.extend(temp_children)
+            else:
+                # Ripristina tutto il gruppo alla posizione originale
+                obj.transform = orig_root.transform.copy()
+                final_objects.append(obj)
+                for cn in groups[obj.name]:
+                    co = original_state.get_object_by_name(cn)
+                    if co: final_objects.append(co.copy())
+        else:
+            final_objects.append(obj)
 
     if jitter_resolved > 0 or jitter_failed > 0:
         logger.info(
@@ -425,13 +502,12 @@ class SceneReorganizer:
                 room_height=room_bounds.height,
                 scene_json=scene_json,
             )
-            compact_instr = (
-                "\n\nOUTPUT FORMAT (COMPACT JSON):"
-                "\nReturn a JSON list of lists, where each inner list is: [\"object_name\", x, y, rotation_z_degrees]"
-                "\nExample: [[\"furniture_bed\", 1.2, -0.5, 90], [\"furniture_desk\", -2.1, 1.0, 0]]"
-                "\n\nONLY include movable objects. DO NOT add any text, descriptions, or other fields."
+            json_instr = (
+                "\n\nOUTPUT FORMAT:"
+                "\nReturn the requested JSON dictionary format exactly as specified in the system instructions."
+                "\nONLY include movable objects. DO NOT add any markdown formatting, text, descriptions, or other fields."
             )
-            return prompt + footprint_table + compact_instr
+            return prompt + footprint_table + json_instr
 
         return (
             "You are an interior designer. Please reorganize the following 3D scene JSON "
