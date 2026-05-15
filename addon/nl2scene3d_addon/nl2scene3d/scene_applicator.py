@@ -181,10 +181,22 @@ class SceneApplicator:
                 # altrimenti matrix_world e bound_box avranno le coordinate VECCHIE 
                 # e il raggio partira' dalla posizione precedente dell'oggetto!
                 bpy.context.view_layer.update()
-                dropped = _drop_object_to_surface(blender_obj, blender_scene)
-                if dropped:
-                    scene_obj.transform.location[2] = blender_obj.location.z
-                    logger.debug("Oggetto '%s' fatto cadere sulla superficie sottostante via raycast.", scene_obj.name)
+                
+                grouped_children = state.metadata.get("grouped_children", [])
+                is_child = scene_obj.name in grouped_children
+                is_wall_mounted = any(k in scene_obj.name.lower() for k in ("shelf", "mensola", "wall", "painting", "frame", "poster"))
+                
+                # Se l'oggetto deve stare in alto (perche' a muro o perche' e' un figlio raggruppato),
+                # NON dobbiamo assolutamente farlo cadere, altrimenti finisce a terra ignorando il genitore.
+                if not (is_child or is_wall_mounted):
+                    # Solo per oggetti "root" che non sono a muro, proviamo lo snapping a terra/superficie
+                    dropped = _drop_object_to_surface(blender_obj, blender_scene)
+                    if dropped:
+                        scene_obj.transform.location[2] = blender_obj.location.z
+                        logger.debug("Oggetto '%s' fatto cadere sulla superficie sottostante via raycast.", scene_obj.name)
+                else:
+                    logger.debug("Oggetto '%s' mantiene la sua quota Z (is_child=%s, is_wall=%s).", 
+                                 scene_obj.name, is_child, is_wall_mounted)
                 counters["updated"] += 1
             else:
                 counters["skipped"] += 1

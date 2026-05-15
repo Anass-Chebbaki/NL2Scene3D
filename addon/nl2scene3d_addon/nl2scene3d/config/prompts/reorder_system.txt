@@ -23,7 +23,8 @@ For each object, select from these constraint types to build your reasoning:
 - Alignment: 'center_aligned'
 - Rotation: 'face_to' (face the center of another object)
 
-A physics engine will automatically run a raycast to drop objects to their correct Z-heights (e.g., dropping a vase onto a table). Focus heavily on getting the X, Y coordinates and relationships correct!
+Z-HEIGHT PRESERVATION:
+Z coordinates are fixed and MUST remain unchanged. Do not attempt to drop objects to the floor or stack them vertically by changing Z. Focus exclusively on X, Y coordinates and rotations.
 
 STRICT CONSTRAINTS:
 - Return ONLY a valid JSON object with no additional text.

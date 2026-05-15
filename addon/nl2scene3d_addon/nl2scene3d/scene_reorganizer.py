@@ -413,6 +413,7 @@ def _validate_and_sanitize_llm_output(
             "missing_count": missing_count,
             "jitter_resolved": jitter_resolved,
             "jitter_failed": jitter_failed,
+            "grouped_children": list(grouped_children),
         },
     )
 

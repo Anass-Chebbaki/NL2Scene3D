@@ -40,11 +40,11 @@ def compute_aabb_2d(obj: "SceneObject") -> Tuple[float, float, float, float]:
     center_x = loc[0] + world_off_x
     center_y = loc[1] + world_off_y
 
-    # Ingombro dell'AABB ruotata
+    # Ingombro dell'AABB ruotata con un piccolo margine di sicurezza (1cm)
     cos_z_abs = abs(cos_z_rot)
     sin_z_abs = abs(sin_z_rot)
-    eff_x = dim[0] * cos_z_abs + dim[1] * sin_z_abs
-    eff_y = dim[0] * sin_z_abs + dim[1] * cos_z_abs
+    eff_x = dim[0] * cos_z_abs + dim[1] * sin_z_abs + 0.01
+    eff_y = dim[0] * sin_z_abs + dim[1] * cos_z_abs + 0.01
 
     half_x = eff_x / 2.0
     half_y = eff_y / 2.0
@@ -161,6 +161,60 @@ def _check_wall_collision(
     return False
 
 
+def _get_obb_corners(obj: "SceneObject", margin: float = 0.05) -> List[Tuple[float, float]]:
+    """Restituisce i 4 angoli dell'Oriented Bounding Box (OBB) 2D nel piano XY."""
+    loc = obj.transform.location
+    dim = obj.transform.dimensions
+    rz = obj.transform.rotation_euler[2]
+    off = obj.transform.origin_offset
+    
+    # Centro mondo dell'oggetto (applicando rotazione all'offset)
+    c, s = math.cos(rz), math.sin(rz)
+    world_off_x = off[0] * c - off[1] * s
+    world_off_y = off[0] * s + off[1] * c
+    cx, cy = loc[0] + world_off_x, loc[1] + world_off_y
+    
+    # Dimensioni con margine (5cm)
+    w, h = (dim[0] + margin) / 2.0, (dim[1] + margin) / 2.0
+    
+    # Angoli locali (rispetto al centro geometrico)
+    local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
+    
+    # Ruota e trasla gli angoli in coordinate mondo
+    world_corners = []
+    for lx, ly in local_corners:
+        wx = cx + (lx * c - ly * s)
+        wy = cy + (lx * s + ly * c)
+        world_corners.append((wx, wy))
+    return world_corners
+
+
+def _check_sat_overlap(poly_a: List[Tuple[float, float]], poly_b: List[Tuple[float, float]]) -> bool:
+    """Implementazione del Separating Axis Theorem (SAT) per due poligoni convessi."""
+    def get_axes(poly):
+        axes = []
+        for i in range(len(poly)):
+            p1, p2 = poly[i], poly[(i + 1) % len(poly)]
+            edge = (p2[0] - p1[0], p2[1] - p1[1])
+            normal = (-edge[1], edge[0]) # Perpendicolare
+            mag = math.sqrt(normal[0]**2 + normal[1]**2)
+            if mag > 1e-6:
+                axes.append((normal[0]/mag, normal[1]/mag))
+        return axes
+
+    def project(poly, axis):
+        dots = [p[0] * axis[0] + p[1] * axis[1] for p in poly]
+        return min(dots), max(dots)
+
+    axes = get_axes(poly_a) + get_axes(poly_b)
+    for axis in axes:
+        min_a, max_a = project(poly_a, axis)
+        min_b, max_b = project(poly_b, axis)
+        if max_a < min_b or max_b < min_a:
+            return False # Trovato un asse di separazione: nessuna collisione
+    return True # Nessun asse di separazione trovato: c'e' collisione
+
+
 def has_collision(
     candidate: "SceneObject",
     placed_objects: List["SceneObject"],
@@ -168,22 +222,10 @@ def has_collision(
     wall_margin: float = 0.05,
 ) -> bool:
     """
-    Verifica se un oggetto ha collisioni con quelli gia' posizionati.
-    
-    Strategia a due livelli:
-    1. Per gli oggetti strutturali (muri): check AABB 2D con margine
-    2. Per i mobili: check BVH mesh-esatto (Blender) + fallback AABB 2D
-    
-    Args:
-        candidate: Oggetto da testare.
-        placed_objects: Lista di oggetti già piazzati.
-        check_walls: Se True, verifica anche le collisioni con i muri.
-        wall_margin: Margine aggiuntivo per i muri.
-        
-    Returns:
-        True se c'è una collisione.
+    Verifica se un oggetto ha collisioni con quelli gia' posizionati o con i muri.
+    Usa il Separating Axis Theorem (SAT) per precisione millimetrica tra OBB ruotati.
     """
-    # Separa muri da mobili
+    # Filtriamo gli oggetti validi
     wall_objects = []
     furniture_objects = []
     for other in placed_objects:
@@ -201,19 +243,16 @@ def has_collision(
         if _check_wall_collision(candidate, wall_objects, wall_margin):
             return True
     
-    # 2. Check collisioni con mobili
-    # Strategia: solo AABB 2D. Se due bounding box si sovrappongono sul piano XY, è collisione.
-    # Non consideriamo la quota Z, perché gli oggetti non raggruppati non devono stare
-    # uno sopra l'altro.
-    cand_aabb = compute_aabb_2d(candidate)
+    # 2. Check collisioni con mobili (SAT - Oriented Bounding Box)
+    if not furniture_objects:
+        return False
+
+    cand_poly = _get_obb_corners(candidate)
     
     for other in furniture_objects:
-        other_aabb = compute_aabb_2d(other)
-        
-        # Check sovrapposizione XY rigorosa
-        xy_overlap = aabb_overlap_ratio(cand_aabb, other_aabb)
-        if xy_overlap > 0.05: # Tolleranza minima 5% per lievi contatti
-            logger.debug("Collisione AABB 2D rigida tra %s e %s (XY overlap: %.2f)", candidate.name, other.name, xy_overlap)
+        other_poly = _get_obb_corners(other)
+        if _check_sat_overlap(cand_poly, other_poly):
+            logger.debug("COLLISIONE SAT RILEVATA tra %s e %s", candidate.name, other.name)
             return True
 
     return False

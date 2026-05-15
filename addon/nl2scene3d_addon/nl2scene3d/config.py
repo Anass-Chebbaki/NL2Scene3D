@@ -258,7 +258,7 @@ class RandomizerConfig:
     jitter_ratio: float = 0.8
     rotate_z_only: bool = True
     check_overlaps: bool = True
-    wall_margin: float = 0.1
+    wall_margin: float = 0.2
     max_overlap_ratio: float = 0.5
     max_placement_attempts: int = 10
 

@@ -75,22 +75,54 @@ def find_object_groups(objects: List["SceneObject"], z_tolerance: float = 0.15) 
 
             # Calcola le quote reali di base e top usando gli offset
             child_bottom = child_z + child_off_z - (child_h / 2.0)
+            child_top = child_z + child_off_z + (child_h / 2.0)
+            parent_bottom = parent_z + parent_off_z - (parent_h / 2.0)
             parent_top = parent_z + parent_off_z + (parent_h / 2.0)
             
-            # Il figlio deve essere appoggiato sopra il genitore (tolleranza 10cm)
-            z_diff = child_bottom - parent_top
-            if abs(z_diff) > 0.1:
-                # Accetta una piccola penetrazione (es. tappeti o piccoli oggetti che sprofondano)
-                if z_diff < -0.15 or z_diff > 0.15:
-                    continue
-
-            overlap = aabb_overlap_ratio(child_info["aabb"], parent_info["aabb"])
+            # CRITERIO 1: Il figlio e' appoggiato SOPRA il genitore
+            z_diff_top = child_bottom - parent_top
+            is_on_top = abs(z_diff_top) < 0.1
             
-            if overlap > 0.1:  # Abbassato al 10% per catturare oggetti che sporgono (es. libri)
-                score = overlap
-                # Selezioniamo il genitore con Z piu' vicino (minimo gap)
-                if abs(z_diff) < min_z_diff:
-                    min_z_diff = abs(z_diff)
+            # CRITERIO 2: Il figlio e' INTERNO al genitore (es. libro in libreria o in un cassetto)
+            # Solo se il genitore NON e' il pavimento (Z > 0.1) o se il figlio e' chiaramente sollevato
+            is_inside = (child_bottom >= parent_bottom - 0.02 and child_top <= parent_top + 0.02)
+            
+            # CRITERIO 3: Base-to-base (es. oggetti infilati uno nell'altro o sullo stesso piano)
+            # MAI per oggetti sul pavimento (Z < 0.1), altrimenti sedie e letti si collegano tra loro!
+            z_diff_base = abs(child_bottom - parent_bottom)
+            is_base_aligned = z_diff_base < 0.05 and parent_bottom > 0.1
+
+            if not (is_on_top or is_inside or is_base_aligned):
+                continue
+
+            # --- PROTEZIONE DA INCASTRI ORIGINALI ---
+            # Se gli oggetti si compenetrano in 3D (Z-overlap reale), NON li raggruppiamo.
+            # Devono rimanere indipendenti per poter essere separati dalla pipeline.
+            # Verifichiamo se c'e' una penetrazione Z significativa (> 2cm)
+            z_penetration = min(child_top, parent_top) - max(child_bottom, parent_bottom)
+            if z_penetration > 0.02 and not is_on_top:
+                logger.debug("Grouping saltato per %s e %s: penetrazione 3D rilevata (%.2fm)", child_name, parent_name, z_penetration)
+                continue
+
+            # Verifichiamo che il genitore sia significativamente piu' grande (almeno il doppio del volume)
+            child_vol = child_info["obj"].transform.dimensions[0] * child_info["obj"].transform.dimensions[1] * child_info["obj"].transform.dimensions[2]
+            parent_vol = parent_info["obj"].transform.dimensions[0] * parent_info["obj"].transform.dimensions[1] * parent_info["obj"].transform.dimensions[2]
+            if parent_vol < child_vol * 1.5:
+                continue
+
+            from nl2scene3d.utils.geometry import _get_obb_corners, _check_sat_overlap
+            
+            # Per il raggruppamento usiamo SAT ma con un margine NEGATIVO o nullo
+            # per essere sicuri che ci sia un contatto reale
+            child_poly = _get_obb_corners(child_info["obj"], margin=0.0)
+            parent_poly = _get_obb_corners(parent_info["obj"], margin=0.0)
+            
+            if _check_sat_overlap(child_poly, parent_poly):
+                score = 1.0 # SAT e' binario (si/no)
+                # Selezioniamo il genitore con la distanza Z minima (o dalla cima o dalla base)
+                current_z_dist = min(abs(z_diff_top), z_diff_base)
+                if current_z_dist < min_z_diff:
+                    min_z_diff = current_z_dist
                     max_overlap_score = score
                     best_parent = parent_name
 

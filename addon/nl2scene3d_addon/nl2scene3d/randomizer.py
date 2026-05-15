@@ -487,5 +487,6 @@ class SceneRandomizer:
                 "randomizer_seed": self.config.seed,
                 "randomized_count": randomized_count,
                 "failed_placements": failed_count,
+                "grouped_children": list(grouped_children),
             },
         )
