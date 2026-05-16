@@ -1,11 +1,12 @@
-# src/nl2scene3d/scene_applicator.py
+# nl2scene3d/scene_applicator.py
 """
-Applicazione delle trasformazioni suggerite dall'LLM alla scena Blender.
+Applicazione delle trasformazioni a una scena Blender.
 
-Questo modulo:
-- Legge il JSON dello stato riordinato o raffinato
-- Aggiorna le proprieta' location e rotation_euler degli oggetti in Blender
-- Garantisce che le modifiche vengano applicate prima del rendering
+Principio fondamentale:
+    Questo modulo applica SOLO location e rotation_euler — nient'altro.
+    La coordinata Z NON viene mai modificata tramite raycast o surface snapping.
+    La Z è responsabilità esclusiva del file .blend originale: se un oggetto
+    fluttua nell'originale, rimane a quella quota in tutta la pipeline.
 
 Deve essere eseguito all'interno dell'ambiente Python di Blender.
 """
@@ -24,20 +25,13 @@ class SceneApplicator:
     Applica uno SceneState alla scena attualmente aperta in Blender.
 
     Aggiorna posizioni e rotazioni degli oggetti Blender in base ai valori
-    contenuti nello SceneState, senza aggiungere o rimuovere oggetti.
+    contenuti nello SceneState, senza aggiungere, rimuovere o far cadere oggetti.
 
     Attributes:
         tolerance: Soglia di differenza minima per applicare una modifica.
-            Evita aggiornamenti ridondanti per valori quasi identici.
     """
 
     def __init__(self, tolerance: float = 0.001) -> None:
-        """
-        Inizializza l'applicatore.
-
-        Args:
-            tolerance: Soglia minima di variazione per aggiornare una proprieta'.
-        """
         self.tolerance = tolerance
         logger.info("SceneApplicator inizializzato. Tolerance: %.4f.", tolerance)
 
@@ -47,190 +41,86 @@ class SceneApplicator:
 
         Per ogni oggetto nello SceneState, cerca l'oggetto corrispondente
         in Blender per nome e ne aggiorna location e rotation_euler.
-        Gli oggetti non movibili e quelli con differenze inferiori alla
-        tolerance vengono saltati senza modifiche.
+        Gli oggetti non movibili e quelli sotto la tolerance vengono saltati.
+
+        La Z non viene mai modificata: rimane sempre quella dello SceneState
+        (che a sua volta eredita la Z originale del file .blend).
 
         Args:
-            state: SceneState con le nuove trasformazioni da applicare.
+            state: SceneState con le nuove trasformazioni.
 
         Returns:
-            Dizionario con contatori: 'updated', 'not_found', 'skipped'.
+            {'updated': N, 'not_found': N, 'skipped': N}
 
         Raises:
             ImportError: Se bpy non e' disponibile.
         """
         try:
             import bpy  # noqa: PLC0415
-            import mathutils
         except ImportError as exc:
-            raise ImportError(
-                "Il modulo 'bpy' richiede l'ambiente Blender."
-            ) from exc
-
-        def _drop_object_to_surface(blender_obj: bpy.types.Object, scene: bpy.types.Scene) -> bool:
-            """
-            Lancia un raggio verso il basso per trovare la superficie di appoggio.
-            Il raggio parte dall'altezza corrente dell'oggetto (che l'reorganizer imposta
-            vicino al soffitto) per evitare di "nascere" gia' sotto i mobili.
-            """
-            matrix_world = blender_obj.matrix_world
-            bbox = [matrix_world @ mathutils.Vector(corner) for corner in blender_obj.bound_box]
-            z_min = min([v.z for v in bbox])
-            center_x = sum([v.x for v in bbox]) / 8.0
-            center_y = sum([v.y for v in bbox]) / 8.0
-            
-            # Parte da un punto leggermente sopra la base dell'oggetto
-            # Poiche' l'reorganizer mette gli oggetti in alto, questo raggio
-            # colpirà la prima superficie utile (tavolo o pavimento).
-            ray_origin = mathutils.Vector((center_x, center_y, z_min + 0.1))
-            ray_direction = mathutils.Vector((0, 0, -1))
-            
-            # Esclude l'oggetto stesso dal raycast per evitare di colpirsi da solo
-            hide_original = blender_obj.hide_viewport
-            blender_obj.hide_viewport = True
-            
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-            hit, location, normal, index, hit_obj, matrix = scene.ray_cast(depsgraph, ray_origin, ray_direction)
-            
-            blender_obj.hide_viewport = hide_original
-            
-            if hit:
-                # Sposta l'oggetto in modo che la sua base tocchi il punto di hit
-                z_offset = location.z - z_min
-                blender_obj.location.z += z_offset
-                return True
-            
-            # Se non colpisce nulla, proviamo a farlo cadere dal soffitto assoluto
-            # come ultima spiaggia (magari l'oggetto era fuori dai bounds?)
-            return False
+            raise ImportError("Il modulo 'bpy' richiede l'ambiente Blender.") from exc
 
         counters: dict[str, int] = {"updated": 0, "not_found": 0, "skipped": 0}
         blender_scene = bpy.context.scene
 
         logger.info(
-            "Applicazione stato '%s' alla scena Blender (step: %s, oggetti: %d).",
-            state.scene_name,
-            state.pipeline_step,
-            len(state.objects),
+            "Applicazione stato '%s' (step: %s, oggetti: %d).",
+            state.scene_name, state.pipeline_step, len(state.objects),
         )
 
         for scene_obj in state.objects:
-            blender_obj = blender_scene.objects.get(scene_obj.name)
+            blender_obj = blender_scene.objects.get(scene_obj.name)  # type: ignore[union-attr]
 
             if blender_obj is None:
-                logger.warning(
-                    "Oggetto '%s' non trovato nella scena Blender. Ignorato.",
-                    scene_obj.name,
-                )
+                logger.warning("Oggetto '%s' non trovato in Blender. Ignorato.", scene_obj.name)
                 counters["not_found"] += 1
                 continue
 
-            if not scene_obj.is_movable or blender_obj.type in ('CAMERA', 'LIGHT'):
+            if not scene_obj.is_movable or blender_obj.type in ("CAMERA", "LIGHT"):
                 counters["skipped"] += 1
                 continue
 
-            transform = scene_obj.transform
+            t = scene_obj.transform
             updated = False
 
-            current_loc = [
-                blender_obj.location.x,
-                blender_obj.location.y,
-                blender_obj.location.z,
-            ]
-            new_loc = transform.location
-
-            if any(
-                abs(new_loc[i] - current_loc[i]) > self.tolerance for i in range(3)
-            ):
-                blender_obj.location.x = new_loc[0]
-                blender_obj.location.y = new_loc[1]
-                blender_obj.location.z = new_loc[2]
+            # --- Location (XYZ, inclusa Z originale) ---
+            cur_loc = [blender_obj.location.x, blender_obj.location.y, blender_obj.location.z]
+            if any(abs(t.location[i] - cur_loc[i]) > self.tolerance for i in range(3)):
+                blender_obj.location.x = t.location[0]
+                blender_obj.location.y = t.location[1]
+                blender_obj.location.z = t.location[2]
                 updated = True
-                logger.debug(
-                    "Oggetto '%s': location aggiornata da %s a %s.",
-                    scene_obj.name,
-                    current_loc,
-                    new_loc,
-                )
+                logger.debug("'%s': location %s → %s.", scene_obj.name, cur_loc, t.location)
 
-            current_rot = [
-                blender_obj.rotation_euler.x,
-                blender_obj.rotation_euler.y,
-                blender_obj.rotation_euler.z,
-            ]
-            new_rot = transform.rotation_euler
-
-            if any(
-                abs(new_rot[i] - current_rot[i]) > self.tolerance for i in range(3)
-            ):
-                # Assicuriamoci che la modalita' di rotazione sia Euler XYZ
-                blender_obj.rotation_mode = 'XYZ'
-                blender_obj.rotation_euler.x = new_rot[0]
-                blender_obj.rotation_euler.y = new_rot[1]
-                blender_obj.rotation_euler.z = new_rot[2]
+            # --- Rotation Euler ---
+            cur_rot = [blender_obj.rotation_euler.x, blender_obj.rotation_euler.y, blender_obj.rotation_euler.z]
+            if any(abs(t.rotation_euler[i] - cur_rot[i]) > self.tolerance for i in range(3)):
+                blender_obj.rotation_mode = "XYZ"
+                blender_obj.rotation_euler.x = t.rotation_euler[0]
+                blender_obj.rotation_euler.y = t.rotation_euler[1]
+                blender_obj.rotation_euler.z = t.rotation_euler[2]
                 updated = True
-                logger.debug(
-                    "Oggetto '%s': rotation_euler aggiornata da %s a %s.",
-                    scene_obj.name,
-                    current_rot,
-                    new_rot,
-                )
+                logger.debug("'%s': rotation %s → %s.", scene_obj.name, cur_rot, t.rotation_euler)
 
-            if updated:
-                # E' FONDAMENTALE aggiornare il view_layer PRIMA di fare il raycast,
-                # altrimenti matrix_world e bound_box avranno le coordinate VECCHIE 
-                # e il raggio partira' dalla posizione precedente dell'oggetto!
-                bpy.context.view_layer.update()
-                
-                grouped_children = state.metadata.get("grouped_children", [])
-                is_child = scene_obj.name in grouped_children
-                is_wall_mounted = any(k in scene_obj.name.lower() for k in ("shelf", "mensola", "wall", "painting", "frame", "poster"))
-                
-                # Se l'oggetto deve stare in alto (perche' a muro o perche' e' un figlio raggruppato),
-                # NON dobbiamo assolutamente farlo cadere, altrimenti finisce a terra ignorando il genitore.
-                if not (is_child or is_wall_mounted):
-                    # Solo per oggetti "root" che non sono a muro, proviamo lo snapping a terra/superficie
-                    dropped = _drop_object_to_surface(blender_obj, blender_scene)
-                    if dropped:
-                        scene_obj.transform.location[2] = blender_obj.location.z
-                        logger.debug("Oggetto '%s' fatto cadere sulla superficie sottostante via raycast.", scene_obj.name)
-                else:
-                    logger.debug("Oggetto '%s' mantiene la sua quota Z (is_child=%s, is_wall=%s).", 
-                                 scene_obj.name, is_child, is_wall_mounted)
-                counters["updated"] += 1
-            else:
-                counters["skipped"] += 1
+            counters["updated" if updated else "skipped"] += 1
 
         try:
-            bpy.context.view_layer.update()
+            bpy.context.view_layer.update()  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             logger.debug("view_layer.update() non applicabile: %s", exc)
 
         logger.info(
             "Applicazione completata: %d aggiornati, %d non trovati, %d invariati.",
-            counters["updated"],
-            counters["not_found"],
-            counters["skipped"],
+            counters["updated"], counters["not_found"], counters["skipped"],
         )
-
         return counters
 
     def save_blend_file(self, output_path: Path) -> None:
-        """
-        Salva la scena Blender corrente in un nuovo file .blend.
-
-        Args:
-            output_path: Percorso del file .blend di destinazione.
-
-        Raises:
-            ImportError: Se bpy non e' disponibile.
-        """
+        """Salva la scena Blender corrente in un file .blend."""
         try:
             import bpy  # noqa: PLC0415
         except ImportError as exc:
-            raise ImportError(
-                "Il modulo 'bpy' richiede l'ambiente Blender."
-            ) from exc
+            raise ImportError("Il modulo 'bpy' richiede l'ambiente Blender.") from exc
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         bpy.ops.wm.save_as_mainfile(filepath=str(output_path))

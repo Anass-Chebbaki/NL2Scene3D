@@ -107,28 +107,21 @@ def get_pipeline_context():
     from nl2scene3d.gemini_client import GeminiClient
     from nl2scene3d.scene_loader import SceneLoader
     from nl2scene3d.scene_applicator import SceneApplicator
-    from nl2scene3d.randomizer import SceneRandomizer, RandomizerConfig
+    from nl2scene3d.randomizer import SceneRandomizer
     from nl2scene3d.scene_reorganizer import SceneReorganizer
-    
+
     reset_config()
     config = get_config()
-    
+
     # Apply UI overrides to config
     config.gemini.model_primary = prefs.model_name
-    
+
     client = GeminiClient(config.gemini)
     loader = SceneLoader(config.pipeline)
     applicator = SceneApplicator()
-    
-    # Bridge PipelineConfig to RandomizerConfig
-    rand_config = RandomizerConfig(
-        seed=config.pipeline.randomizer_seed,
-        jitter_ratio=config.pipeline.jitter_ratio,
-        wall_margin=config.pipeline.wall_margin,
-        max_overlap_ratio=config.pipeline.max_overlap_ratio,
-        max_placement_attempts=config.pipeline.max_placement_attempts
-    )
-    randomizer = SceneRandomizer(rand_config)
+
+    # config.randomizer è già un RandomizerConfig completo — usato direttamente
+    randomizer = SceneRandomizer(config.randomizer)
     
     import nl2scene3d
     # Nuovo percorso: i prompt sono dentro config/prompts nel pacchetto

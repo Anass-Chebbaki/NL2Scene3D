@@ -1,4 +1,4 @@
-# src/nl2scene3d/gemini_client.py
+# nl2scene3d/gemini_client.py
 """
 Client per l'interazione con le API Google Gemini.
 

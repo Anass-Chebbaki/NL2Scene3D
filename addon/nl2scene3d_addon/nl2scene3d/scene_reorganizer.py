@@ -1,12 +1,20 @@
-# src/nl2scene3d/scene_reorganizer.py
+# nl2scene3d/scene_reorganizer.py
 """
-Riordino della scena tramite chiamata testuale a Gemini.
+Riordino della scena tramite LLM (Gemini).
 
-Questo modulo costruisce il prompt per l'LLM, invia lo stato disordinato
-della scena e riceve il JSON con le nuove coordinate degli oggetti.
+Responsabilità:
+    - Costruire il prompt per l'LLM con JSON completo della scena e relazioni
+      parent-child già calcolate da SceneState.
+    - Inviare il prompt e ricevere le nuove coordinate.
+    - Validare/sanitizzare l'output (bounds clamp, Z lock, snap a 90°).
+    - Spostare i figli con trasformazione rigida rispetto al parent.
+    - Risolvere collisioni post-LLM con vettore MTV invece di jitter casuale.
 
-Include validazione e sanitizzazione dell'output dell'LLM per garantire
-che le coordinate siano coerenti e nei bounds della stanza.
+Principi fondamentali:
+    - La Z non viene MAI modificata: si prende sempre dalla scena originale.
+    - Il grouping (parent/children) è già calcolato su ogni SceneObject da
+      SceneLoader.extract_scene_state() — non viene ricalcolato qui.
+    - Nessuna dipendenza da utils.grouping (deprecato).
 """
 from __future__ import annotations
 
@@ -15,76 +23,131 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Optional
-
 from nl2scene3d.gemini_client import GeminiClient, GeminiParsingError
-from nl2scene3d.models import ObjectTransform, RoomBounds, SceneObject, SceneState
+from nl2scene3d.models import SceneObject, SceneState, Transform
 
 logger = logging.getLogger(__name__)
 
-# (Costante MIN_MOVEMENT_THRESHOLD rimossa poiche' non utilizzata)
 
+# ---------------------------------------------------------------------------
+# Prompt helpers
+# ---------------------------------------------------------------------------
 
 def _load_prompt_template(prompt_path: Path) -> str:
-    """
-    Carica un template di prompt da file.
-
-    Args:
-        prompt_path: Percorso al file del template.
-
-    Returns:
-        Contenuto del template come stringa.
-
-    Raises:
-        FileNotFoundError: Se il file non esiste.
-    """
     if not prompt_path.exists():
-        raise FileNotFoundError(
-            f"Template di prompt non trovato: {prompt_path}"
-        )
+        raise FileNotFoundError(f"Template di prompt non trovato: {prompt_path}")
     with open(prompt_path, encoding="utf-8") as fh:
         return fh.read()
 
 
 def _build_scene_json_for_llm(state: SceneState) -> str:
     """
-    Costruisce la rappresentazione JSON della scena ottimizzata per l'LLM.
+    Costruisce il JSON della scena ottimizzato per l'LLM.
 
-    Esclude gli elementi strutturali (muri, pavimenti, soffitti) gia'
-    rappresentati dai room_bounds, per risparmiare token nel prompt.
-
-    Args:
-        state: Stato corrente della scena.
-
-    Returns:
-        Stringa JSON della scena filtrata.
+    Include SOLO gli oggetti root movibili e i loro figli (con is_child=True
+    per segnalare all'LLM che seguono il genitore).
+    Esclude gli strutturali (già rappresentati dai room_bounds).
     """
-    relevant_objects = [
-        obj for obj in state.objects 
-        if obj.is_movable
-    ]
+    objects_data = []
+    by_name = {obj.name: obj for obj in state.objects}
+
+    for obj in state.objects:
+        if not obj.is_movable:
+            continue
+
+        entry = obj.to_dict()
+
+        # Arricchisce con info utili all'LLM
+        if obj.parent is not None:
+            entry["is_child"] = True
+            entry["follows_parent"] = obj.parent
+        else:
+            entry["is_child"] = False
+            if obj.children:
+                entry["children_that_follow"] = obj.children
+
+        objects_data.append(entry)
+
     scene_dict = {
         "scene_name": state.scene_name,
-        "objects": [obj.to_dict() for obj in relevant_objects],
+        "note": (
+            "Objects with is_child=true follow their parent rigidly. "
+            "Only specify new positions for root objects (is_child=false). "
+            "Children will be repositioned automatically."
+        ),
+        "objects": objects_data,
     }
     return json.dumps(scene_dict, indent=2, ensure_ascii=False)
 
 
-def _is_valid_float(value: object) -> bool:
-    """
-    Verifica che un valore sia un float finito e non NaN.
+def _build_footprint_table(state: SceneState) -> str:
+    """Tabella AABB per ogni oggetto root movibile — aiuta l'LLM a ragionare sugli spazi."""
+    lines = ["\nOBJECT FOOTPRINT TABLE (pre-computed AABB, XY plane):"]
+    lines.append("| Object Name | Width(X) | Depth(Y) | Height(Z) | Floor Area | is_child |")
+    lines.append("|-------------|----------|----------|-----------|------------|----------|")
 
-    Args:
-        value: Valore da verificare.
+    for obj in state.objects:
+        if not obj.is_movable:
+            continue
+        dim = obj.transform.dimensions
+        rz = obj.transform.rotation_euler[2]
+        cos_z = abs(math.cos(rz))
+        sin_z = abs(math.sin(rz))
+        eff_x = dim[0] * cos_z + dim[1] * sin_z
+        eff_y = dim[0] * sin_z + dim[1] * cos_z
+        area = eff_x * eff_y
+        is_child = "yes" if obj.parent is not None else "no"
+        lines.append(
+            f"| {obj.name} | {eff_x:.2f}m | {eff_y:.2f}m | {dim[2]:.2f}m | {area:.2f}m² | {is_child} |"
+        )
 
-    Returns:
-        True se il valore e' un float finito, False altrimenti.
+    lines.append("")
+    lines.append(
+        "Only move ROOT objects (is_child=no). Their children will follow automatically. "
+        "Keep at least (Width/2 + OtherWidth/2) distance in X and "
+        "(Depth/2 + OtherDepth/2) distance in Y between each pair of objects."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Validazione e sanitizzazione output LLM
+# ---------------------------------------------------------------------------
+
+from nl2scene3d.utils.geometry import (
+    has_collision,
+    is_finite_float,
+    penetration_vector,
+    snap_rotation_90,
+)
+
+
+def _apply_rigid_child_transform(
+    child: SceneObject,
+    old_parent_loc: list[float],
+    old_parent_rz: float,
+    new_parent_loc: list[float],
+    new_parent_rz: float,
+) -> SceneObject:
     """
-    try:
-        f = float(value)  # type: ignore[arg-type]
-        return math.isfinite(f)
-    except (TypeError, ValueError):
-        return False
+    Restituisce una COPIA del figlio spostato rigidamente rispetto al parent.
+    Non modifica il figlio in-place.
+    """
+    new_child = child.copy()
+
+    rel_x = child.transform.location[0] - old_parent_loc[0]
+    rel_y = child.transform.location[1] - old_parent_loc[1]
+    rel_z = child.transform.location[2] - old_parent_loc[2]
+
+    d_rz = new_parent_rz - old_parent_rz
+    cos_a, sin_a = math.cos(d_rz), math.sin(d_rz)
+
+    new_child.transform.location[0] = new_parent_loc[0] + rel_x * cos_a - rel_y * sin_a
+    new_child.transform.location[1] = new_parent_loc[1] + rel_x * sin_a + rel_y * cos_a
+    new_child.transform.location[2] = new_parent_loc[2] + rel_z  # Z: solo traslazione
+    new_child.transform.rotation_euler[2] = (child.transform.rotation_euler[2] + d_rz) % (2 * math.pi)
+
+    return new_child
 
 
 def _validate_and_sanitize_llm_output(
@@ -94,318 +157,204 @@ def _validate_and_sanitize_llm_output(
     """
     Valida e sanitizza l'output JSON dell'LLM.
 
-    Verifica che:
-    - Tutti gli oggetti originali siano presenti nella risposta
-    - Le coordinate siano numericamente valide (no NaN, no Inf)
-    - Le coordinate siano nei bounds della stanza (applica clamp se necessario)
-
-    La coordinata Z di ciascun oggetto movibile viene sempre preservata
-    da original_state, che deve pertanto rappresentare uno stato in cui
-    la quota Z degli oggetti e' identica a quella originale (il randomizer
-    non altera la Z per costruzione).
-
-    In caso di oggetti mancanti o coordinate non valide, mantiene
-    la posizione originale come fallback.
-
-    Args:
-        llm_output: Output JSON grezzo dell'LLM.
-        original_state: Stato di riferimento per fallback e preservazione della Z.
-
-    Returns:
-        SceneState validato e sanitizzato.
+    - Legge solo le posizioni per i root movibili (is_child=False).
+    - Blocca la Z sull'originale.
+    - Snappa la rotazione Z a multipli di 90°.
+    - Preserva le rotazioni X/Y originali (l'LLM non le tocca mai).
+    - Sposta i figli con trasformazione rigida rispetto al parent mosso.
+    - Risolve collisioni post-LLM con vettore di penetrazione (MTV).
     """
+    # --- Local helper already imported from geometry ---
+
     room_bounds = original_state.room_bounds
 
+    # --- Parse output ---
     if isinstance(llm_output, list):
         llm_objects_list: list = llm_output
     elif isinstance(llm_output, dict):
         llm_objects_list = llm_output.get("objects", [])
     else:
-        logger.error(
-            "Output LLM non e' ne' dict ne' list: %s. Restituisce stato originale.",
-            type(llm_output),
-        )
+        logger.error("Output LLM non valido (%s). Stato originale restituito.", type(llm_output))
         return original_state
 
-    # --- INTEGRAZIONE GROUPING ---
-    from nl2scene3d.utils.grouping import find_object_groups, apply_group_transform
-    groups = find_object_groups(original_state.objects)
-    
-    grouped_children = set()
-    for root_name, children in groups.items():
-        for c in children:
-            obj_c = original_state.get_object_by_name(c)
-            if obj_c and obj_c.is_movable:
-                grouped_children.add(c)
-
-    llm_objects_by_name: dict[str, dict] = {}
-    for llm_obj_data in llm_objects_list:
-        if isinstance(llm_obj_data, dict) and "name" in llm_obj_data:
-            llm_objects_by_name[llm_obj_data["name"]] = llm_obj_data
-        elif isinstance(llm_obj_data, list) and len(llm_obj_data) >= 4:
+    # Indicizza per nome
+    llm_by_name: dict[str, dict] = {}
+    for item in llm_objects_list:
+        if isinstance(item, dict) and "name" in item:
+            llm_by_name[item["name"]] = item
+        elif isinstance(item, list) and len(item) >= 4:
             # Formato compatto: [name, x, y, rz_degrees]
-            name = str(llm_obj_data[0])
-            rz_rad = float(llm_obj_data[3]) * (math.pi / 180.0)
-            llm_objects_by_name[name] = {
+            name = str(item[0])
+            rz_rad = float(item[3]) * (math.pi / 180.0)
+            llm_by_name[name] = {
                 "name": name,
-                "location": [float(llm_obj_data[1]), float(llm_obj_data[2]), 0.0],
+                "location": [float(item[1]), float(item[2]), 0.0],
                 "rotation_euler": [0.0, 0.0, rz_rad],
             }
 
-    corrected_objects: list[SceneObject] = []
+    # --- Applica le posizioni LLM ai root movibili ---
+    by_name_orig = {obj.name: obj for obj in original_state.objects}
+    corrected: dict[str, SceneObject] = {}  # name → nuovo obj
+
     clamped_count = 0
     missing_count = 0
 
-    for original_obj in original_state.objects:
-        if original_obj.name in grouped_children:
-            # Ignoriamo i figli movibili, verranno posizionati basandosi sul genitore
-            continue
-            
-        llm_obj_data = llm_objects_by_name.get(original_obj.name)
-
-        if llm_obj_data is None:
-            if original_obj.category == "structural":
-                logger.debug(
-                    "Oggetto strutturale '%s' assente dalla risposta LLM (comportamento atteso).",
-                    original_obj.name,
-                )
-            else:
-                if original_obj.is_movable:
-                    logger.warning(
-                        "Oggetto movibile '%s' assente dalla risposta LLM. Mantenuta posizione originale.",
-                        original_obj.name,
-                    )
-                    missing_count += 1
-                else:
-                    logger.debug(
-                        "Oggetto non strutturale fisso '%s' assente dalla risposta LLM (comportamento atteso).",
-                        original_obj.name,
-                    )
-            corrected_objects.append(copy.deepcopy(original_obj))
+    for orig_obj in original_state.objects:
+        # Strutturali: sempre invariati
+        if not orig_obj.is_movable:
+            corrected[orig_obj.name] = orig_obj.copy()
             continue
 
-        if not original_obj.is_movable:
-            corrected_objects.append(copy.deepcopy(original_obj))
+        # Figli: verranno aggiornati dopo il parent
+        if orig_obj.parent is not None:
+            corrected[orig_obj.name] = orig_obj.copy()  # placeholder, sovrascritto sotto
+            continue
+
+        # Root movibile: leggi posizione LLM
+        llm_data = llm_by_name.get(orig_obj.name)
+        if llm_data is None:
+            logger.warning("Root movibile '%s' assente dall'output LLM. Posizione originale mantenuta.", orig_obj.name)
+            missing_count += 1
+            corrected[orig_obj.name] = orig_obj.copy()
             continue
 
         try:
-            new_location = list(
-                llm_obj_data.get("location", original_obj.transform.location)
-            )
-            new_rotation = list(
-                llm_obj_data.get(
-                    "rotation_euler", original_obj.transform.rotation_euler
-                )
-            )
+            new_loc = list(llm_data.get("location", orig_obj.transform.location))
+            new_rot = list(llm_data.get("rotation_euler", orig_obj.transform.rotation_euler))
 
-            if len(new_location) != 3 or len(new_rotation) != 3:
-                raise ValueError(
-                    "location o rotation_euler non hanno esattamente 3 componenti."
-                )
+            if len(new_loc) != 3 or len(new_rot) != 3:
+                raise ValueError("location o rotation_euler non hanno 3 componenti.")
+            if not all(is_finite_float(v) for v in new_loc + new_rot):
+                raise ValueError("Valori non finiti rilevati.")
 
-            if not all(_is_valid_float(v) for v in new_location + new_rotation):
-                raise ValueError(
-                    "Uno o piu' valori non sono float finiti validi."
-                )
+            new_loc = [float(v) for v in new_loc]
+            new_rot = [float(v) for v in new_rot]
 
-            new_location = [float(v) for v in new_location]
-            
-            raw_rotation = [float(v) for v in new_rotation]
-            # CLAMP X e Y alla rotazione originale per evitare inclinazioni fantasiose dell'LLM
-            new_rotation = [
-                original_obj.transform.rotation_euler[0],
-                original_obj.transform.rotation_euler[1],
-                raw_rotation[2]
-            ]
-            
-            # SNAP Z ai multipli di 90 gradi per posizionamenti ortogonali perfetti
-            multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
-            best_z = min(multiples, key=lambda m: abs(m - (new_rotation[2] % (2 * math.pi))))
-            new_rotation[2] = best_z
+            # Blocca Z sull'originale
+            new_loc[2] = orig_obj.transform.location[2]
+            # Preserva RX e RY originali, snap RZ a 90°
+            new_rot[0] = orig_obj.transform.rotation_euler[0]
+            new_rot[1] = orig_obj.transform.rotation_euler[1]
+            new_rot[2] = snap_rotation_90(new_rot[2])
 
         except (TypeError, ValueError, KeyError) as exc:
-            logger.warning(
-                "Coordinate non valide per oggetto '%s': %s. "
-                "Mantenuta posizione originale.",
-                original_obj.name,
-                exc,
-            )
-            corrected_objects.append(copy.deepcopy(original_obj))
+            logger.warning("Coordinate non valide per '%s': %s. Posizione originale.", orig_obj.name, exc)
+            corrected[orig_obj.name] = orig_obj.copy()
             continue
 
-        # Preserviamo la Z originale. Se l'oggetto fluttua, l'applicatore lo farà cadere.
-        # Se l'oggetto finisce dentro un altro, has_collision lo rileverà.
-        new_location[2] = original_obj.transform.location[2]
-
+        # Clamp ai bounds
         if room_bounds is not None:
-            clamped_location = room_bounds.clamp_location(new_location, original_obj.transform.dimensions)
-            if clamped_location != new_location:
-                logger.debug(
-                    "Oggetto '%s': coordinate clampate da %s a %s.",
-                    original_obj.name,
-                    new_location,
-                    clamped_location,
-                )
-                new_location = clamped_location
+            clamped = room_bounds.clamp_location(new_loc, orig_obj.transform.dimensions)
+            if clamped != new_loc:
+                logger.debug("'%s': clamp %s → %s.", orig_obj.name, new_loc, clamped)
+                new_loc = clamped
                 clamped_count += 1
 
-        new_obj = copy.deepcopy(original_obj)
-        new_obj.transform = ObjectTransform(
-            location=new_location,
-            rotation_euler=new_rotation,
-            dimensions=original_obj.transform.dimensions,
-            origin_offset=list(original_obj.transform.origin_offset),
+        new_obj = orig_obj.copy()
+        new_obj.transform = Transform(
+            location=new_loc,
+            rotation_euler=new_rot,
+            dimensions=list(orig_obj.transform.dimensions),
+            origin_offset=list(orig_obj.transform.origin_offset),
         )
-        corrected_objects.append(new_obj)
+        corrected[orig_obj.name] = new_obj
+
+        # Sposta i figli con trasformazione rigida
+        for child_name in orig_obj.children:
+            orig_child = by_name_orig.get(child_name)
+            if orig_child is None:
+                continue
+            new_child = _apply_rigid_child_transform(
+                orig_child,
+                old_parent_loc=orig_obj.transform.location,
+                old_parent_rz=orig_obj.transform.rotation_euler[2],
+                new_parent_loc=new_loc,
+                new_parent_rz=new_rot[2],
+            )
+            # Verifica bounds per il figlio
+            if room_bounds is not None:
+                child_aabb = new_child.transform.aabb_xy(margin=0.0)
+                if not room_bounds.contains_aabb(child_aabb, margin=0.0):
+                    logger.debug(
+                        "Figlio '%s' fuori bounds dopo trasformazione rigida — posizione originale mantenuta.",
+                        child_name,
+                    )
+                    corrected[child_name] = orig_child.copy()
+                    continue
+            corrected[child_name] = new_child
 
     logger.info(
-        "Validazione output LLM: %d clamped, %d mancanti su %d totali.",
+        "Validazione output LLM: %d root processati, %d clamped, %d mancanti.",
+        len([o for o in original_state.objects if o.is_movable and o.parent is None]),
         clamped_count,
         missing_count,
-        len(original_state.objects),
     )
 
-    # Passaggio finale: Risoluzione collisioni con separazione intelligente
-    from nl2scene3d.utils.geometry import has_collision, compute_aabb_2d
-    import random as _rng
-    
-    final_objects: list[SceneObject] = []
-    # Prima aggiungiamo tutti gli oggetti non movibili (strutturali)
-    for obj in corrected_objects:
+    # --- Risoluzione collisioni post-LLM ---
+    # Usa il vettore MTV (Minimum Translation Vector) invece di jitter casuale.
+    main_cats = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
+
+    final_list: list[SceneObject] = []
+    # Prima i non movibili
+    for obj in original_state.objects:
         if not obj.is_movable:
-            final_objects.append(obj)
-            
-            # --- SPOSTA I FIGLI CON IL GENITORE (Static) ---
-            if obj.name in groups:
-                orig_root = original_state.get_object_by_name(obj.name)
-                for child_name in groups[obj.name]:
-                    if child_name in grouped_children:
-                        orig_child = original_state.get_object_by_name(child_name)
-                        new_child = copy.deepcopy(orig_child)
-                        apply_group_transform(
-                            new_child,
-                            orig_root.transform.location,
-                            orig_root.transform.rotation_euler,
-                            obj.transform.location,
-                            obj.transform.rotation_euler
-                        )
-                        final_objects.append(new_child)
-            
-    # Poi aggiungiamo i movibili uno ad uno, risolvendo eventuali collisioni
-    # con separazione basata sul vettore di penetrazione anziché jitter casuale.
-    main_furniture_categories = {"bed", "table", "storage", "seating_large", "seating_small", "furniture"}
+            final_list.append(corrected[obj.name])
+
     jitter_resolved = 0
     jitter_failed = 0
-    
-    for obj in corrected_objects:
-        if not obj.is_movable:
-            continue
-            
-        if obj.category in main_furniture_categories:
-            original_loc = list(obj.transform.location)
-            # Include sia i mobili che i muri per il check collisioni
-            collidable_objects = [
-                o for o in final_objects 
-                if o.category in main_furniture_categories or o.category == "structural"
-            ]
-            
-            # Tenta di risolvere la collisione con step incrementali
-            # di dimensione crescente (0.1m, 0.2m, 0.3m)
-            max_attempts = 30
-            jitter_sizes = [0.15, 0.25, 0.35]  # Incrementi crescenti
-            attempt = 0
-            resolved = False
-            
-            while has_collision(obj, collidable_objects, check_walls=True) and attempt < max_attempts:
-                jitter_mag = jitter_sizes[min(attempt // 10, len(jitter_sizes) - 1)]
-                angle = _rng.uniform(0, 2 * math.pi)
-                dx = jitter_mag * math.cos(angle)
-                dy = jitter_mag * math.sin(angle)
-                
-                new_x = original_loc[0] + dx * (1 + attempt * 0.1)
-                new_y = original_loc[1] + dy * (1 + attempt * 0.1)
-                
-                # Clamp ai room bounds
-                if room_bounds is not None:
-                    half_dim_x = obj.transform.dimensions[0] / 2.0
-                    half_dim_y = obj.transform.dimensions[1] / 2.0
-                    new_x = max(room_bounds.x_min + half_dim_x + 0.05,
-                                min(room_bounds.x_max - half_dim_x - 0.05, new_x))
-                    new_y = max(room_bounds.y_min + half_dim_y + 0.05,
-                                min(room_bounds.y_max - half_dim_y - 0.05, new_y))
-                
-                obj.transform.location[0] = new_x
-                obj.transform.location[1] = new_y
-                attempt += 1
-            
-            if attempt > 0:
-                if not has_collision(obj, collidable_objects, check_walls=True):
-                    jitter_resolved += 1
-                    logger.debug(
-                        "Collisione per '%s' risolta dopo %d tentativi (spostamento: %.2fm).",
-                        obj.name, attempt,
-                        math.sqrt((obj.transform.location[0] - original_loc[0])**2 +
-                                  (obj.transform.location[1] - original_loc[1])**2),
-                    )
-                else:
-                    jitter_failed += 1
-                    logger.warning(
-                        "Impossibile risolvere collisione per '%s' dopo %d tentativi. "
-                        "Mantenuta posizione LLM.",
-                        obj.name, max_attempts,
-                    )
-                    obj.transform.location = original_loc
-            
-        # --- SPOSTA I FIGLI CON IL GENITORE (Movable) ---
-        if obj.name in groups:
-            orig_root = original_state.get_object_by_name(obj.name)
-            temp_children = []
-            move_valid = True
-            
-            for child_name in groups[obj.name]:
-                if child_name in grouped_children:
-                    orig_child = original_state.get_object_by_name(child_name)
-                    new_child = copy.deepcopy(orig_child)
-                    apply_group_transform(
-                        new_child,
-                        orig_root.transform.location,
-                        orig_root.transform.rotation_euler,
-                        obj.transform.location,
-                        obj.transform.rotation_euler
-                    )
-                    
-                    # Verifica se il figlio è fuori dai muri
-                    from nl2scene3d.utils.geometry import compute_aabb_2d
-                    c_aabb = compute_aabb_2d(new_child)
-                    if (c_aabb[0] < room_bounds.x_min or c_aabb[1] > room_bounds.x_max or
-                        c_aabb[2] < room_bounds.y_min or c_aabb[3] > room_bounds.y_max):
-                        logger.warning("Figlio '%s' fuori dai muri. Annullato spostamento di '%s'.", new_child.name, obj.name)
-                        move_valid = False
-                        break
-                    temp_children.append(new_child)
-            
-            if move_valid:
-                final_objects.append(obj)
-                final_objects.extend(temp_children)
-            else:
-                # Ripristina tutto il gruppo alla posizione originale
-                obj.transform = orig_root.transform.copy()
-                final_objects.append(obj)
-                for cn in groups[obj.name]:
-                    co = original_state.get_object_by_name(cn)
-                    if co: final_objects.append(co.copy())
-        else:
-            final_objects.append(obj)
 
-    if jitter_resolved > 0 or jitter_failed > 0:
-        logger.info(
-            "Risoluzione collisioni post-LLM: %d risolte, %d irrisolvibili.",
-            jitter_resolved, jitter_failed,
-        )
+    for orig_obj in original_state.objects:
+        if not orig_obj.is_movable or orig_obj.parent is not None:
+            continue  # Strutturali già aggiunti; figli vengono dopo il parent
+
+        obj = corrected[orig_obj.name]
+
+        if obj.category in main_cats:
+            collidable = [
+                o for o in final_list
+                if o.category in main_cats or o.category == "structural"
+            ]
+            max_iter = 20
+            for i in range(max_iter):
+                if not has_collision(obj, collidable, wall_margin=0.05, furniture_margin=0.02):  # type: ignore[call-arg]
+                    break
+                # Cerca l'oggetto con cui si sovrappone di più e applica MTV
+                moved = False
+                for other in collidable:
+                    dx, dy = penetration_vector(obj, other, margin=0.02)
+                    if dx != 0.0 or dy != 0.0:
+                        obj.transform.location[0] += dx
+                        obj.transform.location[1] += dy
+                        if room_bounds is not None:
+                            clamped = room_bounds.clamp_location(
+                                obj.transform.location, obj.transform.dimensions, margin=0.02  # type: ignore[call-arg]
+                            )
+                            obj.transform.location = clamped
+                        moved = True
+                        break
+                if not moved:
+                    break
+            else:
+                jitter_failed += 1
+                logger.warning("Collisione irrisolvibile per '%s' dopo %d iterazioni.", obj.name, max_iter)
+
+            if not has_collision(obj, collidable, wall_margin=0.05, furniture_margin=0.02):  # type: ignore[call-arg]
+                if i > 0:
+                    jitter_resolved += 1
+
+        final_list.append(obj)
+
+        # Aggiungi i figli (già calcolati con trasformazione rigida)
+        for child_name in orig_obj.children:
+            if child_name in corrected:
+                final_list.append(corrected[child_name])
+
+    if jitter_resolved or jitter_failed:
+        logger.info("Collisioni post-LLM: %d risolte, %d irrisolvibili.", jitter_resolved, jitter_failed)
 
     return SceneState(
         scene_name=original_state.scene_name,
-        objects=final_objects,
+        objects=final_list,
         room_bounds=original_state.room_bounds,
         pipeline_step="reordered",
         metadata={
@@ -413,83 +362,35 @@ def _validate_and_sanitize_llm_output(
             "missing_count": missing_count,
             "jitter_resolved": jitter_resolved,
             "jitter_failed": jitter_failed,
-            "grouped_children": list(grouped_children),
         },
     )
 
 
+# ---------------------------------------------------------------------------
+# SceneReorganizer
+# ---------------------------------------------------------------------------
+
 class SceneReorganizer:
     """
-    Coordina la prima chiamata LLM per il riordino testuale della scena.
+    Coordina la chiamata LLM per il riordino testuale della scena.
 
     Attributes:
-        client: Client Gemini per le chiamate API.
+        client:     Client Gemini per le chiamate API.
         prompts_dir: Directory contenente i template dei prompt.
     """
 
-    def __init__(
-        self,
-        client: GeminiClient,
-        prompts_dir: Path,
-    ) -> None:
-        """
-        Inizializza il reorganizer.
-
-        Args:
-            client: Client Gemini configurato.
-            prompts_dir: Directory dei template dei prompt.
-        """
+    def __init__(self, client: GeminiClient, prompts_dir: Path) -> None:
         self.client = client
         self.prompts_dir = prompts_dir
         logger.info("SceneReorganizer inizializzato.")
 
-    def _build_footprint_table(self, state: SceneState) -> str:
-        """
-        Costruisce una tabella dei footprint AABB per ogni oggetto movibile.
-        Questo aiuta l'LLM a ragionare sullo spazio fisico occupato.
-        """
-        from nl2scene3d.utils.geometry import compute_aabb_2d
-        
-        lines = ["\nOBJECT FOOTPRINT TABLE (pre-computed AABB on XY plane):"]
-        lines.append("| Object Name | Width(X) | Depth(Y) | Height(Z) | Floor Area |")
-        lines.append("|-------------|----------|----------|-----------|------------|")
-        
-        for obj in state.movable_objects:
-            dim = obj.transform.dimensions
-            rz = obj.transform.rotation_euler[2]
-            cos_z = abs(math.cos(rz))
-            sin_z = abs(math.sin(rz))
-            eff_x = dim[0] * cos_z + dim[1] * sin_z
-            eff_y = dim[0] * sin_z + dim[1] * cos_z
-            area = eff_x * eff_y
-            lines.append(
-                f"| {obj.name} | {eff_x:.2f}m | {eff_y:.2f}m | {dim[2]:.2f}m | {area:.2f}m² |"
-            )
-        
-        lines.append("")
-        lines.append(
-            "USE THIS TABLE to avoid placing objects where their footprints would overlap. "
-            "For each object, its center must be at least (Width/2 + OtherWidth/2) apart "
-            "in X or (Depth/2 + OtherDepth/2) apart in Y from every other object."
-        )
-        return "\n".join(lines)
-
     def _build_user_prompt(self, state: SceneState) -> str:
-        """
-        Costruisce il prompt utente con i dati della scena disordinata.
-
-        Args:
-            state: Stato disordinato della scena.
-
-        Returns:
-            Prompt utente formattato.
-        """
         template_path = self.prompts_dir / "reorder_user.txt"
         template = _load_prompt_template(template_path)
 
         room_bounds = state.room_bounds
         scene_json = _build_scene_json_for_llm(state)
-        footprint_table = self._build_footprint_table(state)
+        footprint_table = _build_footprint_table(state)
 
         if room_bounds is not None:
             prompt = template.format(
@@ -506,55 +407,45 @@ class SceneReorganizer:
             json_instr = (
                 "\n\nOUTPUT FORMAT:"
                 "\nReturn the requested JSON dictionary format exactly as specified in the system instructions."
-                "\nONLY include movable objects. DO NOT add any markdown formatting, text, descriptions, or other fields."
+                "\nOnly include ROOT movable objects (is_child=false). DO NOT include children — they are repositioned automatically."
+                "\nDO NOT add markdown, comments or extra fields."
             )
             return prompt + footprint_table + json_instr
 
         return (
-            "You are an interior designer. Please reorganize the following 3D scene JSON "
-            "to be professionally arranged, functional, and aesthetically pleasing. "
+            "You are an interior designer. Reorganize this 3D scene JSON professionally. "
             "Return ONLY the updated JSON.\n\n"
             f"{scene_json}"
         )
 
     def reorganize(self, disordered_state: SceneState) -> SceneState:
         """
-        Esegue il riordino della scena tramite chiamata LLM.
+        Riordina la scena tramite LLM (solo testo).
 
         Args:
             disordered_state: Stato disordinato della scena.
 
         Returns:
-            Nuovo SceneState con le posizioni suggerite dall'LLM,
-            validate e sanitizzate.
-
-        Raises:
-            GeminiClientError: In caso di errori API non recuperabili.
+            SceneState riordinato, validato e sanitizzato.
         """
         logger.info(
-            "Avvio riordino LLM della scena '%s'. Oggetti movibili: %d.",
+            "Avvio riordino LLM per '%s'. Root movibili: %d.",
             disordered_state.scene_name,
-            len(disordered_state.movable_objects),
+            len(disordered_state.root_movable_objects),
         )
 
-        system_prompt_path = self.prompts_dir / "reorder_system.txt"
-        system_prompt = _load_prompt_template(system_prompt_path)
+        system_prompt = _load_prompt_template(self.prompts_dir / "reorder_system.txt")
         user_prompt = self._build_user_prompt(disordered_state)
 
         logger.debug(
-            "Lunghezza system_prompt: %d caratteri, user_prompt: %d caratteri.",
-            len(system_prompt),
-            len(user_prompt),
+            "Prompt lunghezze — system: %d, user: %d.",
+            len(system_prompt), len(user_prompt),
         )
 
         try:
             llm_output = self.client.call_text(system_prompt, user_prompt)
         except GeminiParsingError as exc:
-            logger.error(
-                "Parsing della risposta LLM fallito: %s. "
-                "Restituisce lo stato disordinato invariato.",
-                exc,
-            )
+            logger.error("Parsing LLM fallito: %s. Stato disordinato restituito.", exc)
             return SceneState(
                 scene_name=disordered_state.scene_name,
                 objects=copy.deepcopy(disordered_state.objects),
@@ -563,93 +454,51 @@ class SceneReorganizer:
                 metadata={"error": str(exc)},
             )
 
-        reordered_state = _validate_and_sanitize_llm_output(
-            llm_output, disordered_state
-        )
-
-        logger.info(
-            "Riordino LLM completato per scena '%s'.",
-            reordered_state.scene_name,
-        )
-
+        reordered_state = _validate_and_sanitize_llm_output(llm_output, disordered_state)
+        logger.info("Riordino LLM completato per '%s'.", reordered_state.scene_name)
         return reordered_state
 
     def reorganize_with_image(
-            self,
-            disordered_state: SceneState,
-            image_path: Path,
+        self,
+        disordered_state: SceneState,
+        image_path: Path,
     ) -> SceneState:
         """
-        Esegue il riordino della scena con prompt multimodale (testo + immagine).
-
-        A differenza di 'reorganize', questo metodo manda al modello sia
-        i dati JSON della scena sia uno screenshot del viewport corrente.
-        Permette al LLM di "vedere" effettivamente la stanza e di prendere
-        decisioni piu' contestuali (orientamento muri, posizione finestre, ecc.).
+        Riordina la scena con prompt multimodale (testo + immagine viewport).
 
         Args:
             disordered_state: Stato disordinato della scena.
-            image_path: Percorso allo screenshot della viewport corrente.
+            image_path:       Screenshot della viewport corrente.
 
         Returns:
-            Nuovo SceneState con le posizioni suggerite dall'LLM,
-            validate e sanitizzate.
+            SceneState riordinato, validato e sanitizzato.
         """
         logger.info(
-            "Avvio riordino LLM multimodale per scena '%s'. "
-            "Oggetti movibili: %d. Immagine: %s",
-            disordered_state.scene_name,
-            len(disordered_state.movable_objects),
-            image_path,
+            "Avvio riordino LLM multimodale per '%s'. Immagine: %s",
+            disordered_state.scene_name, image_path,
         )
 
-        # Caricamento del system prompt classico
-        system_prompt_path = self.prompts_dir / "reorder_system.txt"
-        system_prompt = _load_prompt_template(system_prompt_path)
-
-        # Costruzione del user prompt classico (bounds, JSON, footprint)
+        system_prompt = _load_prompt_template(self.prompts_dir / "reorder_system.txt")
         user_prompt_body = self._build_user_prompt(disordered_state)
 
-        # Aggiunta istruzioni specifiche per la modalita' visiva
         vision_instructions = (
             "\n\n=== VISUAL CONTEXT ===\n"
             "Along with this textual data, you are receiving an image showing "
             "the CURRENT state of the room from a representative viewpoint.\n"
-            "Use the image to understand information that coordinates alone cannot convey:\n"
+            "Use the image to understand:\n"
             "- The actual orientation and layout of walls\n"
             "- The position of doors, windows, and other openings\n"
-            "- The real proportions and shape of the room (may not be a perfect rectangle)\n"
+            "- The real proportions of the room\n"
             "- Natural focal points (windows for desks, walls for beds, etc.)\n"
-            "\nBase your reorganization on BOTH the numerical data AND the visual context.\n"
-            "For example: place the bed with headboard against an empty wall visible in "
-            "the image, position the desk near a window if present, leave space in front "
-            "of doors."
+            "\nBase your reorganization on BOTH the numerical data AND the visual context."
         )
 
-        # call_vision accetta un singolo prompt (non system + user separati).
-        # Concateniamo system + user + istruzioni visive in un unico prompt.
-        combined_prompt = (
-            f"{system_prompt}\n\n"
-            f"{user_prompt_body}\n"
-            f"{vision_instructions}"
-        )
-
-        logger.debug(
-            "Lunghezza combined_prompt: %d caratteri.",
-            len(combined_prompt),
-        )
+        combined_prompt = f"{system_prompt}\n\n{user_prompt_body}\n{vision_instructions}"
 
         try:
-            llm_output = self.client.call_vision(
-                image_path=image_path,
-                user_prompt=combined_prompt,
-            )
+            llm_output = self.client.call_vision(image_path=image_path, user_prompt=combined_prompt)
         except GeminiParsingError as exc:
-            logger.error(
-                "Parsing della risposta LLM (multimodale) fallito: %s. "
-                "Restituisce lo stato disordinato invariato.",
-                exc,
-            )
+            logger.error("Parsing LLM multimodale fallito: %s. Stato disordinato restituito.", exc)
             return SceneState(
                 scene_name=disordered_state.scene_name,
                 objects=copy.deepcopy(disordered_state.objects),
@@ -658,13 +507,6 @@ class SceneReorganizer:
                 metadata={"error": str(exc), "mode": "multimodal"},
             )
 
-        reordered_state = _validate_and_sanitize_llm_output(
-            llm_output, disordered_state
-        )
-
-        logger.info(
-            "Riordino LLM multimodale completato per scena '%s'.",
-            reordered_state.scene_name,
-        )
-
+        reordered_state = _validate_and_sanitize_llm_output(llm_output, disordered_state)
+        logger.info("Riordino LLM multimodale completato per '%s'.", reordered_state.scene_name)
         return reordered_state

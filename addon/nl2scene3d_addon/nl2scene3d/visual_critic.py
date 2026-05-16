@@ -1,4 +1,4 @@
-# src/nl2scene3d/visual_critic.py
+# nl2scene3d/visual_critic.py
 """
 Critica visiva del layout riordinato tramite chiamata LLM Vision.
 
@@ -13,14 +13,14 @@ Miglioramenti rispetto alla versione precedente:
 """
 from __future__ import annotations
 
-import copy
 import logging
 import math
 from pathlib import Path
 from typing import Optional
 
 from nl2scene3d.gemini_client import GeminiClient, GeminiParsingError
-from nl2scene3d.models import LLMCorrection, ObjectTransform, RoomBounds, SceneObject, SceneState
+from nl2scene3d.models import LLMCorrection, Transform, RoomBounds, SceneObject, SceneState
+from nl2scene3d.utils.geometry import snap_rotation_90
 from nl2scene3d.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -197,7 +197,7 @@ def _apply_corrections_to_state(
 
         if correction.action in ("move", "move_and_rotate"):
             if correction.new_location and len(correction.new_location) == 3:
-                candidate_location = [float(v) for v in correction.new_location]
+                candidate_location = list(correction.new_location)
                 # Preserva la quota Z originale.
                 candidate_location[2] = target_obj.transform.location[2]
                 if room_bounds is not None:
@@ -209,20 +209,18 @@ def _apply_corrections_to_state(
                 correction.new_rotation_euler
                 and len(correction.new_rotation_euler) == 3
             ):
-                raw_rotation = [float(v) for v in correction.new_rotation_euler]
+                raw_rotation = list(correction.new_rotation_euler)
                 new_rotation = [
                     target_obj.transform.rotation_euler[0],
                     target_obj.transform.rotation_euler[1],
-                    raw_rotation[2]
+                    snap_rotation_90(raw_rotation[2])
                 ]
-                multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
-                best_z = min(multiples, key=lambda m: abs(m - (new_rotation[2] % (2 * math.pi))))
-                new_rotation[2] = best_z
 
-        target_obj.transform = ObjectTransform(
+        target_obj.transform = Transform(
             location=new_location,
             rotation_euler=new_rotation,
-            dimensions=target_obj.transform.dimensions,
+            dimensions=list(target_obj.transform.dimensions),
+            origin_offset=list(target_obj.transform.origin_offset),
         )
 
         logger.debug(
@@ -258,7 +256,7 @@ def _apply_corrections_to_state(
             ]
             if has_collision(obj, collidable_objects, check_walls=True):
                 # La correzione ha creato una collisione: ripristina posizione originale
-                original_obj = state.get_object_by_name(obj.name)
+                original_obj = state.get(obj.name)
                 if original_obj is not None:
                     obj.transform = original_obj.transform.copy()
                     collision_reverted += 1

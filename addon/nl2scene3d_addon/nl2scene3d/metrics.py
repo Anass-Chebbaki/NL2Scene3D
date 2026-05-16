@@ -1,4 +1,4 @@
-# src/nl2scene3d/metrics.py
+# nl2scene3d/metrics.py
 """
 Calcolo delle metriche di valutazione qualitativa della pipeline.
 
