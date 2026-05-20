@@ -1,5 +1,5 @@
 [gemini]
-model_primary = "gemini-3-flash-preview"
+model_primary = "gemini-3.5-flash"
 model_fallback = "gemini-2.5-flash"
 max_retries = 3
 timeout_seconds = 300

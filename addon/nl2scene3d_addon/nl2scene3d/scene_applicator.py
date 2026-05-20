@@ -68,6 +68,11 @@ class SceneApplicator:
             state.scene_name, state.pipeline_step, len(state.objects),
         )
 
+        # Raggruppa gli oggetti in base alla presenza di un parent nativo in Blender
+        # per evitare sfasamenti temporali durante l'aggiornamento delle matrici
+        roots_to_process = []
+        children_to_process = []
+
         for scene_obj in state.objects:
             blender_obj = blender_scene.objects.get(scene_obj.name)  # type: ignore[union-attr]
 
@@ -80,34 +85,95 @@ class SceneApplicator:
                 counters["skipped"] += 1
                 continue
 
+            if blender_obj.parent is None:
+                roots_to_process.append((scene_obj, blender_obj))
+            else:
+                children_to_process.append((scene_obj, blender_obj))
+
+        def process_object(scene_obj, blender_obj) -> bool:
             t = scene_obj.transform
             updated = False
 
-            # --- Location (XYZ, inclusa Z originale) ---
-            cur_loc = [blender_obj.location.x, blender_obj.location.y, blender_obj.location.z]
+            # --- Location ---
+            cur_loc = [
+                blender_obj.matrix_world.translation.x,
+                blender_obj.matrix_world.translation.y,
+                blender_obj.matrix_world.translation.z,
+            ]
             if any(abs(t.location[i] - cur_loc[i]) > self.tolerance for i in range(3)):
-                blender_obj.location.x = t.location[0]
-                blender_obj.location.y = t.location[1]
-                blender_obj.location.z = t.location[2]
+                if blender_obj.parent is not None:
+                    # Oggetto con parent nativo: converti world → local
+                    try:
+                        import mathutils  # noqa: PLC0415
+                        world_vec = mathutils.Vector(t.location)
+                        local_vec = blender_obj.parent.matrix_world.inverted() @ world_vec
+                        blender_obj.location.x = local_vec.x
+                        blender_obj.location.y = local_vec.y
+                        blender_obj.location.z = local_vec.z
+                    except Exception:  # noqa: BLE001
+                        blender_obj.location.x = t.location[0]
+                        blender_obj.location.y = t.location[1]
+                        blender_obj.location.z = t.location[2]
+                else:
+                    blender_obj.location.x = t.location[0]
+                    blender_obj.location.y = t.location[1]
+                    blender_obj.location.z = t.location[2]
                 updated = True
                 logger.debug("'%s': location %s → %s.", scene_obj.name, cur_loc, t.location)
 
             # --- Rotation Euler ---
-            cur_rot = [blender_obj.rotation_euler.x, blender_obj.rotation_euler.y, blender_obj.rotation_euler.z]
+            cur_rot = [
+                blender_obj.matrix_world.to_euler('XYZ').x,
+                blender_obj.matrix_world.to_euler('XYZ').y,
+                blender_obj.matrix_world.to_euler('XYZ').z,
+            ]
             if any(abs(t.rotation_euler[i] - cur_rot[i]) > self.tolerance for i in range(3)):
                 blender_obj.rotation_mode = "XYZ"
-                blender_obj.rotation_euler.x = t.rotation_euler[0]
-                blender_obj.rotation_euler.y = t.rotation_euler[1]
-                blender_obj.rotation_euler.z = t.rotation_euler[2]
+                if blender_obj.parent is not None:
+                    # Oggetto con parent nativo: converti world_rot → local_rot
+                    try:
+                        import mathutils  # noqa: PLC0415
+                        world_rot_euler = mathutils.Euler(t.rotation_euler, 'XYZ')
+                        parent_matrix = blender_obj.parent.matrix_world
+                        local_mat = parent_matrix.to_3x3().inverted() @ world_rot_euler.to_matrix()
+                        local_rot_euler = local_mat.to_euler('XYZ')
+                        blender_obj.rotation_euler.x = local_rot_euler.x
+                        blender_obj.rotation_euler.y = local_rot_euler.y
+                        blender_obj.rotation_euler.z = local_rot_euler.z
+                    except Exception:  # noqa: BLE001
+                        blender_obj.rotation_euler.x = t.rotation_euler[0]
+                        blender_obj.rotation_euler.y = t.rotation_euler[1]
+                        blender_obj.rotation_euler.z = t.rotation_euler[2]
+                else:
+                    blender_obj.rotation_euler.x = t.rotation_euler[0]
+                    blender_obj.rotation_euler.y = t.rotation_euler[1]
+                    blender_obj.rotation_euler.z = t.rotation_euler[2]
                 updated = True
                 logger.debug("'%s': rotation %s → %s.", scene_obj.name, cur_rot, t.rotation_euler)
 
+            return updated
+
+        # Pass 1: Processa tutti i root nativi di Blender
+        for scene_obj, blender_obj in roots_to_process:
+            updated = process_object(scene_obj, blender_obj)
             counters["updated" if updated else "skipped"] += 1
 
+        # Aggiorna la view layer per sincronizzare le matrici del mondo dei parent prima dei figli
         try:
             bpy.context.view_layer.update()  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
-            logger.debug("view_layer.update() non applicabile: %s", exc)
+            logger.debug("view_layer.update() non applicabile in Pass 1: %s", exc)
+
+        # Pass 2: Processa tutti i figli nativi di Blender (che ora possono calcolare correttamente la posizione/rotazione locale)
+        for scene_obj, blender_obj in children_to_process:
+            updated = process_object(scene_obj, blender_obj)
+            counters["updated" if updated else "skipped"] += 1
+
+        # Aggiornamento finale
+        try:
+            bpy.context.view_layer.update()  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("view_layer.update() finale non applicabile: %s", exc)
 
         logger.info(
             "Applicazione completata: %d aggiornati, %d non trovati, %d invariati.",

@@ -1,19 +1,95 @@
-ROOM INFORMATION:
-- Scene name: {scene_name}
-- Room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}]
-- Room dimensions: {room_width:.2f}m x {room_depth:.2f}m x {room_height:.2f}m
+ROOM: {scene_name}
+Bounds: X [{x_min:.3f}, {x_max:.3f}] m  |  Y [{y_min:.3f}, {y_max:.3f}] m
+Dimensions: {room_width:.2f} m (W) × {room_depth:.2f} m (D) × {room_height:.2f} m (H)
 
-DISORGANIZED SCENE STATE:
-The following JSON describes the current disorganized state of the room.
-Please reorganize the movable objects (is_movable: true) following the
-interior design principles provided in the system prompt.
+═══════════════════════════════════════════════════════
+STRUCTURAL ELEMENTS (Fixed, do NOT move them):
+═══════════════════════════════════════════════════════
+###STRUCTURAL_JSON###
 
-{scene_json}
+═══════════════════════════════════════════════════════
+ROOT MOVABLE OBJECTS to Reorganize:
+═══════════════════════════════════════════════════════
+###FLAT_JSON###
 
-IMPORTANT REMINDERS AND GEOMETRIC CONSTRAINTS:
-- For EACH object, use the 'spatial_relation' field to explicitly state your geometric intent using the Holodeck constraint vocabulary (e.g. "edge | near, desk-0 | face_to, wall").
-- For large furniture (bed, desk, shelf), carefully calculate their physical footprint using their "dimensions" array. Avoid X/Y collisions.
-- For smaller objects (monitor, lamp, vase), define their 'spatial_relation' as "on_top_of, [furniture_name]", and place their X,Y coordinates inside the X,Y bounds of that furniture. 
-- MUST KEEP THE ORIGINAL Z COORDINATE UNCHANGED in the JSON output! Only modify X and Y.
-- Stay strictly within the room bounds: X [{x_min:.2f}, {x_max:.2f}], Y [{y_min:.2f}, {y_max:.2f}].
-- ONLY INCLUDE MOVABLE OBJECTS in your output JSON array. Do not include structural or static objects.
+═══════════════════════════════════════════════════════
+CRITICAL INSTRUCTIONS FOR LAYOUT GENERATION
+═══════════════════════════════════════════════════════
+
+**STEP 1: UNDERSTAND THE DATA FORMAT**
+Each object in "ROOT MOVABLE OBJECTS" includes:
+- name: unique identifier
+- x, y: geometric center position (meters)
+- rz_deg: rotation (0, 90, 180, or 270 degrees)
+- w, d, h: dimensions (width, depth, height in meters)
+- aabb_2d: exact 2D bounding box (x_min, x_max, y_min, y_max) after rotation — USE THIS FOR COLLISION CHECKS
+- wall_margin_required: 0.10 m minimum distance from room walls
+- collision_margin_required: 0.05 m minimum distance between any two objects
+
+Each structural element includes:
+- type: "wall", "door", or "window"
+- clearance_zone (if door/window): FORBIDDEN area for furniture (must remain 100% free)
+- aabb_2d: exact 2D bounding box
+
+**STEP 2: DISCARD CURRENT COORDINATES**
+The current coordinates (x, y, rz_deg) of the movable objects are completely random and disorganized.
+You MUST NOT make minimal changes or keep them where they are!
+Discard them entirely and plan a completely new, logical, and professional layout from scratch.
+
+**STEP 3: APPLY COLLISION RULES (NON-NEGOTIABLE)**
+For EACH object you place:
+
+  A) WALL CLEARANCE:
+     new_aabb_2d.x_min >= room.x_min + wall_margin_required (0.10 m)
+     new_aabb_2d.x_max <= room.x_max - wall_margin_required (0.10 m)
+     new_aabb_2d.y_min >= room.y_min + wall_margin_required (0.10 m)
+     new_aabb_2d.y_max <= room.y_max - wall_margin_required (0.10 m)
+
+  B) DOOR/WINDOW CLEARANCE ZONES (CRITICAL):
+     For each structural element with a clearance_zone:
+       NO object's AABB_2D can overlap with that clearance_zone
+       NOT EVEN BY 1 CENTIMETER!
+
+  C) OBJECT-TO-OBJECT DISTANCE:
+     For every pair of objects (A, B):
+       If A.aabb_2d.x_max < B.aabb_2d.x_min: gap in X >= collision_margin_required (0.05 m)
+       If A.aabb_2d.y_max < B.aabb_2d.y_min: gap in Y >= collision_margin_required (0.05 m)
+       NO OVERLAPS ALLOWED. Ever.
+
+**STEP 4: SEMANTIC LAYOUT**
+  - For bedrooms: Place bed flush to wall, nightstands immediately beside (0.05-0.10m gap), desk on another wall, chair facing desk.
+  - For living rooms: Sofa facing TV, coffee table in front of sofa, chairs flanking or facing.
+  - Keep door access clear of 0.80-0.90m walkway.
+
+**STEP 5: FINAL VERIFICATION CHECKLIST**
+Before you output:
+  ✓ EVERY object's AABB_2D satisfies wall clearance (0.10m margin from room boundary)
+  ✓ EVERY object-to-object pair maintains collision_margin_required gap (0.05m minimum)
+  ✓ NO object's AABB_2D overlaps any clearance_zone from doors/windows
+  ✓ Semantic coherence achieved (related objects grouped correctly)
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT REQUIREMENTS (ABSOLUTELY STRICT)
+═══════════════════════════════════════════════════════════════════════════════
+Return a JSON ARRAY containing ONE entry per root object.
+Each entry MUST have EXACTLY these 4 fields: "name", "x", "y", "rz_deg"
+No other fields, no comments, no markdown code blocks.
+
+EXAMPLE OUTPUT (for a bedroom with bed, 2 nightstands, desk, chair):
+[
+  {{"name": "furniture_bed_001", "x": 2.500, "y": -2.800, "rz_deg": 180}},
+  {{"name": "furniture_nightstand_001", "x": 1.200, "y": -2.800, "rz_deg": 0}},
+  {{"name": "furniture_nightstand_002", "x": 3.800, "y": -2.800, "rz_deg": 0}},
+  {{"name": "furniture_desk_001", "x": -1.500, "y": 1.200, "rz_deg": 90}},
+  {{"name": "furniture_chair_001", "x": -1.500, "y": 0.850, "rz_deg": 90}}
+]
+
+CRITICAL FORMAT RULES:
+  - MUST be a valid JSON array starting with [ and ending with ]
+  - Each object MUST be a JSON object with exactly 4 fields
+  - Field "name" MUST match exactly a name from ROOT MOVABLE OBJECTS above
+  - Fields "x", "y" MUST be floats (e.g., 2.500, -1.234)
+  - Field "rz_deg" MUST be 0, 90, 180, or 270 (integer, no decimals)
+  - NO extra fields like "w", "d", "h", "aabb_2d", or comments
+  - NO markdown code blocks (```), NO explanatory text before or after
+  - The ONLY output should be the JSON array itself

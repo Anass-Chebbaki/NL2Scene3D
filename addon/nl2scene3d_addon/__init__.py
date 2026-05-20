@@ -58,7 +58,7 @@ from bpy.props import StringProperty, EnumProperty  # type: ignore
 # PREFERENCES: Store API keys and user settings
 # ----------------------------------------------------------------------
 class NL2SCENE3D_AddonPreferences(AddonPreferences):
-    bl_idname = __package__
+    bl_idname = __package__ or "nl2scene3d_addon"
 
     api_key: StringProperty( # type: ignore
         name="Gemini API Key",
@@ -71,11 +71,11 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
         name="Model",
         description="Choose the Gemini model to use",
         items=[
-            ('gemini-3-flash-preview', "Gemini 3 Flash Preview", "Latest high-speed model"),
-            ('gemini-2.5-flash', "Gemini 2.5 Flash", "Standard flash model"),
-            ('gemini-1.5-pro', "Gemini 1.5 Pro", "High intelligence model"),
+            ('gemini-3.5-flash', "Gemini 3.5 Flash", "Latest high-speed model"),
+            ('gemini-2.5-flash', "Gemini 2.5 Flash", "Standard stable flash model"),
+            ('gemini-2.5-pro', "Gemini 2.5 Pro", "High intelligence model"),
         ],
-        default='gemini-3-flash-preview',
+        default='gemini-3.5-flash',
     )
 
     def draw(self, context):
@@ -92,10 +92,18 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
 # ----------------------------------------------------------------------
 def get_pipeline_context():
     """Initialize core components using current addon settings."""
-    addon_id = __package__
+    addon_id = __package__ or "nl2scene3d_addon"
+    if not (bpy.context and bpy.context.preferences and bpy.context.preferences.addons):
+        print("[NL2Scene3D] Preferences or context not available.")
+        return None, None, None, None, None
     try:
-        prefs = bpy.context.preferences.addons[addon_id].preferences
-    except KeyError:
+        prefs_attr = getattr(bpy.context, "preferences", None)
+        addons_attr = getattr(prefs_attr, "addons", None) if prefs_attr else None
+        addon_ref = addons_attr.get(addon_id) if addons_attr else None
+        if not addon_ref:
+            raise KeyError()
+        prefs = addon_ref.preferences
+    except (KeyError, AttributeError):
         print(f"[NL2Scene3D] Errore: preferenze per '{addon_id}' non trovate.")
         return None, None, None, None, None
     
@@ -147,7 +155,10 @@ class NL2SCENE3D_OT_randomize(Operator):
                 self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
                 return {'CANCELLED'}
 
-            _, loader, applicator, randomizer, _ = config_data
+            config, loader, applicator, randomizer, reorganizer = config_data
+            if not (loader and applicator and randomizer):
+                self.report({'ERROR'}, "Add-on components not initialized properly.")
+                return {'CANCELLED'}
 
             wm = context.window_manager
             wm.progress_begin(0, 100)
@@ -204,16 +215,16 @@ class NL2SCENE3D_OT_reorganize(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        import tempfile
-        from pathlib import Path
-
         try:
             config_data = get_pipeline_context()
             if not config_data or not config_data[0]:
                 self.report({'ERROR'}, "Add-on configuration not found. Check Preferences.")
                 return {'CANCELLED'}
 
-            _, loader, applicator, _, reorganizer = config_data
+            config, loader, applicator, _, reorganizer = config_data
+            if not (loader and applicator and reorganizer):
+                self.report({'ERROR'}, "Add-on components not initialized properly.")
+                return {'CANCELLED'}
 
             # ----------------------------------------------------------
             # Feedback visivo: cursore "wait"
@@ -226,50 +237,27 @@ class NL2SCENE3D_OT_reorganize(Operator):
             # ----------------------------------------------------------
             # Step 1: Estrazione stato scena
             # ----------------------------------------------------------
-            wm.progress_update(10)
+            wm.progress_update(20)
             self.report({'INFO'}, "Extracting scene state...")
             print("[NL2Scene3D] Extracting scene state...")
             state = loader.extract_scene_state()
 
-            # ----------------------------------------------------------
-            # Step 2: Cattura viewport corrente come immagine
-            # ----------------------------------------------------------
-            wm.progress_update(25)
-            self.report({'INFO'}, "Capturing viewport snapshot...")
-            print("[NL2Scene3D] Capturing viewport snapshot for Gemini...")
-
-            temp_dir = Path(tempfile.gettempdir())
-            snapshot_path = temp_dir / "nl2scene3d_viewport_snapshot.png"
-
-            scene = context.scene
-            original_filepath = scene.render.filepath
-            scene.render.filepath = str(snapshot_path)
-
-            try:
-                bpy.ops.render.opengl(write_still=True, view_context=True)
-            finally:
-                scene.render.filepath = original_filepath
-
-            if not snapshot_path.exists():
-                raise RuntimeError(
-                    f"Viewport snapshot not created at: {snapshot_path}"
-                )
-
-            print(f"[NL2Scene3D] Snapshot saved to: {snapshot_path}")
+            root_count = len(state.root_movable_objects)
+            print(f"[NL2Scene3D] Root movable objects: {root_count}")
 
             # ----------------------------------------------------------
-            # Step 3: Chiamata Gemini con immagine + JSON
+            # Step 2: Chiamata Gemini text-only (solo oggetti padre)
             # ----------------------------------------------------------
             wm.progress_update(40)
-            self.report({'INFO'}, "Calling Gemini AI with viewport... (10-30s)")
-            print("[NL2Scene3D] Calling Gemini AI with viewport snapshot...")
+            self.report({'INFO'}, f"Calling Gemini AI for {root_count} root objects... (10-30s)")
+            print("[NL2Scene3D] Calling Gemini AI (text-only, flat JSON)...")
 
-            new_state = reorganizer.reorganize_with_image(state, snapshot_path)
+            new_state = reorganizer.reorganize(state)
 
             # ----------------------------------------------------------
-            # Step 4: Applicazione risultato
+            # Step 3: Applicazione risultato
             # ----------------------------------------------------------
-            wm.progress_update(80)
+            wm.progress_update(85)
             self.report({'INFO'}, "Applying reorganized state...")
             print("[NL2Scene3D] Applying reorganized state...")
             applicator.apply_state(new_state)
@@ -284,11 +272,10 @@ class NL2SCENE3D_OT_reorganize(Operator):
 
             clamped = new_state.metadata.get('clamped_count', 0)
             missing = new_state.metadata.get('missing_count', 0)
-            mode = new_state.metadata.get('mode', 'text')
 
             if new_state.pipeline_step == "reordered_failed":
                 error = new_state.metadata.get('error', 'unknown')
-                msg = f"Reorganization failed ({mode}): {error}"
+                msg = f"Reorganization failed: {error}"
                 self.report({'WARNING'}, msg)
                 print(f"[NL2Scene3D] {msg}")
             else:
@@ -327,15 +314,23 @@ class NL2SCENE3D_PT_main_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-        addon_id = __package__
+        if layout is None:
+            return
+        addon_id = __package__ or "nl2scene3d_addon"
         
         try:
             # Recupero preferenze
-            if addon_id not in context.preferences.addons:
+            addon_ref = None
+            prefs_attr = getattr(context, "preferences", None)
+            addons_attr = getattr(prefs_attr, "addons", None) if prefs_attr else None
+            if addons_attr:
+                addon_ref = addons_attr.get(addon_id)
+            
+            if addon_ref is None:
                 layout.label(text="Add-on not enabled properly", icon='ERROR')
                 return
                 
-            prefs = context.preferences.addons[addon_id].preferences
+            prefs = addon_ref.preferences
             
             # Header
             layout.label(text="Smart Reorganization", icon='OUTLINER_OB_GROUP_INSTANCE')

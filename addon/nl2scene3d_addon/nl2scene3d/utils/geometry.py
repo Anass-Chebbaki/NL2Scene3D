@@ -27,7 +27,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nl2scene3d.models import SceneObject
+    from nl2scene3d.models import SceneObject, RoomBounds
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ def wall_collision(
     for wall in wall_objects:
         name_lower = wall.name.lower()
         # Porte, finestre e la mesh-stanza non sono ostacoli AABB
-        if any(k in name_lower for k in ("door", "window", "room")):
+        if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
             continue
 
         w_aabb = wall.transform.aabb_xy(margin=0.0)
@@ -172,6 +172,73 @@ def furniture_collision(
     return False
 
 
+def check_openings_clearance(
+    candidate: "SceneObject",
+    structural_objects: list["SceneObject"],
+) -> bool:
+    """
+    Verifica se il candidato invade la zona di rispetto/passaggio davanti a porte o finestre.
+    Ritorna True se c'è invasione (collisione con la zona di rispetto).
+    """
+    for obj in structural_objects:
+        name_lower = obj.name.lower()
+        is_door = any(k in name_lower for k in ("door", "porta"))
+        is_window = any(k in name_lower for k in ("window", "finestra"))
+
+        if not (is_door or is_window):
+            continue
+
+        # Definiamo la profondità di rispetto (clearance depth) su ciascun lato:
+        # Porta: 0.90 metri per passaggio e raggio di apertura
+        # Finestra: 0.50 metri per luce e accesso
+        clearance_depth = 0.90 if is_door else 0.50
+
+        cx, cy = obj.transform.geometric_center_xy()
+        rz = obj.transform.rotation_euler[2]
+        cos_z, sin_z = math.cos(rz), math.sin(rz)
+        dim = obj.transform.dimensions
+
+        # Estendi la dimensione Y (profondità locale) per includere la clearance su entrambi i lati del pannello
+        w = dim[0] / 2.0  # larghezza strutturale
+        h = dim[1] / 2.0 + clearance_depth  # profondità estesa
+
+        local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
+        clearance_poly = [
+            (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
+            for lx, ly in local_corners
+        ]
+
+        # L'OBB del candidato (con un margine minimo di tolleranza di 2cm)
+        cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
+
+        # Se c'è overlap nel piano XY
+        if _sat_overlap(clearance_poly, cand_poly):
+            c_z_min, c_z_max = candidate.transform.z_range()
+            o_z_min, o_z_max = obj.transform.z_range()
+            # Z overlap reale tra il candidato e la porta/finestra
+            z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
+
+            if is_door:
+                # Porta: blocca se c'è reale overlap Z tra il mobile e la porta
+                # (le porte vanno dal pavimento al soffitto, quindi praticamente sempre)
+                if z_overlap > 0.05:
+                    logger.debug(
+                        "Collisione porta: '%s' blocca il passaggio di '%s'.",
+                        candidate.name, obj.name
+                    )
+                    return True
+            elif is_window:
+                # Finestra: blocca se il mobile supera la base della finestra
+                if c_z_max > o_z_min + 0.10 and z_overlap > 0.05:
+                    logger.debug(
+                        "Collisione finestra: '%s' copre la luce di '%s'.",
+                        candidate.name, obj.name
+                    )
+                    return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Funzione principale
 # ---------------------------------------------------------------------------
@@ -182,6 +249,7 @@ def has_collision(
     wall_margin: float = 0.20,
     furniture_margin: float = 0.05,
     check_walls: bool = True,
+    room_bounds: "RoomBounds" | None = None,
 ) -> bool:
     """
     Verifica se il candidato ha collisioni con gli oggetti già posizionati.
@@ -194,10 +262,24 @@ def has_collision(
                            Con 0.05m ogni coppia di oggetti avrà ≥10cm di spazio.
         check_walls:       Se False, salta il check con i muri (utile per decorazioni
                            da appendere a parete).
+        room_bounds:       RoomBounds opzionale — se passato, controlla anche il
+                           contenimento dell'AABB del candidato nei bounds della stanza.
+                           Questo è il check più affidabile contro i muri (non dipende
+                           dalla presenza di mesh muro fisiche).
 
     Returns:
         True se c'è almeno una collisione.
     """
+    # --- Check contenimento nei bounds della stanza (il più affidabile) ---
+    if check_walls and room_bounds is not None:
+        c_aabb = candidate.transform.aabb_xy(margin=0.0)
+        if not room_bounds.contains_aabb(c_aabb, margin=wall_margin):
+            logger.debug(
+                "Fuori bounds: '%s' AABB %s non contenuta in bounds (margin=%.2f).",
+                candidate.name, c_aabb, wall_margin,
+            )
+            return True
+
     walls: list["SceneObject"] = []
     furniture: list["SceneObject"] = []
 
@@ -213,6 +295,8 @@ def has_collision(
 
     if check_walls and walls:
         if wall_collision(candidate, walls, wall_margin):
+            return True
+        if check_openings_clearance(candidate, walls):
             return True
 
     if furniture:
@@ -232,6 +316,7 @@ def collision_score(
     wall_margin: float = 0.20,
     furniture_margin: float = 0.05,
     check_walls: bool = True,
+    room_bounds: "RoomBounds" | None = None,
 ) -> float:
     """
     Restituisce un punteggio di "bontà" della posizione del candidato.
@@ -242,7 +327,7 @@ def collision_score(
     Utile nel randomizer per scegliere la posizione meno problematica quando
     non si riesce a trovarne una completamente libera entro max_attempts.
 
-    Il calcolo usa AABB (non SAT) per velocità — è una stima, non un check esatto.
+    room_bounds: se passato, aggiunge penalità proporzionale alla distanza fuori dai bounds.
     """
     total = 0.0
 
@@ -250,6 +335,18 @@ def collision_score(
     c_aabb_wall = candidate.transform.aabb_xy(margin=wall_margin)
     c_aabb_furn = candidate.transform.aabb_xy(margin=furniture_margin)
     c_z_min, c_z_max = candidate.transform.z_range()
+
+    # --- Penalità per oggetto fuori dai bounds della stanza ---
+    if check_walls and room_bounds is not None:
+        if not room_bounds.contains_aabb(c_aabb_base, margin=wall_margin):
+            # Calcola quanto sporge fuori dai bounds (somma overflow su tutti i lati)
+            overflow = (
+                max(0.0, room_bounds.x_min + wall_margin - c_aabb_base[0]) +
+                max(0.0, c_aabb_base[1] - (room_bounds.x_max - wall_margin)) +
+                max(0.0, room_bounds.y_min + wall_margin - c_aabb_base[2]) +
+                max(0.0, c_aabb_base[3] - (room_bounds.y_max - wall_margin))
+            )
+            total += 100.0 + overflow * 10.0  # Penalità bloccante proporzionale
 
     for obj in placed_objects:
         if obj.name == candidate.name:
@@ -267,7 +364,32 @@ def collision_score(
 
         if obj.category == "structural" and check_walls:
             name_lower = obj.name.lower()
-            if any(k in name_lower for k in ("door", "window", "room")):
+            if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
+                # Check clearance specifico per porte e finestre in collision_score
+                is_door = any(k in name_lower for k in ("door", "porta"))
+                is_window = any(k in name_lower for k in ("window", "finestra"))
+                clearance_depth = 0.90 if is_door else 0.50
+
+                cx, cy = obj.transform.geometric_center_xy()
+                rz = obj.transform.rotation_euler[2]
+                cos_z, sin_z = math.cos(rz), math.sin(rz)
+                dim = obj.transform.dimensions
+                w = dim[0] / 2.0
+                h = dim[1] / 2.0 + clearance_depth
+                local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
+                clearance_poly = [
+                    (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
+                    for lx, ly in local_corners
+                ]
+
+                cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
+                if _sat_overlap(clearance_poly, cand_poly):
+                    # Usa Z overlap reale invece della soglia fissa c_z_min < 2.0
+                    real_z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
+                    if is_door and real_z_overlap > 0.05:
+                        total += 50.0  # Penalità bloccante pesante
+                    elif is_window and c_z_max > o_z_min + 0.10 and real_z_overlap > 0.05:
+                        total += 25.0  # Penalità finestra
                 continue
             ratio = aabb_overlap_ratio(c_aabb_wall, o_aabb)
             total += ratio * 2.0  # I muri pesano il doppio
@@ -371,4 +493,4 @@ def _check_sat_overlap(
     poly_b: list[tuple[float, float]],
 ) -> bool:
     """Wrapper BC: alias di _sat_overlap (stesso algoritmo SAT)."""
-    return _sat_overlap(poly_a, poly_b)
+    return _sat_overlap(poly_a, poly_b)

@@ -26,7 +26,7 @@ import random
 from typing import Optional
 
 from nl2scene3d.config import RandomizerConfig
-from nl2scene3d.models import SceneObject, SceneState, Transform
+from nl2scene3d.models import RoomBounds, SceneObject, SceneState, Transform
 from nl2scene3d.utils.geometry import collision_score
 
 logger = logging.getLogger(__name__)
@@ -76,46 +76,129 @@ def apply_rigid_transform(
     ) % (2 * math.pi)
 
 
+def _group_aabb_xy(
+    orig_parent: SceneObject,
+    proposed_loc: list[float],
+    proposed_rz: float,
+    orig_children: list[SceneObject],
+    margin: float = 0.0,
+) -> tuple[float, float, float, float]:
+    """
+    Calcola l'AABB 2D combinata (XY) di un gruppo parent+figli nella posizione/rotazione proposta.
+    Usa l'AABB reale di ogni membro (con la rotazione corretta) tramite la classe Transform,
+    garantendo che venga sempre tenuto conto di origin_offset e rotazione Z.
+    """
+    old_parent_loc = orig_parent.transform.location
+    old_parent_rz = orig_parent.transform.rotation_euler[2]
+    d_rz = proposed_rz - old_parent_rz
+    cos_a, sin_a = math.cos(d_rz), math.sin(d_rz)
+
+    # Transform temporanea del parent
+    temp_parent_tf = Transform(
+        location=[proposed_loc[0], proposed_loc[1], orig_parent.transform.location[2]],
+        rotation_euler=[
+            orig_parent.transform.rotation_euler[0],
+            orig_parent.transform.rotation_euler[1],
+            proposed_rz
+        ],
+        dimensions=orig_parent.transform.dimensions,
+        origin_offset=orig_parent.transform.origin_offset
+    )
+    x_min, x_max, y_min, y_max = temp_parent_tf.aabb_xy(margin=margin)
+
+    # Estendi l'AABB con ogni figlio nella sua nuova posizione rigida
+    for orig_child in orig_children:
+        rel_x = orig_child.transform.location[0] - old_parent_loc[0]
+        rel_y = orig_child.transform.location[1] - old_parent_loc[1]
+        
+        # Ruota il vettore relativo
+        new_cx = proposed_loc[0] + rel_x * cos_a - rel_y * sin_a
+        new_cy = proposed_loc[1] + rel_x * sin_a + rel_y * cos_a
+        c_rz = (orig_child.transform.rotation_euler[2] + d_rz) % (2 * math.pi)
+
+        temp_child_tf = Transform(
+            location=[new_cx, new_cy, orig_child.transform.location[2]],
+            rotation_euler=[
+                orig_child.transform.rotation_euler[0],
+                orig_child.transform.rotation_euler[1],
+                c_rz
+            ],
+            dimensions=orig_child.transform.dimensions,
+            origin_offset=orig_child.transform.origin_offset
+        )
+        cx_min, cx_max, cy_min, cy_max = temp_child_tf.aabb_xy(margin=margin)
+        x_min = min(x_min, cx_min)
+        x_max = max(x_max, cx_max)
+        y_min = min(y_min, cy_min)
+        y_max = max(y_max, cy_max)
+
+    return x_min, x_max, y_min, y_max
+
+
+def _clamp_parent_group_location_rand(
+    orig_parent: SceneObject,
+    proposed_loc: list[float],
+    proposed_rz: float,
+    orig_children: list[SceneObject],
+    room_bounds,
+    wall_margin: float,
+) -> list[float]:
+    """
+    Clampa la posizione del parent in modo che sia il parent stesso sia tutti i suoi figli
+    rimangano all'interno dei bounds della stanza, rispettando il wall_margin.
+    Usa l'AABB combinata del gruppo per evitare errori di doppia rotazione.
+    """
+    # Calcola l'AABB reale del gruppo nella posizione proposta
+    g_x_min, g_x_max, g_y_min, g_y_max = _group_aabb_xy(
+        orig_parent, proposed_loc, proposed_rz, orig_children, margin=0.0
+    )
+
+    # Calcola i delta di eccesso per ogni lato
+    px, py = proposed_loc[0], proposed_loc[1]
+
+    # Sposta il centro del parent di quanto è necessario per rientrare nei bounds
+    overflow_left  = max(0.0, (room_bounds.x_min + wall_margin) - g_x_min)
+    overflow_right = max(0.0, g_x_max - (room_bounds.x_max - wall_margin))
+    overflow_front = max(0.0, (room_bounds.y_min + wall_margin) - g_y_min)
+    overflow_back  = max(0.0, g_y_max - (room_bounds.y_max - wall_margin))
+
+    # Non applicare entrambi i lati contemporaneamente: priorità al lato più grande
+    dx = overflow_left if overflow_left > overflow_right else -overflow_right
+    dy = overflow_front if overflow_front > overflow_back else -overflow_back
+
+    return [px + dx, py + dy, proposed_loc[2]]
+
+
 # ---------------------------------------------------------------------------
 # Posizione casuale per un oggetto
 # ---------------------------------------------------------------------------
 
-def _effective_aabb_half(dimensions: list[float], rotation_z: float) -> tuple[float, float]:
-    """
-    Calcola le semidimensioni dell'AABB dopo la rotazione Z.
-    Usato per calcolare i range validi di posizionamento dentro i bounds.
-    """
-    cos_z, sin_z = abs(math.cos(rotation_z)), abs(math.sin(rotation_z))
-    eff_x = dimensions[0] * cos_z + dimensions[1] * sin_z
-    eff_y = dimensions[0] * sin_z + dimensions[1] * cos_z
-    return eff_x / 2.0, eff_y / 2.0
-
-
 def _random_location(
     original_location: list[float],
     dimensions: list[float],
+    origin_offset: list[float],
     rotation_z: float,
-    room_bounds,
+    room_bounds: RoomBounds,
     jitter_ratio: float,
     wall_margin: float,
     rng: random.Random,
 ) -> list[float]:
-    """
-    Genera una posizione casuale all'interno dei bounds della stanza.
+    """Genera una posizione XY all'interno dei bounds con jittering tenendo conto dell'origin_offset."""
+    # Creiamo una Transform fittizia all'origine [0.0, 0.0] con la rotazione proposta
+    # per calcolare l'esatta estensione dell'AABB ruotata tenendo conto dell'offset origine.
+    temp_tf = Transform(
+        location=[0.0, 0.0, original_location[2]],
+        rotation_euler=[0.0, 0.0, rotation_z],
+        dimensions=dimensions,
+        origin_offset=origin_offset
+    )
+    t_xmin, t_xmax, t_ymin, t_ymax = temp_tf.aabb_xy(margin=0.0)
 
-    Il jitter è centrato sulla posizione originale dell'oggetto e limitato
-    a jitter_ratio × dimensione_stanza in ogni direzione, così gli oggetti
-    non migrano completamente all'altro lato della stanza ma rimangono
-    in una zona ragionevole.
-    """
-    half_x, half_y = _effective_aabb_half(dimensions, rotation_z)
-    margin = wall_margin
-
-    # Range fisicamente valido (l'oggetto deve stare dentro i muri)
-    safe_x_min = room_bounds.x_min + half_x + margin
-    safe_x_max = room_bounds.x_max - half_x - margin
-    safe_y_min = room_bounds.y_min + half_y + margin
-    safe_y_max = room_bounds.y_max - half_y - margin
+    # Range fisicamente valido (il centro origine deve essere posizionato in modo che l'AABB stia dentro i muri)
+    safe_x_min = room_bounds.x_min + wall_margin - t_xmin
+    safe_x_max = room_bounds.x_max - wall_margin - t_xmax
+    safe_y_min = room_bounds.y_min + wall_margin - t_ymin
+    safe_y_max = room_bounds.y_max - wall_margin - t_ymax
 
     if safe_x_max <= safe_x_min or safe_y_max <= safe_y_min:
         # Oggetto troppo grande per la stanza — lascialo dov'è
@@ -240,6 +323,7 @@ class SceneRandomizer:
                 new_loc = _random_location(
                     old_loc,
                     candidate.transform.dimensions,
+                    candidate.transform.origin_offset,
                     new_rz,
                     bounds,
                     self.config.jitter_ratio,
@@ -282,6 +366,33 @@ class SceneRandomizer:
             final_root = by_name[root.name]
             new_loc = best_obj.transform.location
             new_rz = best_obj.transform.rotation_euler[2]
+
+            # Clampa l'intera posizione finale per garantire che tutto il gruppo sia al sicuro entro i muri
+            if bounds is not None:
+                orig_children = []
+                orig_by_name = {o.name: o for o in state.objects}
+                def gather_children(p_name: str):
+                    p_obj = orig_by_name.get(p_name)
+                    if p_obj:
+                        for c_name in p_obj.children:
+                            c_obj = orig_by_name.get(c_name)
+                            if c_obj:
+                                orig_children.append(c_obj)
+                                gather_children(c_name)
+                gather_children(root.name)
+
+                clamped_loc = _clamp_parent_group_location_rand(
+                    root,
+                    new_loc,
+                    new_rz,
+                    orig_children,
+                    bounds,
+                    self.config.wall_margin,
+                )
+                if clamped_loc != new_loc:
+                    logger.debug("Randomizer group clamp per '%s': %s -> %s", root.name, new_loc, clamped_loc)
+                    new_loc = clamped_loc
+
             final_root.transform.location = new_loc
             final_root.transform.rotation_euler[2] = new_rz
 
@@ -329,12 +440,13 @@ class SceneRandomizer:
         Calcola il punteggio di collisione cumulativo per l'intero gruppo
         spostato nella nuova posizione del root.
         """
-        # 1. Punteggio del root stesso
+        # 1. Punteggio del root stesso (incluso check contenimento in bounds)
         total_score = collision_score(
             root_candidate,
             placed_objects,
             wall_margin=self.config.wall_margin,
             furniture_margin=self.config.collision_margin,
+            room_bounds=bounds,
         )
 
         # 2. Punteggio per ogni figlio (spostato rigidamente rispetto al root_candidate)
@@ -353,16 +465,17 @@ class SceneRandomizer:
                     new_parent_rz=current_parent_rz,
                 )
 
-                # 1. Collisione per questo figlio contro altri oggetti
+                # 1. Collisione per questo figlio contro altri oggetti (incluso check bounds)
                 total_score += collision_score(
                     moved_child,
                     placed_objects,
                     wall_margin=self.config.wall_margin,
                     furniture_margin=self.config.collision_margin,
+                    room_bounds=bounds,
                 )
 
-                # 2. Verifica bounds per questo figlio (se fuori, penalità pesante)
-                if not bounds.contains_aabb(moved_child.transform.aabb_xy(margin=0.0), margin=0.0):
+                # 2. Verifica bounds per questo figlio (se fuori o troppo vicino ai muri, penalità pesante)
+                if not bounds.contains_aabb(moved_child.transform.aabb_xy(margin=0.0), margin=self.config.wall_margin):
                     total_score += 100.0  # Penalità bloccante: il gruppo non può uscire dai muri
 
                 # Ricorsione per i figli dei figli
@@ -393,9 +506,6 @@ class SceneRandomizer:
     ) -> None:
         """
         Sposta ricorsivamente tutti i discendenti del root con trasformazione rigida.
-
-        Se un figlio finisce fuori dai bounds dopo la trasformazione, viene lasciato
-        alla sua posizione originale (meglio un figlio fermo che uno fuori dai muri).
         """
         root_obj = by_name.get(root_name)
         if root_obj is None:

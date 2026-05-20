@@ -26,7 +26,7 @@ from nl2scene3d.config import PipelineConfig
 from nl2scene3d.models import RoomBounds, SceneObject, SceneState, Transform
 
 try:
-    import bpy
+    import bpy  # type: ignore
 except ImportError:
     bpy = None
 
@@ -131,16 +131,16 @@ def compute_room_bounds(objects: list[SceneObject]) -> RoomBounds:
         return RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0)
 
     # z_ceiling dinamica
-    ceiling_kws = ("ceiling", "room", "roof")
+    ceiling_kws = ("ceiling", "room", "roof", "soffitto")
     ceiling_objs = [o for o in structural if _has_kw(ceiling_kws, o.name.lower())]
     if ceiling_objs:
         z_ceiling = max(
-            o.transform.location[2] + o.transform.dimensions[2] / 2.0
+            o.transform.z_range()[1]
             for o in ceiling_objs
         )
     else:
         max_z = max(
-            (o.transform.location[2] + o.transform.dimensions[2] / 2.0 for o in structural),
+            (o.transform.z_range()[1] for o in structural),
             default=2.5,
         )
         z_ceiling = max_z if max_z > 1.0 else 2.5
@@ -153,27 +153,27 @@ def compute_room_bounds(objects: list[SceneObject]) -> RoomBounds:
     largest_obj, max_vol = max(vols, key=lambda x: x[1])
     total_vol = sum(v for _, v in vols)
     if total_vol > 0 and max_vol > 0.5 * total_vol and max_vol > 1.0:
-        loc = largest_obj.transform.location
-        dim = largest_obj.transform.dimensions
+        x_min, x_max, y_min, y_max = largest_obj.transform.aabb_xy(margin=0.0)
         logger.info(
-            "Stanza identificata da oggetto unico '%s' (%.2f×%.2f×%.2f).",
-            largest_obj.name, dim[0], dim[1], dim[2],
+            "Stanza identificata da oggetto unico '%s' (AABB: X[%.2f, %.2f] Y[%.2f, %.2f]).",
+            largest_obj.name, x_min, x_max, y_min, y_max
         )
         return RoomBounds(
-            x_min=loc[0] - dim[0] / 2.0,
-            x_max=loc[0] + dim[0] / 2.0,
-            y_min=loc[1] - dim[1] / 2.0,
-            y_max=loc[1] + dim[1] / 2.0,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
             z_floor=0.0,
             z_ceiling=z_ceiling,
         )
 
     # Strategia 2: AABB unione di tutti i strutturali
+    aabbs = [o.transform.aabb_xy(margin=0.0) for o in structural]
     return RoomBounds(
-        x_min=min(o.transform.location[0] - o.transform.dimensions[0] / 2.0 for o in structural),
-        x_max=max(o.transform.location[0] + o.transform.dimensions[0] / 2.0 for o in structural),
-        y_min=min(o.transform.location[1] - o.transform.dimensions[1] / 2.0 for o in structural),
-        y_max=max(o.transform.location[1] + o.transform.dimensions[1] / 2.0 for o in structural),
+        x_min=min(a[0] for a in aabbs),
+        x_max=max(a[1] for a in aabbs),
+        y_min=min(a[2] for a in aabbs),
+        y_max=max(a[3] for a in aabbs),
         z_floor=0.0,
         z_ceiling=z_ceiling,
     )
@@ -383,7 +383,7 @@ class SceneLoader:
         if not blend_path.exists():
             raise FileNotFoundError(f"File .blend non trovato: {blend_path}")
         try:
-            import bpy  # noqa: PLC0415
+            import bpy  # type: ignore # noqa: PLC0415
         except ImportError as exc:
             raise ImportError("bpy richiede l'ambiente Blender.") from exc
         logger.info("Apertura '%s'…", blend_path)
@@ -403,8 +403,8 @@ class SceneLoader:
             SceneState completo con pipeline_step='original'.
         """
         try:
-            import bpy        # noqa: PLC0415
-            import mathutils  # noqa: PLC0415
+            import bpy        # type: ignore # noqa: PLC0415
+            import mathutils  # type: ignore # noqa: PLC0415
         except ImportError as exc:
             raise ImportError("bpy/mathutils richiedono l'ambiente Blender.") from exc
 
@@ -452,13 +452,15 @@ class SceneLoader:
                 local_center.z * blender_obj.scale.z,
             ]
 
+            # Usa sempre coordinate MONDO (matrix_world) per garantire coerenza
+            # anche quando l'oggetto ha un parent nativo in Blender.
+            world_mat = blender_obj.matrix_world
+            world_loc = world_mat.translation
+            world_rot = world_mat.to_euler('XYZ')
+
             transform = Transform(
-                location=[blender_obj.location.x, blender_obj.location.y, blender_obj.location.z],
-                rotation_euler=[
-                    blender_obj.rotation_euler.x,
-                    blender_obj.rotation_euler.y,
-                    blender_obj.rotation_euler.z,
-                ],
+                location=[world_loc.x, world_loc.y, world_loc.z],
+                rotation_euler=[world_rot.x, world_rot.y, world_rot.z],
                 dimensions=dimensions,
                 origin_offset=origin_offset,
             )

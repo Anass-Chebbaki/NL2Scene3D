@@ -74,10 +74,15 @@ class GeminiClient:
         # Pulizia preliminare: rimuove eventuale testo prima del primo { o [
         text = text.strip()
         
+        logger.debug(f"Raw response from Gemini (first 500 chars):\n{text[:500]}")
+        
         # Strategia 1: parse diretto
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
+            result = json.loads(text)
+            logger.debug(f"✓ Direct JSON parse successful. Type: {type(result).__name__}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.debug(f"Direct JSON parse failed: {e}")
             pass
 
         # Strategia 2: estrazione di blocchi ```json ... ``` (piu' robusta)
@@ -87,8 +92,13 @@ class GeminiClient:
         match = json_block_pattern.search(text)
         if match:
             try:
-                return json.loads(match.group(1).strip())
-            except json.JSONDecodeError:
+                extracted = match.group(1).strip()
+                logger.debug(f"Found JSON block in markdown code fence. Content:\n{extracted[:300]}")
+                result = json.loads(extracted)
+                logger.debug(f"✓ Markdown JSON parse successful. Type: {type(result).__name__}")
+                return result
+            except json.JSONDecodeError as e:
+                logger.debug(f"Markdown JSON parse failed: {e}")
                 pass
 
         # Strategia 3: ricerca della struttura più esterna { } o [ ]
@@ -108,19 +118,26 @@ class GeminiClient:
             end_idx = text.rfind(end_char)
             if end_idx > start_idx:
                 json_str = text[start_idx:end_idx + 1]
+                logger.debug(f"Extracted JSON substring (brute force): {json_str[:300]}")
                 try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
+                    result = json.loads(json_str)
+                    logger.debug(f"✓ Brute force JSON parse successful. Type: {type(result).__name__}")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Brute force JSON parse failed: {e}")
                     # Se fallisce ancora, proviamo a pulire i commenti se presenti
                     json_str_clean = re.sub(r'//.*?\n|/\*.*?\*/', '', json_str, flags=re.DOTALL)
                     try:
-                        return json.loads(json_str_clean)
-                    except json.JSONDecodeError:
+                        result = json.loads(json_str_clean)
+                        logger.debug(f"✓ Cleaned JSON parse successful. Type: {type(result).__name__}")
+                        return result
+                    except json.JSONDecodeError as e2:
+                        logger.debug(f"Cleaned JSON parse failed: {e2}")
                         pass
 
         # Strategia 4: Se sembra troncato (mancano le chiusure), proviamo a chiuderlo manualmente
         if start_idx != -1:
-            logger.warning("Il JSON sembra troncato. Tentativo di chiusura manuale.")
+            logger.warning("JSON appears truncated. Attempting automatic closure.")
             # Conta le parentesi aperte/chiuse
             open_braces = text.count('{')
             close_braces = text.count('}')
@@ -132,12 +149,17 @@ class GeminiClient:
                 repaired_text += ']' * (open_brackets - close_brackets)
             if open_braces > close_braces:
                 repaired_text += '}' * (open_braces - close_braces)
-                
+            
+            logger.debug(f"Repaired JSON: {repaired_text[:300]}")
             try:
-                return json.loads(repaired_text)
-            except json.JSONDecodeError:
+                result = json.loads(repaired_text)
+                logger.debug(f"✓ Repaired JSON parse successful. Type: {type(result).__name__}")
+                return result
+            except json.JSONDecodeError as e:
+                logger.debug(f"Repaired JSON parse failed: {e}")
                 pass
 
+        logger.error(f"FULL GEMINI RESPONSE:\n{text}")
         raise GeminiParsingError(
             "Impossibile estrarre JSON valido dalla risposta del modello. "
             f"La risposta potrebbe essere stata troncata o contenere errori di sintassi. "
@@ -153,19 +175,32 @@ class GeminiClient:
     ) -> str:
         """
         Esegue una chiamata al modello con retry e backoff esponenziale.
+        
+        Nota: response_mime_type="application/json" potrebbe non essere supportato
+        da tutti i modelli. Se fallisce, ritentiamo senza questo vincolo.
         """
-        gen_config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=self.config.temperature,
-            max_output_tokens=self.config.max_output_tokens,
-            response_mime_type="application/json",
+        gen_config_dict = {
+            "temperature": self.config.temperature,
+            "max_output_tokens": self.config.max_output_tokens,
             **(config_override or {}),
-        )
-
+        }
+        
+        # Prova con response_mime_type="application/json" solo come primo tentativo
+        use_json_mime = True
+        
         last_exception: Exception = GeminiClientError("Nessun tentativo eseguito.")
 
         for attempt in range(self.config.max_retries):
             try:
+                config_dict = gen_config_dict.copy()
+                if use_json_mime and attempt < 1:  # Solo primo tentativo
+                    config_dict["response_mime_type"] = "application/json"
+                
+                gen_config = types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    **config_dict,
+                )
+                
                 response = self._client.models.generate_content(
                     model=model_name,
                     contents=contents,
@@ -177,6 +212,17 @@ class GeminiClient:
 
             except Exception as exc:
                 exc_str = str(exc).lower()
+                
+                # Se è un errore "mime type not supported", ritenta senza
+                if "mime type" in exc_str and use_json_mime and attempt < 1:
+                    logger.warning(
+                        "response_mime_type='application/json' non supportato dal modello %s. "
+                        "Ritento senza questo vincolo.",
+                        model_name,
+                    )
+                    use_json_mime = False
+                    continue
+                
                 # 429 (Rate Limit) o 503 (Model Overloaded/Unavailable)
                 if any(err in exc_str for err in ("429", "quota", "exhausted")):
                     last_exception = exc
@@ -233,8 +279,10 @@ class GeminiClient:
             self.config.model_fallback if use_fallback else self.config.model_primary
         )
         logger.info(
-            "Chiamata testuale a Gemini (%s).",
+            "Chiamata testuale a Gemini (%s). System prompt length: %d, User prompt length: %d",
             model_name,
+            len(system_prompt),
+            len(user_prompt),
         )
         
         try:
@@ -243,7 +291,10 @@ class GeminiClient:
                 contents=user_prompt,
                 system_prompt=system_prompt,
             )
+            logger.debug(f"Raw response from model:\n{raw_response[:1000]}")
+            
             parsed = self._extract_json_from_response(raw_response)
+            logger.info(f"Successfully parsed Gemini response. Type: {type(parsed).__name__}, entries: {len(parsed) if isinstance(parsed, (list, dict)) else 'N/A'}")
             return parsed
         except GeminiRateLimitError:
             if not use_fallback:

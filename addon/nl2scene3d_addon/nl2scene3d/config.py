@@ -74,7 +74,7 @@ def _env(key: str, toml_value: Any, default: Any) -> Any:
 @dataclass
 class GeminiConfig:
     api_key: str = field(repr=False)
-    model_primary: str = "gemini-2.5-flash"
+    model_primary: str = "gemini-3.5-flash"
     model_fallback: str = "gemini-2.5-flash"
     max_retries: int = 3
     timeout_seconds: int = 300
@@ -101,7 +101,7 @@ class GeminiConfig:
             )
         return cls(
             api_key=api_key,
-            model_primary=_env("GEMINI_MODEL_PRIMARY", g.get("model_primary"), "gemini-2.5-flash"),
+            model_primary=_env("GEMINI_MODEL_PRIMARY", g.get("model_primary"), "gemini-3.5-flash"),
             model_fallback=_env("GEMINI_MODEL_FALLBACK", g.get("model_fallback"), "gemini-2.5-flash"),
             max_retries=int(_env("GEMINI_MAX_RETRIES", g.get("max_retries"), 3)),
             timeout_seconds=int(_env("GEMINI_TIMEOUT_SECONDS", g.get("timeout_seconds"), 300)),
@@ -149,7 +149,10 @@ class PipelineConfig:
         default_factory=lambda: frozenset(["CAMERA", "LIGHT", "SPEAKER", "ARMATURE", "EMPTY", "CURVE"])
     )
     structural_patterns: list[str] = field(
-        default_factory=lambda: ["wall", "floor", "ceiling", "room", "door", "window"]
+        default_factory=lambda: [
+            "wall", "floor", "ceiling", "room", "door", "window",
+            "muro", "parete", "pavimento", "soffitto", "porta", "finestra"
+        ]
     )
     ceiling_light_patterns: list[str] = field(
         default_factory=lambda: ["ceiling", "pendant", "chandelier"]
