@@ -201,13 +201,13 @@ def main() -> None:
 
     args = parse_args()
 
-    log_level = args.log_level or app_config.logging.level
+    log_level = args.log_level or "INFO"
     setup_logging(level=log_level, logger_name="nl2scene3d.batch")
 
     scenes_dir: Path = args.scenes_dir or app_config.pipeline.scenes_dir
     outputs_dir: Path = args.outputs_dir or app_config.pipeline.outputs_dir
     seed: int = (
-        args.seed if args.seed is not None else app_config.pipeline.randomizer_seed
+        args.seed if args.seed is not None else app_config.randomizer.seed
     )
     max_objects: int = (
         args.max_objects

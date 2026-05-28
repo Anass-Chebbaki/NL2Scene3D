@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -170,7 +171,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # We are outside Blender! Let's launch it.
         import subprocess
         
-        blender_bin = app_config.blender_executable
+        blender_bin = os.environ.get("BLENDER_EXECUTABLE", "blender")
         logger.info("Esecuzione esterna rilevata. Lancio Blender: %s", blender_bin)
         
         # Build the command: blender --background [blend_file] --python scripts/run_pipeline.py -- [args]
@@ -196,7 +197,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             sys.exit(1)
     # --- END AUTO-WRAPPER ---
 
-    log_level = args.log_level or app_config.logging.level
+    log_level = args.log_level or "INFO"
     setup_logging(level=log_level)
 
     logger.info("=" * 60)
@@ -227,7 +228,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     prompts_dir: Path = args.prompts_dir or (_SRC_DIR / "nl2scene3d" / "config" / "prompts")
     seed: int = (
-        args.seed if args.seed is not None else pipeline_config.randomizer_seed
+        args.seed if args.seed is not None else app_config.randomizer.seed
     )
 
     if args.model:
@@ -238,12 +239,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     rand_config = RandomizerConfig(
         seed=seed,
-        jitter_ratio=pipeline_config.jitter_ratio,
-        rotate_z_only=True,
-        check_overlaps=True,
-        wall_margin=pipeline_config.wall_margin,
-        max_overlap_ratio=pipeline_config.max_overlap_ratio,
-        max_placement_attempts=pipeline_config.max_placement_attempts,
+        jitter_ratio=app_config.randomizer.jitter_ratio,
+        wall_margin=app_config.randomizer.wall_margin,
+        collision_margin=app_config.randomizer.collision_margin,
+        max_placement_attempts=app_config.randomizer.max_placement_attempts,
     )
     randomizer = SceneRandomizer(config=rand_config)
 
@@ -273,7 +272,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     logger.info("Estrazione stato originale.")
     original_state = loader.extract_scene_state(scene_name=args.scene_name)
-    loader.save_state_to_json(original_state, args.output_dir / "scene_original.json")
+    loader.save_state(original_state, args.output_dir / "scene_original.json")
 
     logger.info("Render originale.")
     renderer.render_step(step_name="original", state=original_state, quality="preview")
@@ -281,7 +280,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Randomizzazione.")
     randomized_state = randomizer.randomize(original_state)
     applicator.apply_state(randomized_state)
-    loader.save_state_to_json(
+    loader.save_state(
         randomized_state, args.output_dir / "scene_randomized.json"
     )
 
@@ -299,7 +298,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         logger.warning("Il riordino ha fallito. Utilizzo stato randomizzato per i prossimi step. Salto critica visiva.")
         args.skip_vision = True
     
-    loader.save_state_to_json(
+    loader.save_state(
         reordered_state, args.output_dir / "scene_reordered.json"
     )
 
@@ -323,7 +322,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # Forza l'uso dei bounds originali anche dopo la rifinitura visiva
         refined_state.room_bounds = original_state.room_bounds
 
-    loader.save_state_to_json(refined_state, args.output_dir / "scene_refined.json")
+    loader.save_state(refined_state, args.output_dir / "scene_refined.json")
 
     if refined_state.metadata.get("applied_corrections", 0) > 0:
         logger.info(

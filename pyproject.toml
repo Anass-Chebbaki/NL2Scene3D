@@ -78,9 +78,9 @@ addopts = "--cov=src/nl2scene3d --cov-report=term-missing"
 packages = ["src/nl2scene3d"]
 
 [tool.pyrefly]
-# Pyrefly deve cercare nl2scene3d sia in src/ (package installabile)
-# sia in addon/nl2scene3d_addon/ (package Blender con il codice attivo).
+# Pyrefly deve cercare nl2scene3d in src/ (package installabile)
+# e src/nl2scene3d_addon/ (package Blender).
 search_path = [
-    "addon/nl2scene3d_addon",
+    "src/nl2scene3d_addon",
     "src",
 ]
