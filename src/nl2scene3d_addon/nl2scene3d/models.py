@@ -1,12 +1,13 @@
 # nl2scene3d/models.py
 """
-Modelli dati condivisi in tutta la pipeline.
+Shared data models for the NL2Scene3D pipeline.
 
-Principi:
-- Ogni dataclass è autosufficiente e serializzabile in JSON.
-- Nessuna dipendenza da bpy o da altri moduli del pacchetto.
-- I calcoli geometrici di base (AABB, OBB) vivono qui, vicino ai dati.
+Design principles:
+  - Every dataclass is self-contained and JSON-serializable.
+  - No dependency on bpy or any other pipeline module.
+  - Basic geometry helpers (AABB, OBB) live alongside their data.
 """
+
 from __future__ import annotations
 
 import copy
@@ -16,82 +17,79 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Alias di compatibilità
-# ---------------------------------------------------------------------------
-# ObjectTransform era il vecchio nome di Transform. L'alias permette ai file
-# non ancora aggiornati di continuare a importarlo senza crash.
-
-
-# ---------------------------------------------------------------------------
-# Trasformazione
+# Transform
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Transform:
     """
-    Trasformazione completa di un oggetto nella scena.
+    Full spatial transform of a scene object.
 
     Attributes:
-        location:       Posizione [x, y, z] dell'origine dell'oggetto in coordinate mondo.
-        rotation_euler: Rotazione [rx, ry, rz] in radianti, ordine XYZ.
-        dimensions:     Dimensioni del bounding box [width, depth, height] in metri.
-        origin_offset:  Offset dell'origine rispetto al centro geometrico in coord. locali,
-                        già scalato per la scala dell'oggetto (in metri).
+        location:      Position [x, y, z] of the object origin in world coordinates.
+        rotation_euler: Rotation [rx, ry, rz] in radians, XYZ order.
+        dimensions:    Bounding-box dimensions [width, depth, height] in meters.
+        origin_offset: Offset of the origin from the geometric center in local
+                       coordinates, pre-scaled by the object scale (meters).
     """
-    location: list[float]
+
+    location:       list[float]
     rotation_euler: list[float]
-    dimensions: list[float]
-    origin_offset: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    dimensions:     list[float]
+    origin_offset:  list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
 
     def __post_init__(self) -> None:
         for attr in ("location", "rotation_euler", "dimensions", "origin_offset"):
             if len(getattr(self, attr)) != 3:
-                raise ValueError(f"'{attr}' deve contenere esattamente 3 valori.")
+                raise ValueError(f"'{attr}' must contain exactly 3 values.")
 
-    # --- Geometry helpers ---
+    # ------------------------------------------------------------------
+    # Geometry helpers
+    # ------------------------------------------------------------------
 
     def geometric_center_xy(self) -> tuple[float, float]:
-        """Centro geometrico reale nel piano XY, tenendo conto dell'offset e della rotazione Z."""
-        rz = self.rotation_euler[2]
+        """
+        Real geometric center in the XY plane, accounting for the origin
+        offset rotated by the current Z rotation.
+        """
+        rz          = self.rotation_euler[2]
         cos_z, sin_z = math.cos(rz), math.sin(rz)
-        off = self.origin_offset
+        off         = self.origin_offset
         world_off_x = off[0] * cos_z - off[1] * sin_z
         world_off_y = off[0] * sin_z + off[1] * cos_z
         return self.location[0] + world_off_x, self.location[1] + world_off_y
 
     def aabb_xy(self, margin: float = 0.0) -> tuple[float, float, float, float]:
         """
-        Axis-Aligned Bounding Box nel piano XY.
+        Axis-Aligned Bounding Box in the XY plane.
 
         Returns:
-            (x_min, x_max, y_min, y_max) — già include il margine richiesto.
+            (x_min, x_max, y_min, y_max) including the requested margin.
         """
-        cx, cy = self.geometric_center_xy()
-        rz = self.rotation_euler[2]
+        cx, cy       = self.geometric_center_xy()
+        rz           = self.rotation_euler[2]
         cos_z, sin_z = abs(math.cos(rz)), abs(math.sin(rz))
-        dim = self.dimensions
+        dim          = self.dimensions
 
-        # Ingombro dell'AABB ruotata
-        eff_x = dim[0] * cos_z + dim[1] * sin_z
-        eff_y = dim[0] * sin_z + dim[1] * cos_z
-
+        eff_x  = dim[0] * cos_z + dim[1] * sin_z
+        eff_y  = dim[0] * sin_z + dim[1] * cos_z
         half_x = eff_x / 2.0 + margin
         half_y = eff_y / 2.0 + margin
+
         return cx - half_x, cx + half_x, cy - half_y, cy + half_y
 
     def obb_corners_xy(self, margin: float = 0.0) -> list[tuple[float, float]]:
         """
-        Quattro angoli dell'Oriented Bounding Box nel piano XY.
-        Usato per il SAT (Separating Axis Theorem).
-        """
-        cx, cy = self.geometric_center_xy()
-        rz = self.rotation_euler[2]
-        cos_z, sin_z = math.cos(rz), math.sin(rz)
-        dim = self.dimensions
+        Four corners of the Oriented Bounding Box in the XY plane.
 
+        Used for the Separating Axis Theorem (SAT) collision check.
+        """
+        cx, cy       = self.geometric_center_xy()
+        rz           = self.rotation_euler[2]
+        cos_z, sin_z = math.cos(rz), math.sin(rz)
+        dim          = self.dimensions
         w = dim[0] / 2.0 + margin
         h = dim[1] / 2.0 + margin
-
         local = [(-w, -h), (w, -h), (w, h), (-w, h)]
         return [
             (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
@@ -99,12 +97,14 @@ class Transform:
         ]
 
     def z_range(self) -> tuple[float, float]:
-        """Range verticale (z_min, z_max) tenendo conto dell'offset Z."""
+        """Vertical extent (z_min, z_max), accounting for the Z origin offset."""
         center_z = self.location[2] + self.origin_offset[2]
-        half_h = self.dimensions[2] / 2.0
+        half_h   = self.dimensions[2] / 2.0
         return center_z - half_h, center_z + half_h
 
-    # --- Serializzazione ---
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
 
     def copy(self) -> "Transform":
         return Transform(
@@ -116,10 +116,10 @@ class Transform:
 
     def to_dict(self) -> dict:
         return {
-            "location": self.location,
+            "location":       self.location,
             "rotation_euler": self.rotation_euler,
-            "dimensions": self.dimensions,
-            "origin_offset": self.origin_offset,
+            "dimensions":     self.dimensions,
+            "origin_offset":  self.origin_offset,
         }
 
     @classmethod
@@ -132,39 +132,36 @@ class Transform:
         )
 
 
-# Alias BC — da rimuovere quando tutti i file usano Transform direttamente
-ObjectTransform = Transform
-
-
 # ---------------------------------------------------------------------------
-# Oggetto scena
+# SceneObject
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SceneObject:
     """
-    Oggetto all'interno della scena 3D.
+    A single object in the 3D scene.
 
     Attributes:
-        name:        Identificatore univoco (nome Blender).
-        object_type: Tipo Blender ('MESH', 'LIGHT', 'CAMERA', …).
-        transform:   Trasformazione corrente.
-        category:    Categoria semantica ('furniture', 'structural', 'decoration', …).
-        is_movable:  Se True, la pipeline può spostarlo.
-        parent:      Nome del parent group (se questo oggetto è un figlio), None altrimenti.
-        children:    Lista dei nomi dei figli diretti (solo per oggetti root).
+        name:        Unique identifier (Blender object name).
+        object_type: Blender type string ('MESH', 'LIGHT', 'CAMERA', ...).
+        transform:   Current spatial transform.
+        category:    Semantic category ('furniture', 'structural', 'decoration', ...).
+        is_movable:  Whether the pipeline is allowed to reposition this object.
+        parent:      Name of the parent group object, or None if this is a root.
+        children:    Names of direct child objects (populated for root objects only).
     """
-    name: str
+
+    name:        str
     object_type: str
-    transform: Transform
-    category: str = "unknown"
-    is_movable: bool = True
-    parent: Optional[str] = None
-    children: list[str] = field(default_factory=list)
+    transform:   Transform
+    category:    str           = "unknown"
+    is_movable:  bool          = True
+    parent:      Optional[str] = None
+    children:    list[str]     = field(default_factory=list)
 
     @property
     def is_root(self) -> bool:
-        """True se l'oggetto non ha un parent (è un oggetto radice)."""
+        """True if the object has no parent."""
         return self.parent is None
 
     @property
@@ -184,16 +181,16 @@ class SceneObject:
 
     def to_dict(self) -> dict:
         return {
-            "name": self.name,
-            "type": self.object_type,
-            "location": self.transform.location,
+            "name":           self.name,
+            "type":           self.object_type,
+            "location":       self.transform.location,
             "rotation_euler": self.transform.rotation_euler,
-            "dimensions": self.transform.dimensions,
-            "origin_offset": self.transform.origin_offset,
-            "category": self.category,
-            "is_movable": self.is_movable,
-            "parent": self.parent,
-            "children": self.children,
+            "dimensions":     self.transform.dimensions,
+            "origin_offset":  self.transform.origin_offset,
+            "category":       self.category,
+            "is_movable":     self.is_movable,
+            "parent":         self.parent,
+            "children":       self.children,
         }
 
     @classmethod
@@ -210,25 +207,26 @@ class SceneObject:
 
 
 # ---------------------------------------------------------------------------
-# Bounds della stanza
+# RoomBounds
 # ---------------------------------------------------------------------------
 
 @dataclass
 class RoomBounds:
     """
-    Limiti spaziali della stanza.
+    Spatial boundaries of the room.
 
     Attributes:
-        x_min, x_max: Range sull'asse X.
-        y_min, y_max: Range sull'asse Y.
-        z_floor:      Quota pavimento (default 0.0).
-        z_ceiling:    Quota soffitto.
+        x_min, x_max: Range on the X axis.
+        y_min, y_max: Range on the Y axis.
+        z_floor:      Floor elevation (default 0.0).
+        z_ceiling:    Ceiling elevation.
     """
-    x_min: float
-    x_max: float
-    y_min: float
-    y_max: float
-    z_floor: float = 0.0
+
+    x_min:     float
+    x_max:     float
+    y_min:     float
+    y_max:     float
+    z_floor:   float = 0.0
     z_ceiling: float = 3.0
 
     @property
@@ -249,14 +247,15 @@ class RoomBounds:
 
     def clamp_location(
         self,
-        location: list[float],
+        location:   list[float],
         dimensions: Optional[list[float]] = None,
-        margin: float = 0.0,
+        margin:     float = 0.0,
     ) -> list[float]:
         """
-        Riporta X e Y all'interno dei bounds.
-        Tiene conto delle dimensioni dell'oggetto e del margine aggiuntivo.
-        La Z non viene mai modificata.
+        Clamps X and Y to keep the object inside the room bounds.
+
+        Takes object dimensions and an additional margin into account.
+        The Z coordinate is never modified.
         """
         off_x = (dimensions[0] / 2.0 if dimensions else 0.0) + margin
         off_y = (dimensions[1] / 2.0 if dimensions else 0.0) + margin
@@ -268,10 +267,10 @@ class RoomBounds:
 
     def contains_aabb(
         self,
-        aabb: tuple[float, float, float, float],
+        aabb:   tuple[float, float, float, float],
         margin: float = 0.0,
     ) -> bool:
-        """True se l'AABB (x_min, x_max, y_min, y_max) è completamente dentro i bounds."""
+        """True if the AABB (x_min, x_max, y_min, y_max) lies fully inside the bounds."""
         return (
             aabb[0] >= self.x_min + margin
             and aabb[1] <= self.x_max - margin
@@ -297,29 +296,32 @@ class RoomBounds:
 
 
 # ---------------------------------------------------------------------------
-# Stato della scena
+# SceneState
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SceneState:
     """
-    Snapshot completo della scena in un momento della pipeline.
+    Complete snapshot of the scene at a given pipeline stage.
 
     Attributes:
-        scene_name:    Nome identificativo della scena.
-        objects:       Lista di tutti gli oggetti (strutturali + mobili).
-        room_bounds:   Limiti spaziali calcolati.
-        pipeline_step: Etichetta dello step ('original', 'randomized', 'reordered', 'refined').
-        metadata:      Dati aggiuntivi liberi (contatori, errori, …).
+        scene_name:    Identifying name for the scene.
+        objects:       All objects (structural + movable).
+        room_bounds:   Computed spatial boundaries.
+        pipeline_step: Step label ('original', 'randomized', 'reordered', 'refined').
+        metadata:      Arbitrary extra data (counters, errors, ...).
     """
-    scene_name: str
-    objects: list[SceneObject]
-    room_bounds: Optional[RoomBounds] = None
-    pipeline_step: str = "unknown"
-    metadata: dict = field(default_factory=dict)
 
-    # Cache interna — non serializzata
-    _cache: dict[str, SceneObject] = field(default_factory=dict, init=False, repr=False)
+    scene_name:    str
+    objects:       list[SceneObject]
+    room_bounds:   Optional[RoomBounds] = None
+    pipeline_step: str                  = "unknown"
+    metadata:      dict                 = field(default_factory=dict)
+
+    # Internal name-to-object cache — not serialized.
+    _cache: dict[str, SceneObject] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._rebuild_cache()
@@ -328,10 +330,6 @@ class SceneState:
         self._cache = {obj.name: obj for obj in self.objects}
 
     def get(self, name: str) -> Optional[SceneObject]:
-        return self._cache.get(name)
-
-    def get_object_by_name(self, name: str) -> Optional[SceneObject]:
-        """Alias di .get() per compatibilità con il codice legacy."""
         return self._cache.get(name)
 
     @property
@@ -344,60 +342,63 @@ class SceneState:
 
     @property
     def root_movable_objects(self) -> list[SceneObject]:
-        """Oggetti movibili che non hanno un parent (le 'radici' dei gruppi)."""
+        """Movable objects that have no parent (group roots)."""
         return [o for o in self.objects if o.is_movable and o.is_root]
 
     def copy(self) -> "SceneState":
-        new_state = SceneState(
+        return SceneState(
             scene_name=self.scene_name,
             objects=[o.copy() for o in self.objects],
             room_bounds=copy.deepcopy(self.room_bounds),
             pipeline_step=self.pipeline_step,
             metadata=copy.deepcopy(self.metadata),
         )
-        return new_state
 
     def to_dict(self) -> dict:
         return {
-            "scene_name": self.scene_name,
+            "scene_name":    self.scene_name,
             "pipeline_step": self.pipeline_step,
-            "room_bounds": self.room_bounds.to_dict() if self.room_bounds else None,
-            "objects": [o.to_dict() for o in self.objects],
-            "metadata": self.metadata,
+            "room_bounds":   self.room_bounds.to_dict() if self.room_bounds else None,
+            "objects":       [o.to_dict() for o in self.objects],
+            "metadata":      self.metadata,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SceneState":
-        state = cls(
+        return cls(
             scene_name=data["scene_name"],
             objects=[SceneObject.from_dict(o) for o in data["objects"]],
-            room_bounds=RoomBounds.from_dict(data["room_bounds"]) if data.get("room_bounds") else None,
+            room_bounds=(
+                RoomBounds.from_dict(data["room_bounds"])
+                if data.get("room_bounds")
+                else None
+            ),
             pipeline_step=data.get("pipeline_step", "unknown"),
             metadata=data.get("metadata", {}),
         )
-        return state
 
 
 # ---------------------------------------------------------------------------
-# Correzione LLM
+# LLMCorrection
 # ---------------------------------------------------------------------------
 
 @dataclass
 class LLMCorrection:
-    """Correzione suggerita dall'LLM Vision per un singolo oggetto."""
-    object_name: str
-    action: str                                    # 'move' | 'rotate' | 'move_and_rotate'
-    new_location: Optional[list[float]] = None
+    """A position or rotation correction suggested by the vision LLM for one object."""
+
+    object_name:       str
+    action:            str                  # 'move' | 'rotate' | 'move_and_rotate'
+    new_location:      Optional[list[float]] = None
     new_rotation_euler: Optional[list[float]] = None
-    reason: str = ""
+    reason:            str                  = ""
 
     def to_dict(self) -> dict:
         return {
-            "object_name": self.object_name,
-            "action": self.action,
-            "new_location": self.new_location,
+            "object_name":       self.object_name,
+            "action":            self.action,
+            "new_location":      self.new_location,
             "new_rotation_euler": self.new_rotation_euler,
-            "reason": self.reason,
+            "reason":            self.reason,
         }
 
     @classmethod

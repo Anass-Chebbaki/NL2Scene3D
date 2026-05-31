@@ -1,24 +1,24 @@
 # nl2scene3d/utils/geometry.py
 """
-Collision detection per la pipeline NL2Scene3D.
+Collision detection for the NL2Scene3D pipeline.
 
-Architettura:
-- I calcoli geometrici base (AABB, OBB corners, z_range) vivono su Transform.
-- Questo modulo si occupa solo di:
-    1. has_collision():      check binario tra un candidato e una lista di oggetti.
-    2. wall_collision():     check separato per i muri (AABB + Z overlap).
-    3. furniture_collision(): check SAT tra OBB per i mobili.
+Architecture:
+  - Basic geometric computations (AABB, OBB corners, z_range) live on Transform.
+  - This module is responsible only for:
+      1. has_collision():         binary check between a candidate and a list of objects.
+      2. wall_collision():        dedicated check for walls (AABB + Z overlap).
+      3. furniture_collision():   SAT check between OBBs for furniture.
 
 Collision margin:
-    Ogni oggetto viene espanso di `margin` metri su tutti i lati prima del check.
-    Questo garantisce che dopo il posizionamento ci siano sempre almeno
-    2×margin cm di spazio tra due oggetti adiacenti, evitando l'intrecciamento
-    visivo anche quando l'LLM o il randomizer li piazza molto vicini.
+  Each object is expanded by `margin` meters on all sides before the check.
+  This guarantees that after placement there is always at least 2 * margin
+  of clearance between adjacent objects, preventing visual interpenetration
+  even when the LLM or randomizer places them very close together.
 
-    Valori consigliati:
-    - Randomizer:     margin = config.collision_margin  (default 0.05m = 5cm)
-    - Post-LLM check: margin = 0.02m (più tollerante, l'LLM ragiona su mobili grandi)
-    - Wall check:     margin = config.wall_margin       (default 0.20m)
+  Recommended values:
+    - Randomizer:       margin = config.collision_margin  (default 0.05 m = 5 cm)
+    - Post-LLM check:   margin = 0.02 m  (more tolerant; the LLM reasons about large furniture)
+    - Wall check:       margin = config.wall_margin       (default 0.20 m)
 """
 from __future__ import annotations
 
@@ -31,16 +31,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Tipi Blender che non partecipano alla collision detection
+# Blender object types that do not participate in collision detection.
 _IGNORED_TYPES = frozenset({"CAMERA", "LIGHT", "EMPTY", "SPEAKER", "ARMATURE", "CURVE"})
 
 
 # ---------------------------------------------------------------------------
-# Utility geometriche base
+# Basic geometry utilities
 # ---------------------------------------------------------------------------
 
 def is_finite_float(val: Any) -> bool:
-    """True se il valore è un float finito (non NaN o inf)."""
+    """Return True if the value is a finite float (not NaN or inf)."""
     try:
         f = float(val)
         return math.isfinite(f)
@@ -49,13 +49,13 @@ def is_finite_float(val: Any) -> bool:
 
 
 def snap_rotation_90(rz: float) -> float:
-    """Snap della rotazione Z a multipli di 90° (0, 90, 180, 270)."""
+    """Snap a Z rotation to the nearest multiple of 90 degrees (0, 90, 180, 270)."""
     multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
     return min(multiples, key=lambda m: abs(m - (rz % (2 * math.pi))))
 
 
 # ---------------------------------------------------------------------------
-# Validazione pavimento
+# Floor validation
 # ---------------------------------------------------------------------------
 
 def object_above_floor(
@@ -64,15 +64,17 @@ def object_above_floor(
     tolerance: float = 0.05,
 ) -> bool:
     """
-    True se l'oggetto è correttamente posizionato sopra (o a livello del) pavimento.
-    Restituisce False se l'oggetto scende sotto il pavimento di più di `tolerance` metri.
+    Return True if the object is correctly positioned at or above the floor.
+
+    Returns False if the object descends more than `tolerance` meters below
+    the floor level.
     """
     z_min, _ = obj.transform.z_range()
     return z_min >= (z_floor - tolerance)
 
 
 # ---------------------------------------------------------------------------
-# Check muri — SAT OBB vs OBB per massima accuratezza
+# Wall collision (SAT OBB vs OBB)
 # ---------------------------------------------------------------------------
 
 def wall_collision(
@@ -81,13 +83,13 @@ def wall_collision(
     wall_margin: float = 0.20,
 ) -> bool:
     """
-    Verifica se il candidato (con margine) penetra un muro fisico.
+    Check whether the candidate (expanded by margin) penetrates a physical wall.
 
-    Usa SAT OBB (non solo AABB) così i mobili ruotati a 45° non fanno
-    falsi negativi contro muri sottili. Il margine wall_margin viene
-    aggiunto intorno al candidato per tenere i mobili distanti dai muri.
+    Uses SAT OBB (not just AABB) so that furniture rotated at 45 degrees does
+    not produce false negatives against thin walls. The wall_margin is added
+    around the candidate to keep furniture away from walls.
 
-    Non controlla porte/finestre/room mesh.
+    Doors, windows, and room meshes are excluded from this check.
     """
     cand_poly = candidate.transform.obb_corners_xy(margin=wall_margin)
     c_z_min, c_z_max = candidate.transform.z_range()
@@ -97,7 +99,7 @@ def wall_collision(
         if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
             continue
 
-        # Z overlap check rapido prima del SAT
+        # Quick Z-overlap check before running SAT.
         w_z_min, w_z_max = wall.transform.z_range()
         z_overlap = max(0.0, min(c_z_max, w_z_max) - max(c_z_min, w_z_min))
         if z_overlap <= 0.01:
@@ -106,7 +108,7 @@ def wall_collision(
         wall_poly = wall.transform.obb_corners_xy(margin=0.0)
         if _sat_overlap(cand_poly, wall_poly):
             logger.debug(
-                "Collisione muro (SAT): '%s' ↔ '%s' (Z overlap: %.3f).",
+                "Wall collision (SAT): '%s' vs '%s' (Z overlap: %.3f).",
                 candidate.name, wall.name, z_overlap,
             )
             return True
@@ -115,14 +117,15 @@ def wall_collision(
 
 
 # ---------------------------------------------------------------------------
-# Check mobili (SAT tra OBB)
+# Furniture collision (SAT OBB vs OBB)
 # ---------------------------------------------------------------------------
 
 def _sat_overlap(
     poly_a: list[tuple[float, float]],
     poly_b: list[tuple[float, float]],
 ) -> bool:
-    """Separating Axis Theorem per due poligoni convessi 2D."""
+    """Separating Axis Theorem for two convex 2D polygons."""
+
     def get_axes(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
         axes = []
         n = len(poly)
@@ -134,7 +137,10 @@ def _sat_overlap(
                 axes.append((-ey / mag, ex / mag))
         return axes
 
-    def project(poly: list[tuple[float, float]], axis: tuple[float, float]) -> tuple[float, float]:
+    def project(
+        poly: list[tuple[float, float]],
+        axis: tuple[float, float],
+    ) -> tuple[float, float]:
         dots = [p[0] * axis[0] + p[1] * axis[1] for p in poly]
         return min(dots), max(dots)
 
@@ -142,8 +148,9 @@ def _sat_overlap(
         mn_a, mx_a = project(poly_a, axis)
         mn_b, mx_b = project(poly_b, axis)
         if mx_a < mn_b or mx_b < mn_a:
-            return False  # Asse separante → nessuna collisione
-    return True  # Nessun asse separante → collisione
+            return False  # Separating axis found: no collision.
+
+    return True  # No separating axis found: collision.
 
 
 def furniture_collision(
@@ -152,14 +159,14 @@ def furniture_collision(
     margin: float = 0.05,
 ) -> bool:
     """
-    Verifica se il candidato si sovrappone a un altro mobile.
+    Check whether the candidate overlaps another piece of furniture.
 
-    Usa SAT su OBB 2D per gestire correttamente oggetti ruotati.
-    Il margin espande ogni OBB di `margin` metri, garantendo spazio fisico
-    tra gli oggetti anche dopo il posizionamento.
+    Uses SAT on 2D OBBs to correctly handle rotated objects. The margin
+    expands each OBB by `margin` meters to guarantee physical clearance
+    between objects after placement.
 
-    La soglia Z è ridotta a 0.01m per catturare anche oggetti quasi complanari
-    (es. tappeto vs sedia, oggetti su tavolo vs bordo tavolo).
+    The Z threshold is reduced to 0.01 m to also catch nearly coplanar
+    objects (e.g. rug vs chair, objects on a table vs table edge).
     """
     cand_poly = candidate.transform.obb_corners_xy(margin=margin)
     cand_z_min, cand_z_max = candidate.transform.z_range()
@@ -167,15 +174,16 @@ def furniture_collision(
     for other in furniture_objects:
         if other.name == candidate.name:
             continue
+
         o_z_min, o_z_max = other.transform.z_range()
         z_overlap = max(0.0, min(cand_z_max, o_z_max) - max(cand_z_min, o_z_min))
-        if z_overlap < 0.01:  # soglia ridotta: 1cm invece di 2cm
+        if z_overlap < 0.01:  # 1 cm threshold instead of 2 cm.
             continue
 
         other_poly = other.transform.obb_corners_xy(margin=margin)
         if _sat_overlap(cand_poly, other_poly):
             logger.debug(
-                "Collisione SAT: '%s' ↔ '%s'.", candidate.name, other.name
+                "SAT collision: '%s' vs '%s'.", candidate.name, other.name
             )
             return True
 
@@ -187,20 +195,21 @@ def check_openings_clearance(
     structural_objects: list["SceneObject"],
 ) -> bool:
     """
-    Verifica se il candidato invade la zona di rispetto/passaggio davanti a porte o finestre.
-    Ritorna True se c'è invasione (collisione con la zona di rispetto).
+    Check whether the candidate invades the clearance zone in front of a door or window.
+
+    Returns True if there is an invasion (collision with the clearance zone).
     """
     for obj in structural_objects:
         name_lower = obj.name.lower()
-        is_door = any(k in name_lower for k in ("door", "porta"))
+        is_door   = any(k in name_lower for k in ("door", "porta"))
         is_window = any(k in name_lower for k in ("window", "finestra"))
 
         if not (is_door or is_window):
             continue
 
-        # Definiamo la profondità di rispetto (clearance depth) su ciascun lato:
-        # Porta: 0.90 metri per passaggio e raggio di apertura
-        # Finestra: 0.50 metri per luce e accesso
+        # Clearance depth on each side:
+        #   Door:   0.90 m for passage and swing radius.
+        #   Window: 0.50 m for light and access.
         clearance_depth = 0.90 if is_door else 0.50
 
         cx, cy = obj.transform.geometric_center_xy()
@@ -208,9 +217,9 @@ def check_openings_clearance(
         cos_z, sin_z = math.cos(rz), math.sin(rz)
         dim = obj.transform.dimensions
 
-        # Estendi la dimensione Y (profondità locale) per includere la clearance su entrambi i lati del pannello
-        w = dim[0] / 2.0  # larghezza strutturale
-        h = dim[1] / 2.0 + clearance_depth  # profondità estesa
+        # Extend local Y (depth) to include clearance on both sides of the panel.
+        w = dim[0] / 2.0                    # structural half-width
+        h = dim[1] / 2.0 + clearance_depth  # extended half-depth
 
         local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
         clearance_poly = [
@@ -218,31 +227,29 @@ def check_openings_clearance(
             for lx, ly in local_corners
         ]
 
-        # L'OBB del candidato (con un margine minimo di tolleranza di 2cm)
+        # Candidate OBB with a minimum 2 cm tolerance margin.
         cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
 
-        # Se c'è overlap nel piano XY
         if _sat_overlap(clearance_poly, cand_poly):
             c_z_min, c_z_max = candidate.transform.z_range()
             o_z_min, o_z_max = obj.transform.z_range()
-            # Z overlap reale tra il candidato e la porta/finestra
             z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
 
             if is_door:
-                # Porta: blocca se c'è reale overlap Z tra il mobile e la porta
-                # (le porte vanno dal pavimento al soffitto, quindi praticamente sempre)
+                # Block if there is real Z overlap between the object and the door.
+                # Doors typically span floor to ceiling, so this fires almost always.
                 if z_overlap > 0.05:
                     logger.debug(
-                        "Collisione porta: '%s' blocca il passaggio di '%s'.",
-                        candidate.name, obj.name
+                        "Door collision: '%s' blocks the passage of '%s'.",
+                        candidate.name, obj.name,
                     )
                     return True
             elif is_window:
-                # Finestra: blocca se il mobile supera la base della finestra
+                # Block if the object rises above the window sill.
                 if c_z_max > o_z_min + 0.10 and z_overlap > 0.05:
                     logger.debug(
-                        "Collisione finestra: '%s' copre la luce di '%s'.",
-                        candidate.name, obj.name
+                        "Window collision: '%s' covers the light of '%s'.",
+                        candidate.name, obj.name,
                     )
                     return True
 
@@ -250,7 +257,7 @@ def check_openings_clearance(
 
 
 # ---------------------------------------------------------------------------
-# Funzione principale
+# Main collision entry point
 # ---------------------------------------------------------------------------
 
 def has_collision(
@@ -259,38 +266,37 @@ def has_collision(
     wall_margin: float = 0.20,
     furniture_margin: float = 0.05,
     check_walls: bool = True,
-    room_bounds: "RoomBounds" | None = None,
+    room_bounds: "RoomBounds | None" = None,
 ) -> bool:
     """
-    Verifica se il candidato ha collisioni con gli oggetti già posizionati.
+    Check whether the candidate collides with any already-placed object.
 
     Args:
-        candidate:         Oggetto da testare.
-        placed_objects:    Oggetti già posizionati (inclusi strutturali e mobili).
-        wall_margin:       Margine minimo dai muri in metri.
-        furniture_margin:  Margine espanso su ogni OBB dei mobili in metri.
-                           Con 0.05m ogni coppia di oggetti avrà ≥10cm di spazio.
-        check_walls:       Se False, salta il check con i muri (utile per decorazioni
-                           da appendere a parete).
-        room_bounds:       RoomBounds opzionale — se passato, controlla anche il
-                           contenimento dell'AABB del candidato nei bounds della stanza.
-                           Questo è il check più affidabile contro i muri (non dipende
-                           dalla presenza di mesh muro fisiche).
+        candidate:        Object to test.
+        placed_objects:   Already placed objects (structural and furniture).
+        wall_margin:      Minimum clearance from walls in meters.
+        furniture_margin: OBB expansion margin for furniture in meters.
+                          With 0.05 m every pair of objects will have >= 10 cm clearance.
+        check_walls:      If False, skip wall checks (useful for wall-mounted decorations).
+        room_bounds:      Optional RoomBounds. When provided, also checks that the
+                          candidate AABB is fully contained within the room bounds.
+                          This is the most reliable wall check as it does not depend
+                          on the presence of physical wall meshes.
 
     Returns:
-        True se c'è almeno una collisione.
+        True if at least one collision is detected.
     """
-    # --- Check contenimento nei bounds della stanza (il più affidabile) ---
+    # Room bounds containment check (most reliable).
     if check_walls and room_bounds is not None:
         c_aabb = candidate.transform.aabb_xy(margin=0.0)
         if not room_bounds.contains_aabb(c_aabb, margin=wall_margin):
             logger.debug(
-                "Fuori bounds: '%s' AABB %s non contenuta in bounds (margin=%.2f).",
+                "Out of bounds: '%s' AABB %s not contained within bounds (margin=%.2f).",
                 candidate.name, c_aabb, wall_margin,
             )
             return True
 
-    walls: list["SceneObject"] = []
+    walls: list["SceneObject"]     = []
     furniture: list["SceneObject"] = []
 
     for obj in placed_objects:
@@ -317,7 +323,7 @@ def has_collision(
 
 
 # ---------------------------------------------------------------------------
-# Utilità per il randomizer e il post-LLM solver
+# Scoring and solver utilities
 # ---------------------------------------------------------------------------
 
 def collision_score(
@@ -326,22 +332,22 @@ def collision_score(
     wall_margin: float = 0.20,
     furniture_margin: float = 0.05,
     check_walls: bool = True,
-    room_bounds: "RoomBounds" | None = None,
+    room_bounds: "RoomBounds | None" = None,
 ) -> float:
     """
-    Restituisce un punteggio di "bontà" della posizione del candidato.
+    Return a "badness" score for the candidate's current position.
 
-    0.0 = nessuna collisione (posizione perfetta).
-    > 0.0 = c'è sovrapposizione; più alto è il valore, peggio è la posizione.
+    0.0   = no collision (perfect placement).
+    > 0.0 = overlap present; higher values indicate worse placement.
 
-    Utile nel randomizer per scegliere la posizione meno problematica quando
-    non si riesce a trovarne una completamente libera entro max_attempts.
+    Useful in the randomizer to choose the least problematic position when
+    a completely collision-free placement cannot be found within max_attempts.
 
-    room_bounds: se passato, aggiunge penalità proporzionale alla distanza fuori dai bounds.
+    If room_bounds is provided, a penalty proportional to the out-of-bounds
+    overflow is added.
     """
-    # 1. Se non ci sono collisioni REALI (utilizzando l'algoritmo SAT esatto),
-    #    restituiamo 0.0. Questo previene falsi positivi dovuti all'approssimazione
-    #    degli AABB per oggetti ruotati.
+    # Return 0.0 immediately if the exact SAT algorithm detects no collision,
+    # preventing false positives from AABB approximations on rotated objects.
     if not has_collision(
         candidate, placed_objects, wall_margin, furniture_margin, check_walls, room_bounds
     ):
@@ -354,17 +360,16 @@ def collision_score(
     c_aabb_furn = candidate.transform.aabb_xy(margin=furniture_margin)
     c_z_min, c_z_max = candidate.transform.z_range()
 
-    # --- Penalità per oggetto fuori dai bounds della stanza ---
+    # Penalty for objects outside the room bounds.
     if check_walls and room_bounds is not None:
         if not room_bounds.contains_aabb(c_aabb_base, margin=wall_margin):
-            # Calcola quanto sporge fuori dai bounds (somma overflow su tutti i lati)
             overflow = (
-                max(0.0, room_bounds.x_min + wall_margin - c_aabb_base[0]) +
-                max(0.0, c_aabb_base[1] - (room_bounds.x_max - wall_margin)) +
-                max(0.0, room_bounds.y_min + wall_margin - c_aabb_base[2]) +
-                max(0.0, c_aabb_base[3] - (room_bounds.y_max - wall_margin))
+                max(0.0, room_bounds.x_min + wall_margin - c_aabb_base[0])
+                + max(0.0, c_aabb_base[1] - (room_bounds.x_max - wall_margin))
+                + max(0.0, room_bounds.y_min + wall_margin - c_aabb_base[2])
+                + max(0.0, c_aabb_base[3] - (room_bounds.y_max - wall_margin))
             )
-            total += 100.0 + overflow * 10.0  # Penalità bloccante proporzionale
+            total += 100.0 + overflow * 10.0  # Proportional blocking penalty.
 
     for obj in placed_objects:
         if obj.name == candidate.name:
@@ -375,7 +380,6 @@ def collision_score(
         o_aabb = obj.transform.aabb_xy(margin=0.0)
         o_z_min, o_z_max = obj.transform.z_range()
 
-        # Z overlap check comune
         z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
         if z_overlap < 0.02:
             continue
@@ -383,8 +387,7 @@ def collision_score(
         if obj.category == "structural" and check_walls:
             name_lower = obj.name.lower()
             if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
-                # Check clearance specifico per porte e finestre in collision_score
-                is_door = any(k in name_lower for k in ("door", "porta"))
+                is_door   = any(k in name_lower for k in ("door", "porta"))
                 is_window = any(k in name_lower for k in ("window", "finestra"))
                 clearance_depth = 0.90 if is_door else 0.50
 
@@ -394,23 +397,26 @@ def collision_score(
                 dim = obj.transform.dimensions
                 w = dim[0] / 2.0
                 h = dim[1] / 2.0 + clearance_depth
+
                 local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
                 clearance_poly = [
                     (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
                     for lx, ly in local_corners
                 ]
-
                 cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
+
                 if _sat_overlap(clearance_poly, cand_poly):
-                    # Usa Z overlap reale invece della soglia fissa c_z_min < 2.0
-                    real_z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
+                    real_z_overlap = max(
+                        0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min)
+                    )
                     if is_door and real_z_overlap > 0.05:
-                        total += 50.0  # Penalità bloccante pesante
+                        total += 50.0  # Heavy blocking penalty for doors.
                     elif is_window and c_z_max > o_z_min + 0.10 and real_z_overlap > 0.05:
-                        total += 25.0  # Penalità finestra
+                        total += 25.0  # Lighter penalty for windows.
                 continue
+
             ratio = aabb_overlap_ratio(c_aabb_wall, o_aabb)
-            total += ratio * 2.0  # I muri pesano il doppio
+            total += ratio * 2.0  # Walls carry double weight.
         else:
             ratio = aabb_overlap_ratio(c_aabb_furn, o_aabb)
             total += ratio
@@ -424,13 +430,13 @@ def penetration_vector(
     margin: float = 0.05,
 ) -> tuple[float, float]:
     """
-    Calcola il vettore di separazione minimo (MTV) tra due oggetti nel piano XY.
+    Compute the Minimum Translation Vector (MTV) between two objects in the XY plane.
 
-    Restituisce (dx, dy) da applicare al candidato per risolvere la sovrapposizione.
-    Se non c'è sovrapposizione, restituisce (0.0, 0.0).
+    Returns (dx, dy) to apply to the candidate to resolve the overlap.
+    Returns (0.0, 0.0) if there is no overlap.
 
-    Utile nel post-LLM solver per spostare intelligentemente gli oggetti
-    che si sovrappongono, invece di usare jitter casuale.
+    Useful in the post-LLM solver to displace overlapping objects intelligently
+    instead of using random jitter.
     """
     c_cx, c_cy = candidate.transform.geometric_center_xy()
     o_cx, o_cy = other.transform.geometric_center_xy()
@@ -442,11 +448,11 @@ def penetration_vector(
     y_overlap = min(c_aabb[3], o_aabb[3]) - max(c_aabb[2], o_aabb[2])
 
     if x_overlap <= 0 or y_overlap <= 0:
-        return 0.0, 0.0  # Nessuna sovrapposizione
+        return 0.0, 0.0  # No overlap.
 
-    # Sposta lungo l'asse con la penetrazione minore (MTV standard)
+    # Push along the axis with the smaller penetration (standard MTV).
     if x_overlap < y_overlap:
-        dx = x_overlap + 0.01  # +1cm di buffer
+        dx = x_overlap + 0.01  # +1 cm buffer.
         return (dx if c_cx > o_cx else -dx), 0.0
     else:
         dy = y_overlap + 0.01
@@ -458,11 +464,11 @@ def aabb_overlap_ratio(
     aabb_b: tuple[float, float, float, float],
 ) -> float:
     """
-    Rapporto di sovrapposizione tra due AABB 2D.
+    Compute the overlap ratio between two 2D AABBs.
 
     Returns:
-        Valore in [0.0, 1.0]. 0.0 = nessuna sovrapposizione.
-        Usa l'area minima al denominatore per proteggere gli oggetti piccoli.
+        Value in [0.0, 1.0]. 0.0 means no overlap.
+        Uses the smaller area as the denominator to protect small objects.
     """
     x_overlap = max(0.0, min(aabb_a[1], aabb_b[1]) - max(aabb_a[0], aabb_b[0]))
     y_overlap = max(0.0, min(aabb_a[3], aabb_b[3]) - max(aabb_a[2], aabb_b[2]))
@@ -482,33 +488,64 @@ def aabb_overlap_ratio(
 
 
 # ---------------------------------------------------------------------------
-# Funzioni di compatibilità con il codice legacy (grouping.py, scene_reorganizer)
+# Shared group geometry helper
 # ---------------------------------------------------------------------------
 
-def compute_aabb_2d(
-    obj: "SceneObject",
-    margin: float = 0.0,
+def group_aabb_xy(
+    orig_parent:   "SceneObject",
+    proposed_loc:  list[float],
+    proposed_rz:   float,
+    orig_children: list["SceneObject"],
+    margin:        float = 0.0,
 ) -> tuple[float, float, float, float]:
-    """Wrapper BC: restituisce l'AABB 2D di un oggetto (x_min, x_max, y_min, y_max)."""
-    return obj.transform.aabb_xy(margin=margin)
+    """
+    Computes the combined XY AABB for a parent+children group at a proposed position.
 
+    Uses each member's actual AABB (including rotation and origin offset) via
+    the Transform class, so the result is always geometrically accurate.
 
-def compute_z_range(obj: "SceneObject") -> tuple[float, float]:
-    """Wrapper BC: restituisce (z_min, z_max) dell'oggetto."""
-    return obj.transform.z_range()
+    Previously duplicated in randomizer.py and scene_reorganizer.py.
+    """
+    from nl2scene3d.models import Transform  # local import to avoid circular dependency
 
+    old_parent_loc = orig_parent.transform.location
+    old_parent_rz  = orig_parent.transform.rotation_euler[2]
+    d_rz           = proposed_rz - old_parent_rz
+    cos_a, sin_a   = math.cos(d_rz), math.sin(d_rz)
 
-def _get_obb_corners(
-    obj: "SceneObject",
-    margin: float = 0.0,
-) -> list[tuple[float, float]]:
-    """Wrapper BC: restituisce i 4 angoli dell'OBB 2D."""
-    return obj.transform.obb_corners_xy(margin=margin)
+    temp_parent_tf = Transform(
+        location=[proposed_loc[0], proposed_loc[1], orig_parent.transform.location[2]],
+        rotation_euler=[
+            orig_parent.transform.rotation_euler[0],
+            orig_parent.transform.rotation_euler[1],
+            proposed_rz,
+        ],
+        dimensions=orig_parent.transform.dimensions,
+        origin_offset=orig_parent.transform.origin_offset,
+    )
+    x_min, x_max, y_min, y_max = temp_parent_tf.aabb_xy(margin=margin)
 
+    for orig_child in orig_children:
+        rel_x  = orig_child.transform.location[0] - old_parent_loc[0]
+        rel_y  = orig_child.transform.location[1] - old_parent_loc[1]
+        new_cx = proposed_loc[0] + rel_x * cos_a - rel_y * sin_a
+        new_cy = proposed_loc[1] + rel_x * sin_a + rel_y * cos_a
+        c_rz   = (orig_child.transform.rotation_euler[2] + d_rz) % (2 * math.pi)
 
-def _check_sat_overlap(
-    poly_a: list[tuple[float, float]],
-    poly_b: list[tuple[float, float]],
-) -> bool:
-    """Wrapper BC: alias di _sat_overlap (stesso algoritmo SAT)."""
-    return _sat_overlap(poly_a, poly_b)
+        temp_child_tf = Transform(
+            location=[new_cx, new_cy, orig_child.transform.location[2]],
+            rotation_euler=[
+                orig_child.transform.rotation_euler[0],
+                orig_child.transform.rotation_euler[1],
+                c_rz,
+            ],
+            dimensions=orig_child.transform.dimensions,
+            origin_offset=orig_child.transform.origin_offset,
+        )
+        cx_min, cx_max, cy_min, cy_max = temp_child_tf.aabb_xy(margin=margin)
+        x_min = min(x_min, cx_min)
+        x_max = max(x_max, cx_max)
+        y_min = min(y_min, cy_min)
+        y_max = max(y_max, cy_max)
+
+    return x_min, x_max, y_min, y_max

@@ -53,7 +53,7 @@ from nl2scene3d.config import get_config, RandomizerConfig
 from nl2scene3d.gemini_client import GeminiClient
 from nl2scene3d.randomizer import SceneRandomizer
 from nl2scene3d.scene_applicator import SceneApplicator
-from nl2scene3d.scene_loader import SceneLoader
+from nl2scene3d.scene_state  import SceneLoader
 from nl2scene3d.scene_reorganizer import SceneReorganizer
 from nl2scene3d.visual_critic import VisualCritic
 from nl2scene3d.metrics import compute_pipeline_metrics

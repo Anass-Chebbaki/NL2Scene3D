@@ -1,14 +1,15 @@
 # nl2scene3d/gemini_client.py
 """
-Client per l'interazione con le API Google Gemini.
+Client for the Google Gemini API.
 
-Gestisce:
-- Chiamate testuali per il riordino della scena
-- Chiamate vision per il feedback visivo
-- Retry automatico con backoff esponenziale
-- Fallback al modello alternativo in caso di errori persistenti
-- Parsing robusto dell'output JSON del modello
+Responsibilities:
+  - Text-only calls for scene reorganization
+  - Vision calls (single or multi-image) for visual feedback
+  - Automatic retry with exponential backoff
+  - Fallback to the secondary model on persistent errors
+  - Robust JSON extraction from raw model output
 """
+
 from __future__ import annotations
 
 import json
@@ -27,274 +28,275 @@ from nl2scene3d.config import GeminiConfig
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
 class GeminiClientError(Exception):
-    """Eccezione base per errori del client Gemini."""
+    """Base exception for Gemini client errors."""
 
 
 class GeminiParsingError(GeminiClientError):
-    """Sollevata quando il parsing della risposta JSON fallisce."""
+    """Raised when the JSON response from the model cannot be parsed."""
 
 
 class GeminiRateLimitError(GeminiClientError):
-    """Sollevata quando il rate limit viene raggiunto in modo persistente."""
+    """Raised when the API rate limit is hit persistently across all retries."""
 
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
 
 class GeminiClient:
     """
-    Client per le chiamate alle API Google Gemini.
+    Wrapper around the Google Gemini API.
 
-    Implementa retry con backoff esponenziale e fallback automatico
-    al modello secondario in caso di errori persistenti sul modello primario.
+    Implements retry with exponential backoff and automatic fallback to the
+    secondary model when the primary model returns persistent errors.
     """
 
     def __init__(self, config: GeminiConfig) -> None:
-        """
-        Inizializza il client e configura la connessione.
-
-        Args:
-            config: Oggetto di configurazione Gemini.
-        """
-        self.config = config
+        self.config  = config
         self._client = genai.Client(
             api_key=config.api_key,
-            http_options={'timeout': config.timeout_seconds * 1000}
+            http_options={"timeout": config.timeout_seconds * 1000},
         )
         logger.info(
-            "GeminiClient inizializzato con successo (timeout: %ds). "
-            "Modello primario: %s, fallback: %s",
+            "GeminiClient initialized. Timeout: %ds. Primary: %s, fallback: %s.",
             config.timeout_seconds,
             config.model_primary,
             config.model_fallback,
         )
 
+    # ------------------------------------------------------------------
+    # JSON extraction
+    # ------------------------------------------------------------------
+
     def _extract_json_from_response(self, text: str) -> dict | list:
         """
-        Estrae e parsa il JSON dalla risposta testuale del modello.
+        Extracts and parses JSON from the raw model response text.
+
+        Tries four strategies in order:
+          1. Direct parse.
+          2. Extract from a markdown code fence (```json ... ```).
+          3. Brute-force: find the outermost { } or [ ] block.
+          4. Repair truncated JSON by appending missing closing brackets.
         """
-        # Pulizia preliminare: rimuove eventuale testo prima del primo { o [
         text = text.strip()
-        
-        logger.debug(f"Raw response from Gemini (first 500 chars):\n{text[:500]}")
-        
-        # Strategia 1: parse diretto
+        logger.debug("Raw Gemini response (first 500 chars):\n%s", text[:500])
+
+        # Strategy 1: direct parse.
         try:
             result = json.loads(text)
-            logger.debug(f"✓ Direct JSON parse successful. Type: {type(result).__name__}")
+            logger.debug("Strategy 1 (direct parse) succeeded. Type: %s.", type(result).__name__)
             return result
-        except json.JSONDecodeError as e:
-            logger.debug(f"Direct JSON parse failed: {e}")
-            pass
+        except json.JSONDecodeError as exc:
+            logger.debug("Strategy 1 failed: %s.", exc)
 
-        # Strategia 2: estrazione di blocchi ```json ... ``` (piu' robusta)
-        json_block_pattern = re.compile(
-            r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE
-        )
-        match = json_block_pattern.search(text)
+        # Strategy 2: markdown code fence.
+        pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+        match   = pattern.search(text)
         if match:
             try:
                 extracted = match.group(1).strip()
-                logger.debug(f"Found JSON block in markdown code fence. Content:\n{extracted[:300]}")
-                result = json.loads(extracted)
-                logger.debug(f"✓ Markdown JSON parse successful. Type: {type(result).__name__}")
+                result    = json.loads(extracted)
+                logger.debug("Strategy 2 (code fence) succeeded. Type: %s.", type(result).__name__)
                 return result
-            except json.JSONDecodeError as e:
-                logger.debug(f"Markdown JSON parse failed: {e}")
-                pass
+            except json.JSONDecodeError as exc:
+                logger.debug("Strategy 2 failed: %s.", exc)
 
-        # Strategia 3: ricerca della struttura più esterna { } o [ ]
-        # Gestisce il caso in cui il modello aggiunge spiegazioni prima o dopo
-        start_idx_dict = text.find('{')
-        start_idx_list = text.find('[')
-        
-        start_idx = -1
-        if start_idx_dict != -1 and (start_idx_list == -1 or start_idx_dict < start_idx_list):
-            start_idx = start_idx_dict
-            end_char = '}'
-        elif start_idx_list != -1:
-            start_idx = start_idx_list
-            end_char = ']'
-            
+        # Strategy 3: brute-force outer bracket search.
+        start_dict = text.find("{")
+        start_list = text.find("[")
+
+        if start_dict != -1 and (start_list == -1 or start_dict < start_list):
+            start_idx, end_char = start_dict, "}"
+        elif start_list != -1:
+            start_idx, end_char = start_list, "]"
+        else:
+            start_idx = -1
+
         if start_idx != -1:
             end_idx = text.rfind(end_char)
             if end_idx > start_idx:
-                json_str = text[start_idx:end_idx + 1]
-                logger.debug(f"Extracted JSON substring (brute force): {json_str[:300]}")
+                json_str = text[start_idx : end_idx + 1]
                 try:
                     result = json.loads(json_str)
-                    logger.debug(f"✓ Brute force JSON parse successful. Type: {type(result).__name__}")
+                    logger.debug("Strategy 3 (brute force) succeeded. Type: %s.", type(result).__name__)
                     return result
-                except json.JSONDecodeError as e:
-                    logger.debug(f"Brute force JSON parse failed: {e}")
-                    # Se fallisce ancora, proviamo a pulire i commenti se presenti
-                    json_str_clean = re.sub(r'//.*?\n|/\*.*?\*/', '', json_str, flags=re.DOTALL)
+                except json.JSONDecodeError:
+                    # Try stripping inline comments before giving up.
+                    clean = re.sub(r"//.*?\n|/\*.*?\*/", "", json_str, flags=re.DOTALL)
                     try:
-                        result = json.loads(json_str_clean)
-                        logger.debug(f"✓ Cleaned JSON parse successful. Type: {type(result).__name__}")
+                        result = json.loads(clean)
+                        logger.debug("Strategy 3 (comment-stripped) succeeded.")
                         return result
-                    except json.JSONDecodeError as e2:
-                        logger.debug(f"Cleaned JSON parse failed: {e2}")
-                        pass
+                    except json.JSONDecodeError as exc:
+                        logger.debug("Strategy 3 failed: %s.", exc)
 
-        # Strategia 4: Se sembra troncato (mancano le chiusure), proviamo a chiuderlo manualmente
+        # Strategy 4: repair truncated JSON.
         if start_idx != -1:
             logger.warning("JSON appears truncated. Attempting automatic closure.")
-            # Conta le parentesi aperte/chiuse
-            open_braces = text.count('{')
-            close_braces = text.count('}')
-            open_brackets = text.count('[')
-            close_brackets = text.count(']')
-            
-            repaired_text = text[start_idx:]
-            if open_brackets > close_brackets:
-                repaired_text += ']' * (open_brackets - close_brackets)
-            if open_braces > close_braces:
-                repaired_text += '}' * (open_braces - close_braces)
-            
-            logger.debug(f"Repaired JSON: {repaired_text[:300]}")
-            try:
-                result = json.loads(repaired_text)
-                logger.debug(f"✓ Repaired JSON parse successful. Type: {type(result).__name__}")
-                return result
-            except json.JSONDecodeError as e:
-                logger.debug(f"Repaired JSON parse failed: {e}")
-                pass
+            open_braces   = text.count("{")
+            close_braces  = text.count("}")
+            open_brackets = text.count("[")
+            close_brackets = text.count("]")
 
-        logger.error(f"FULL GEMINI RESPONSE:\n{text}")
+            repaired = text[start_idx:]
+            if open_brackets > close_brackets:
+                repaired += "]" * (open_brackets - close_brackets)
+            if open_braces > close_braces:
+                repaired += "}" * (open_braces - close_braces)
+
+            try:
+                result = json.loads(repaired)
+                logger.debug("Strategy 4 (repair) succeeded.")
+                return result
+            except json.JSONDecodeError as exc:
+                logger.debug("Strategy 4 failed: %s.", exc)
+
+        logger.error("Full Gemini response:\n%s", text)
         raise GeminiParsingError(
-            "Impossibile estrarre JSON valido dalla risposta del modello. "
-            f"La risposta potrebbe essere stata troncata o contenere errori di sintassi. "
-            f"Anteprima: {text[:200]}..."
+            "Could not extract valid JSON from the model response. "
+            "The response may be truncated or contain syntax errors. "
+            f"Preview: {text[:200]}..."
         )
+
+    # ------------------------------------------------------------------
+    # Retry logic
+    # ------------------------------------------------------------------
 
     def _call_with_retry(
         self,
-        model_name: str,
-        contents: Any,
-        system_prompt: Optional[str] = None,
+        model_name:      str,
+        contents:        Any,
+        system_prompt:   Optional[str]  = None,
         config_override: Optional[dict] = None,
     ) -> str:
         """
-        Esegue una chiamata al modello con retry e backoff esponenziale.
-        
-        Nota: response_mime_type="application/json" potrebbe non essere supportato
-        da tutti i modelli. Se fallisce, ritentiamo senza questo vincolo.
+        Calls the model with automatic retry and exponential backoff.
+
+        On the first attempt, requests JSON MIME type output. If the model
+        does not support it, subsequent attempts omit that constraint.
         """
-        gen_config_dict = {
-            "temperature": self.config.temperature,
+        gen_config_dict: dict = {
+            "temperature":      self.config.temperature,
             "max_output_tokens": self.config.max_output_tokens,
             **(config_override or {}),
         }
-        
-        # Prova con response_mime_type="application/json" solo come primo tentativo
-        use_json_mime = True
-        
-        last_exception: Exception = GeminiClientError("Nessun tentativo eseguito.")
+
+        use_json_mime    = True
+        last_exception: Exception = GeminiClientError("No attempt was executed.")
 
         for attempt in range(self.config.max_retries):
             try:
                 config_dict = gen_config_dict.copy()
-                if use_json_mime and attempt < 1:  # Solo primo tentativo
+                # Request JSON MIME type only on the very first attempt.
+                if use_json_mime and attempt < 1:
                     config_dict["response_mime_type"] = "application/json"
-                
+
                 gen_config = types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     **config_dict,
                 )
-                
                 response = self._client.models.generate_content(
                     model=model_name,
                     contents=contents,
                     config=gen_config,
                 )
                 if not response.text:
-                    raise GeminiParsingError("Risposta del modello vuota.")
+                    raise GeminiParsingError("Empty model response.")
                 return response.text
 
             except Exception as exc:
                 exc_str = str(exc).lower()
-                
-                # Se è un errore "mime type not supported", ritenta senza
+
+                # The model does not support application/json MIME type.
                 if "mime type" in exc_str and use_json_mime and attempt < 1:
                     logger.warning(
-                        "response_mime_type='application/json' non supportato dal modello %s. "
-                        "Ritento senza questo vincolo.",
+                        "response_mime_type='application/json' not supported by %s. Retrying without it.",
                         model_name,
                     )
                     use_json_mime = False
                     continue
-                
-                # 429 (Rate Limit) o 503 (Model Overloaded/Unavailable)
+
+                # Rate limit (429) or quota exhausted.
                 if any(err in exc_str for err in ("429", "quota", "exhausted")):
                     last_exception = exc
-                    # Backoff più aggressivo per la quota: 10, 20, 40 secondi
-                    wait_seconds = 10 * (2 ** attempt)
+                    wait = 10 * (2 ** attempt)
                     logger.warning(
-                        "Quota API esaurita (429). Attesa di %d secondi (tentativo %d/%d).",
-                        wait_seconds,
-                        attempt + 1,
-                        self.config.max_retries,
+                        "API quota exhausted (429). Waiting %ds (attempt %d/%d).",
+                        wait, attempt + 1, self.config.max_retries,
                     )
                     if attempt < self.config.max_retries - 1:
-                        time.sleep(wait_seconds)
+                        time.sleep(wait)
                     else:
-                        raise GeminiRateLimitError(f"Quota esaurita dopo i retry: {exc}") from exc
+                        raise GeminiRateLimitError(
+                            f"Quota exhausted after all retries: {exc}"
+                        ) from exc
+
+                # Service temporarily unavailable (503).
                 elif any(err in exc_str for err in ("503", "unavailable", "demand")):
                     last_exception = exc
-                    wait_seconds = 2 ** (attempt + 1)
+                    wait = 2 ** (attempt + 1)
                     logger.warning(
-                        "API Gemini temporaneamente non disponibile (503, tentativo %d/%d). "
-                        "Attesa di %d secondi.",
-                        attempt + 1,
-                        self.config.max_retries,
-                        wait_seconds,
+                        "Gemini API temporarily unavailable (503, attempt %d/%d). Waiting %ds.",
+                        attempt + 1, self.config.max_retries, wait,
                     )
                     if attempt < self.config.max_retries - 1:
-                        time.sleep(wait_seconds)
-                elif any(err in exc_str for err in ("400", "invalid", "401", "403")):
-                    logger.error("Errore API permanente (Client Error): %s", exc)
-                    raise GeminiClientError(f"Errore API permanente: {exc}") from exc
-                else:
-                    # Altri errori (500, 502, 504 o errori di rete)
-                    last_exception = exc
-                    logger.error("Errore API Gemini imprevisto (tentativo %d/%d): %s", attempt + 1, self.config.max_retries, exc)
-                    if attempt < self.config.max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        # Proviamo comunque il fallback per qualsiasi errore persistente
-                        # che non sia un errore 400 del client.
-                        raise GeminiRateLimitError(f"Errore API persistente: {exc}") from exc
+                        time.sleep(wait)
 
-        raise GeminiClientError(f"Tentativi esauriti. Ultimo errore: {last_exception}")
+                # Permanent client error (400, 401, 403).
+                elif any(err in exc_str for err in ("400", "invalid", "401", "403")):
+                    logger.error("Permanent API client error: %s.", exc)
+                    raise GeminiClientError(f"Permanent API error: {exc}") from exc
+
+                # Any other error (500, 502, 504, network issues).
+                else:
+                    last_exception = exc
+                    logger.error(
+                        "Unexpected Gemini API error (attempt %d/%d): %s.",
+                        attempt + 1, self.config.max_retries, exc,
+                    )
+                    if attempt < self.config.max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        raise GeminiRateLimitError(
+                            f"Persistent API error: {exc}"
+                        ) from exc
+
+        raise GeminiClientError(f"All retries exhausted. Last error: {last_exception}")
+
+    # ------------------------------------------------------------------
+    # Public call methods
+    # ------------------------------------------------------------------
 
     def call_text(
         self,
         system_prompt: str,
-        user_prompt: str,
-        use_fallback: bool = False,
+        user_prompt:   str,
+        use_fallback:  bool = False,
     ) -> dict | list:
         """
-        Esegue una chiamata testuale al modello e restituisce il JSON parsato.
+        Sends a text-only request to Gemini and returns the parsed JSON response.
+
+        Automatically switches to the fallback model on rate-limit errors.
         """
-        model_name = (
-            self.config.model_fallback if use_fallback else self.config.model_primary
-        )
+        model_name = self.config.model_fallback if use_fallback else self.config.model_primary
         logger.info(
-            "Chiamata testuale a Gemini (%s). System prompt length: %d, User prompt length: %d",
-            model_name,
-            len(system_prompt),
-            len(user_prompt),
+            "Text call to Gemini (%s). System prompt: %d chars, user prompt: %d chars.",
+            model_name, len(system_prompt), len(user_prompt),
         )
-        
+
         try:
-            raw_response = self._call_with_retry(
-                model_name=model_name,
-                contents=user_prompt,
-                system_prompt=system_prompt,
+            raw   = self._call_with_retry(model_name, user_prompt, system_prompt=system_prompt)
+            parsed = self._extract_json_from_response(raw)
+            logger.info(
+                "Gemini response parsed. Type: %s, entries: %s.",
+                type(parsed).__name__,
+                len(parsed) if isinstance(parsed, (list, dict)) else "N/A",
             )
-            logger.debug(f"Raw response from model:\n{raw_response[:1000]}")
-            
-            parsed = self._extract_json_from_response(raw_response)
-            logger.info(f"Successfully parsed Gemini response. Type: {type(parsed).__name__}, entries: {len(parsed) if isinstance(parsed, (list, dict)) else 'N/A'}")
             return parsed
         except GeminiRateLimitError:
             if not use_fallback:
@@ -302,46 +304,48 @@ class GeminiClient:
                 return self.call_text(system_prompt, user_prompt, use_fallback=True)
             raise
 
-    def _call_vision_internal(self, model_name: str, contents: list, use_fallback: bool) -> dict | list:
+    def _call_vision_internal(
+        self,
+        model_name:  str,
+        contents:    list,
+        use_fallback: bool,
+    ) -> dict | list:
+        """Shared implementation for single- and multi-image vision calls."""
         try:
-            raw_response = self._call_with_retry(
-                model_name=model_name,
-                contents=contents,
-            )
-            return self._extract_json_from_response(raw_response)
+            raw = self._call_with_retry(model_name, contents)
+            return self._extract_json_from_response(raw)
         except GeminiRateLimitError:
             if not use_fallback:
-                return self._call_vision_internal(self.config.model_fallback, contents, use_fallback=True)
+                return self._call_vision_internal(
+                    self.config.model_fallback, contents, use_fallback=True
+                )
             raise
 
     def call_vision(
         self,
-        image_path: Path,
+        image_path:  Path,
         user_prompt: str,
         use_fallback: bool = False,
     ) -> dict | list:
         """
-        Esegue una chiamata vision al modello con un'immagine allegata.
+        Sends a single-image vision request to Gemini.
+
+        Raises FileNotFoundError if the image does not exist.
         """
         if not image_path.exists():
-            raise FileNotFoundError(
-                f"Immagine per la chiamata vision non trovata: {image_path}"
-            )
+            raise FileNotFoundError(f"Vision image not found: {image_path}")
 
-        model_name = (
-            self.config.model_fallback if use_fallback else self.config.model_primary
-        )
-
-        logger.info("Chiamata vision a Gemini (%s).", model_name)
+        model_name = self.config.model_fallback if use_fallback else self.config.model_primary
+        logger.info("Single-image vision call to Gemini (%s).", model_name)
 
         try:
             import PIL.Image
-            img = PIL.Image.open(image_path)
+            img      = PIL.Image.open(image_path)
             contents = [img, user_prompt]
             return self._call_vision_internal(model_name, contents, use_fallback)
         except Exception as exc:
-            logger.error("Errore nella chiamata vision: %s", exc)
-            raise GeminiClientError(f"Errore vision: {exc}") from exc
+            logger.error("Vision call failed: %s.", exc)
+            raise GeminiClientError(f"Vision error: {exc}") from exc
 
     def call_vision_multi(
         self,
@@ -350,44 +354,30 @@ class GeminiClient:
         use_fallback: bool = False,
     ) -> dict | list:
         """
-        Esegue una chiamata vision al modello con piu' immagini allegate.
-        
-        Ogni immagine viene passata come elemento separato nella lista contents,
-        seguita dal prompt testuale. Questo permette al modello di analizzare
-        viste multiple della stessa scena in un singolo contesto.
+        Sends a multi-image vision request to Gemini.
 
-        Args:
-            image_paths: Lista di percorsi alle immagini da analizzare.
-            user_prompt: Prompt testuale per l'analisi.
-            use_fallback: Se True, usa il modello fallback.
+        All images are included as separate content elements before the text
+        prompt, giving the model a complete multi-view context in one call.
 
-        Returns:
-            Output JSON parsato dal modello.
+        Raises FileNotFoundError if any image does not exist.
         """
         for path in image_paths:
             if not path.exists():
-                raise FileNotFoundError(
-                    f"Immagine per la chiamata vision non trovata: {path}"
-                )
+                raise FileNotFoundError(f"Vision image not found: {path}")
 
-        model_name = (
-            self.config.model_fallback if use_fallback else self.config.model_primary
-        )
-
+        model_name = self.config.model_fallback if use_fallback else self.config.model_primary
         logger.info(
-            "Chiamata vision multi-immagine a Gemini (%s). Immagini: %d.",
-            model_name,
-            len(image_paths),
+            "Multi-image vision call to Gemini (%s). Images: %d.",
+            model_name, len(image_paths),
         )
 
         try:
             import PIL.Image
             contents: list = []
-            for i, path in enumerate(image_paths):
-                img = PIL.Image.open(path)
-                contents.append(img)
+            for path in image_paths:
+                contents.append(PIL.Image.open(path))
             contents.append(user_prompt)
             return self._call_vision_internal(model_name, contents, use_fallback)
         except Exception as exc:
-            logger.error("Errore nella chiamata vision multi: %s", exc)
-            raise GeminiClientError(f"Errore vision multi: {exc}") from exc
+            logger.error("Multi-image vision call failed: %s.", exc)
+            raise GeminiClientError(f"Multi-image vision error: {exc}") from exc

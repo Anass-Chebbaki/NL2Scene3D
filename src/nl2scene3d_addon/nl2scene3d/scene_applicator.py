@@ -1,15 +1,17 @@
 # nl2scene3d/scene_applicator.py
 """
-Applicazione delle trasformazioni a una scena Blender.
+Applies a SceneState to the currently open Blender scene.
 
-Principio fondamentale:
-    Questo modulo applica SOLO location e rotation_euler — nient'altro.
-    La coordinata Z NON viene mai modificata tramite raycast o surface snapping.
-    La Z è responsabilità esclusiva del file .blend originale: se un oggetto
-    fluttua nell'originale, rimane a quella quota in tutta la pipeline.
+Core principle:
+  Only location and rotation_euler are written — nothing else.
+  The Z coordinate is NEVER modified via raycast or surface snapping.
+  Z values are the sole responsibility of the original .blend file:
+  if an object floats in the original, it will keep that elevation
+  throughout the entire pipeline.
 
-Deve essere eseguito all'interno dell'ambiente Python di Blender.
+Must be executed inside the Blender Python environment.
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,62 +24,63 @@ logger = logging.getLogger(__name__)
 
 class SceneApplicator:
     """
-    Applica uno SceneState alla scena attualmente aperta in Blender.
+    Applies a SceneState to the scene currently open in Blender.
 
-    Aggiorna posizioni e rotazioni degli oggetti Blender in base ai valori
-    contenuti nello SceneState, senza aggiungere, rimuovere o far cadere oggetti.
+    Updates positions and rotations of Blender objects to match the values
+    in the SceneState, without adding, removing, or dropping any objects.
 
     Attributes:
-        tolerance: Soglia di differenza minima per applicare una modifica.
+        tolerance: Minimum difference required to actually write a change.
+                   Changes below this threshold are skipped to avoid noise.
     """
 
     def __init__(self, tolerance: float = 0.001) -> None:
         self.tolerance = tolerance
-        logger.info("SceneApplicator inizializzato. Tolerance: %.4f.", tolerance)
+        logger.info("SceneApplicator initialized. Tolerance: %.4f.", tolerance)
 
     def apply_state(self, state: SceneState) -> dict[str, int]:
         """
-        Applica lo SceneState alla scena Blender corrente.
+        Applies the SceneState to the current Blender scene.
 
-        Per ogni oggetto nello SceneState, cerca l'oggetto corrispondente
-        in Blender per nome e ne aggiorna location e rotation_euler.
-        Gli oggetti non movibili e quelli sotto la tolerance vengono saltati.
+        For each object in the SceneState, finds the matching Blender object
+        by name and updates its location and rotation_euler.
 
-        La Z non viene mai modificata: rimane sempre quella dello SceneState
-        (che a sua volta eredita la Z originale del file .blend).
+        Non-movable objects and objects whose delta is below the tolerance
+        threshold are skipped. Z is never independently modified: it is
+        always taken directly from the SceneState (which inherits the
+        original value from the .blend file).
 
         Args:
-            state: SceneState con le nuove trasformazioni.
+            state: SceneState containing the new transforms.
 
         Returns:
-            {'updated': N, 'not_found': N, 'skipped': N}
+            Counters dict: {'updated': N, 'not_found': N, 'skipped': N}.
 
         Raises:
-            ImportError: Se bpy non e' disponibile.
+            ImportError: If bpy is not available (not running inside Blender).
         """
         try:
-            import bpy  # noqa: PLC0415
+            import bpy          # noqa: PLC0415
         except ImportError as exc:
-            raise ImportError("Il modulo 'bpy' richiede l'ambiente Blender.") from exc
+            raise ImportError("The 'bpy' module requires the Blender environment.") from exc
 
         counters: dict[str, int] = {"updated": 0, "not_found": 0, "skipped": 0}
         blender_scene = bpy.context.scene
 
         logger.info(
-            "Applicazione stato '%s' (step: %s, oggetti: %d).",
+            "Applying state '%s' (step: %s, objects: %d).",
             state.scene_name, state.pipeline_step, len(state.objects),
         )
 
-        # Raggruppa gli oggetti in base alla presenza di un parent nativo in Blender
-        # per evitare sfasamenti temporali durante l'aggiornamento delle matrici
-        roots_to_process = []
-        children_to_process = []
+        # Split objects into roots and children to process parent matrices
+        # before their children, avoiding world-space desync.
+        roots_to_process:    list[tuple] = []
+        children_to_process: list[tuple] = []
 
         for scene_obj in state.objects:
             blender_obj = blender_scene.objects.get(scene_obj.name)  # type: ignore[union-attr]
-
             if blender_obj is None:
-                logger.warning("Oggetto '%s' non trovato in Blender. Ignorato.", scene_obj.name)
+                logger.warning("Object '%s' not found in Blender. Skipped.", scene_obj.name)
                 counters["not_found"] += 1
                 continue
 
@@ -91,7 +94,13 @@ class SceneApplicator:
                 children_to_process.append((scene_obj, blender_obj))
 
         def process_object(scene_obj, blender_obj) -> bool:
-            t = scene_obj.transform
+            """
+            Writes location and rotation from the SceneState to the Blender object.
+
+            For objects with a native Blender parent, coordinates are converted
+            from world space to local space. Returns True if any value was written.
+            """
+            t       = scene_obj.transform
             updated = False
 
             # --- Location ---
@@ -102,15 +111,14 @@ class SceneApplicator:
             ]
             if any(abs(t.location[i] - cur_loc[i]) > self.tolerance for i in range(3)):
                 if blender_obj.parent is not None:
-                    # Oggetto con parent nativo: converti world → local
                     try:
-                        import mathutils  # noqa: PLC0415
+                        import mathutils                                  # noqa: PLC0415
                         world_vec = mathutils.Vector(t.location)
                         local_vec = blender_obj.parent.matrix_world.inverted() @ world_vec
                         blender_obj.location.x = local_vec.x
                         blender_obj.location.y = local_vec.y
                         blender_obj.location.z = local_vec.z
-                    except Exception:  # noqa: BLE001
+                    except Exception:                                     # noqa: BLE001
                         blender_obj.location.x = t.location[0]
                         blender_obj.location.y = t.location[1]
                         blender_obj.location.z = t.location[2]
@@ -119,28 +127,29 @@ class SceneApplicator:
                     blender_obj.location.y = t.location[1]
                     blender_obj.location.z = t.location[2]
                 updated = True
-                logger.debug("'%s': location %s → %s.", scene_obj.name, cur_loc, t.location)
+                logger.debug("'%s': location %s -> %s.", scene_obj.name, cur_loc, t.location)
 
             # --- Rotation Euler ---
             cur_rot = [
-                blender_obj.matrix_world.to_euler('XYZ').x,
-                blender_obj.matrix_world.to_euler('XYZ').y,
-                blender_obj.matrix_world.to_euler('XYZ').z,
+                blender_obj.matrix_world.to_euler("XYZ").x,
+                blender_obj.matrix_world.to_euler("XYZ").y,
+                blender_obj.matrix_world.to_euler("XYZ").z,
             ]
             if any(abs(t.rotation_euler[i] - cur_rot[i]) > self.tolerance for i in range(3)):
                 blender_obj.rotation_mode = "XYZ"
                 if blender_obj.parent is not None:
-                    # Oggetto con parent nativo: converti world_rot → local_rot
                     try:
-                        import mathutils  # noqa: PLC0415
-                        world_rot_euler = mathutils.Euler(t.rotation_euler, 'XYZ')
-                        parent_matrix = blender_obj.parent.matrix_world
-                        local_mat = parent_matrix.to_3x3().inverted() @ world_rot_euler.to_matrix()
-                        local_rot_euler = local_mat.to_euler('XYZ')
-                        blender_obj.rotation_euler.x = local_rot_euler.x
-                        blender_obj.rotation_euler.y = local_rot_euler.y
-                        blender_obj.rotation_euler.z = local_rot_euler.z
-                    except Exception:  # noqa: BLE001
+                        import mathutils                                  # noqa: PLC0415
+                        world_rot_euler = mathutils.Euler(t.rotation_euler, "XYZ")
+                        local_mat       = (
+                            blender_obj.parent.matrix_world.to_3x3().inverted()
+                            @ world_rot_euler.to_matrix()
+                        )
+                        local_rot = local_mat.to_euler("XYZ")
+                        blender_obj.rotation_euler.x = local_rot.x
+                        blender_obj.rotation_euler.y = local_rot.y
+                        blender_obj.rotation_euler.z = local_rot.z
+                    except Exception:                                     # noqa: BLE001
                         blender_obj.rotation_euler.x = t.rotation_euler[0]
                         blender_obj.rotation_euler.y = t.rotation_euler[1]
                         blender_obj.rotation_euler.z = t.rotation_euler[2]
@@ -149,52 +158,51 @@ class SceneApplicator:
                     blender_obj.rotation_euler.y = t.rotation_euler[1]
                     blender_obj.rotation_euler.z = t.rotation_euler[2]
                 updated = True
-                logger.debug("'%s': rotation %s → %s.", scene_obj.name, cur_rot, t.rotation_euler)
+                logger.debug("'%s': rotation %s -> %s.", scene_obj.name, cur_rot, t.rotation_euler)
 
             return updated
 
-        # Pass 1: Processa tutti i root nativi di Blender
+        # Pass 1: process all Blender root objects.
         for scene_obj, blender_obj in roots_to_process:
             updated = process_object(scene_obj, blender_obj)
             counters["updated" if updated else "skipped"] += 1
 
-        # Aggiorna la view layer per sincronizzare le matrici del mondo dei parent prima dei figli
+        # Sync world matrices of parents before processing their children.
         try:
-            bpy.context.view_layer.update()  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("view_layer.update() non applicabile in Pass 1: %s", exc)
+            bpy.context.view_layer.update()     # type: ignore[union-attr]
+        except Exception as exc:                # noqa: BLE001
+            logger.debug("view_layer.update() not available after Pass 1: %s.", exc)
 
-        # Pass 2: Processa tutti i figli nativi di Blender
-        # Eseguiamo update() dopo ogni modifica per garantire che se c'è
-        # una gerarchia profonda (nipoti), la matrice del parent sia sempre aggiornata
+        # Pass 2: process children, updating matrices after each write so that
+        # deeper hierarchies (grandchildren) always see the correct parent matrix.
         for scene_obj, blender_obj in children_to_process:
             updated = process_object(scene_obj, blender_obj)
             counters["updated" if updated else "skipped"] += 1
             if updated:
                 try:
-                    bpy.context.view_layer.update()  # type: ignore[union-attr]
+                    bpy.context.view_layer.update()     # type: ignore[union-attr]
                 except Exception:
                     pass
 
-        # Aggiornamento finale
+        # Final sync.
         try:
-            bpy.context.view_layer.update()  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("view_layer.update() finale non applicabile: %s", exc)
+            bpy.context.view_layer.update()     # type: ignore[union-attr]
+        except Exception as exc:                # noqa: BLE001
+            logger.debug("Final view_layer.update() not available: %s.", exc)
 
         logger.info(
-            "Applicazione completata: %d aggiornati, %d non trovati, %d invariati.",
+            "Apply complete: %d updated, %d not found, %d unchanged.",
             counters["updated"], counters["not_found"], counters["skipped"],
         )
         return counters
 
     def save_blend_file(self, output_path: Path) -> None:
-        """Salva la scena Blender corrente in un file .blend."""
+        """Saves the current Blender scene to a .blend file."""
         try:
             import bpy  # noqa: PLC0415
         except ImportError as exc:
-            raise ImportError("Il modulo 'bpy' richiede l'ambiente Blender.") from exc
+            raise ImportError("The 'bpy' module requires the Blender environment.") from exc
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         bpy.ops.wm.save_as_mainfile(filepath=str(output_path))
-        logger.info("Scena Blender salvata: %s", output_path)
+        logger.info("Blender scene saved: %s.", output_path)
