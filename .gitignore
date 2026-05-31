@@ -17,6 +17,14 @@ ENV/
 scenes/outputs/
 scenes/originals/*.blend
 
+# File installazione plugin blender
+addon/*.zip
+src/nl2scene3d_addon/vendor/
+src/nl2scene3d_addon.zip
+
+#structure root 4 debugging
+structure.txt
+
 # Log dell'applicazione
 logs/
 *.log
@@ -64,3 +72,5 @@ desktop.ini
 
 # File di output temporanei del rendering
 /tmp/
+
+opensource_reference/

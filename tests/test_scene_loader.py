@@ -12,101 +12,113 @@ import json
 import math
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nl2scene3d.models import ObjectTransform, RoomBounds, SceneObject, SceneState
+from nl2scene3d.config import PipelineConfig
 from nl2scene3d.scene_loader import (
-    MIN_OBJECT_DIMENSION,
-    NON_MESH_TYPES,
-    STRUCTURAL_NAME_PATTERNS,
     SceneLoader,
-    _classify_object,
     extract_room_bounds_from_objects,
 )
 
 class TestClassifyObject:
     """Test per la funzione di classificazione degli oggetti."""
 
-    def test_camera_is_not_movable(self) -> None:
+    @pytest.fixture
+    def loader(self) -> SceneLoader:
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=Path("outputs"),
+            max_movable_objects=20,
+            randomizer_seed=42,
+            min_object_dimension=0.05,
+            non_mesh_types=frozenset(["CAMERA", "LIGHT", "SPEAKER", "ARMATURE", "EMPTY", "CURVE"]),
+            structural_patterns=["wall", "floor", "ceiling", "room", "door", "window"],
+            ceiling_light_patterns=["ceiling", "pendant", "chandelier"]
+        )
+        return SceneLoader(config)
+
+    def test_camera_is_not_movable(self, loader: SceneLoader) -> None:
         """Le camere non devono essere movibili."""
-        category, is_movable = _classify_object("Camera", "CAMERA", [0.1, 0.1, 0.1])
+        category, is_movable = loader._classify_object("Camera", "CAMERA", [0.1, 0.1, 0.1])
         assert is_movable is False
         assert category == "technical"
 
-    def test_light_is_not_movable(self) -> None:
+    def test_light_is_not_movable(self, loader: SceneLoader) -> None:
         """Le luci sono di tipo tecnico e non movibili."""
-        category, is_movable = _classify_object("Sun", "LIGHT", [0.0, 0.0, 0.0])
+        category, is_movable = loader._classify_object("Sun", "LIGHT", [0.0, 0.0, 0.0])
         assert is_movable is False
         assert category == "technical"
 
-    def test_wall_is_structural(self) -> None:
+    def test_wall_is_structural(self, loader: SceneLoader) -> None:
         """I muri devono essere classificati come strutturali e non movibili."""
-        category, is_movable = _classify_object("wall_north", "MESH", [5.0, 0.2, 3.0])
+        category, is_movable = loader._classify_object("wall_north", "MESH", [5.0, 0.2, 3.0])
         assert category == "structural"
         assert is_movable is False
 
-    def test_floor_is_structural(self) -> None:
+    def test_floor_is_structural(self, loader: SceneLoader) -> None:
         """Il pavimento deve essere classificato come strutturale."""
-        category, is_movable = _classify_object("Floor", "MESH", [6.0, 5.0, 0.05])
+        category, is_movable = loader._classify_object("Floor", "MESH", [6.0, 5.0, 0.05])
         assert category == "structural"
         assert is_movable is False
 
-    def test_sofa_is_movable(self) -> None:
+    def test_sofa_is_movable(self, loader: SceneLoader) -> None:
         """Il divano deve essere movibile e classificato come seating_large."""
-        category, is_movable = _classify_object("sofa_01", "MESH", [2.0, 0.8, 0.9])
+        category, is_movable = loader._classify_object("sofa_01", "MESH", [2.0, 0.8, 0.9])
         assert category == "seating_large"
         assert is_movable is True
 
-    def test_chair_is_movable(self) -> None:
+    def test_chair_is_movable(self, loader: SceneLoader) -> None:
         """La sedia deve essere movibile."""
-        category, is_movable = _classify_object("chair_arm", "MESH", [0.6, 0.6, 0.9])
+        category, is_movable = loader._classify_object("chair_arm", "MESH", [0.6, 0.6, 0.9])
         assert category == "seating_small"
         assert is_movable is True
 
-    def test_table_is_movable(self) -> None:
+    def test_table_is_movable(self, loader: SceneLoader) -> None:
         """Il tavolo deve essere movibile."""
-        category, is_movable = _classify_object("dining_table", "MESH", [1.5, 0.9, 0.75])
+        category, is_movable = loader._classify_object("dining_table", "MESH", [1.5, 0.9, 0.75])
         assert category == "table"
         assert is_movable is True
 
-    def test_ceiling_lamp_is_not_movable(self) -> None:
+    def test_ceiling_lamp_is_not_movable(self, loader: SceneLoader) -> None:
         """Le lampade da soffitto non devono essere movibili."""
-        category, is_movable = _classify_object(
+        category, is_movable = loader._classify_object(
             "ceiling_lamp_pendant", "MESH", [0.3, 0.3, 0.5]
         )
         assert is_movable is False
         assert category == "light_ceiling"
 
-    def test_floor_lamp_is_movable(self) -> None:
+    def test_floor_lamp_is_movable(self, loader: SceneLoader) -> None:
         """Le lampade da terra devono essere movibili."""
-        category, is_movable = _classify_object(
+        category, is_movable = loader._classify_object(
             "floor_lamp_stand", "MESH", [0.3, 0.3, 1.6]
         )
         assert category == "light_floor"
         assert is_movable is True
 
-    def test_tiny_object_is_not_movable(self) -> None:
+    def test_tiny_object_is_not_movable(self, loader: SceneLoader) -> None:
         """Oggetti troppo piccoli non devono essere movibili."""
-        small_dim = MIN_OBJECT_DIMENSION / 2
-        category, is_movable = _classify_object(
+        small_dim = loader.config.min_object_dimension / 2
+        category, is_movable = loader._classify_object(
             "screw_01", "MESH", [small_dim, small_dim, small_dim]
         )
         assert is_movable is False
         assert category == "decoration_small"
 
-    def test_unknown_mesh_is_furniture(self) -> None:
+    def test_unknown_mesh_is_furniture(self, loader: SceneLoader) -> None:
         """Oggetti MESH non riconosciuti vengono classificati come furniture."""
-        category, is_movable = _classify_object(
+        category, is_movable = loader._classify_object(
             "object_xyz_42", "MESH", [1.0, 1.0, 1.0]
         )
         assert category == "furniture"
         assert is_movable is True
 
-    def test_classification_is_case_insensitive(self) -> None:
+    def test_classification_is_case_insensitive(self, loader: SceneLoader) -> None:
         """La classificazione deve essere case-insensitive."""
-        cat1, mov1 = _classify_object("WALL_SOUTH", "MESH", [5.0, 0.2, 3.0])
-        cat2, mov2 = _classify_object("Wall_South", "MESH", [5.0, 0.2, 3.0])
+        cat1, mov1 = loader._classify_object("WALL_SOUTH", "MESH", [5.0, 0.2, 3.0])
+        cat2, mov2 = loader._classify_object("Wall_South", "MESH", [5.0, 0.2, 3.0])
         assert cat1 == cat2 == "structural"
         assert mov1 == mov2 is False
 
@@ -151,6 +163,33 @@ class TestExtractRoomBounds:
         assert bounds.y_max >= 3.0
         assert bounds.y_min <= -3.0
 
+    def test_bounds_main_room_strategy(self) -> None:
+        """Verifica la strategia dell'oggetto stanza principale (Bug 1.3/2.2)."""
+        objects = [
+            self._make_obj("room_mesh", [0.0, 0.0, 1.5], [10.0, 8.0, 3.0]),
+            self._make_obj("small_decor", [0.0, 0.0, 0.0], [0.1, 0.1, 0.1], is_movable=True),
+        ]
+        bounds = extract_room_bounds_from_objects(objects)
+        assert bounds.x_min == -5.0
+        assert bounds.x_max == 5.0
+        assert bounds.y_min == -4.0
+        assert bounds.y_max == 4.0
+
+    def test_bounds_no_structural_objects(self) -> None:
+        """Verifica il fallback se non ci sono oggetti strutturali."""
+        objects = [
+            self._make_obj("sofa", [0.0, 0.0, 0.0], [2.0, 1.0, 1.0], is_movable=True),
+        ]
+        bounds = extract_room_bounds_from_objects(objects)
+        assert bounds.x_min == -1.0
+        assert bounds.x_max == 1.0
+
+    def test_bounds_empty_scene(self) -> None:
+        """Verifica bounds di default per scena vuota."""
+        bounds = extract_room_bounds_from_objects([])
+        assert bounds.x_min == -5.0
+        assert bounds.z_ceiling == 3.0
+
 class TestSceneLoaderJsonIO:
     """Test per le operazioni di I/O JSON dello SceneLoader."""
 
@@ -188,7 +227,13 @@ class TestSceneLoaderJsonIO:
 
     def test_save_and_load_roundtrip(self, tmp_path: Path) -> None:
         """Verifica che save + load riproduca lo stato originale."""
-        loader = SceneLoader()
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=tmp_path,
+            max_movable_objects=20,
+            randomizer_seed=42
+        )
+        loader = SceneLoader(config)
         state = self._make_sample_state()
 
         json_path = tmp_path / "test_state.json"
@@ -216,7 +261,13 @@ class TestSceneLoaderJsonIO:
 
     def test_saved_json_is_valid(self, tmp_path: Path) -> None:
         """Il JSON salvato deve essere leggibile e avere la struttura corretta."""
-        loader = SceneLoader()
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=tmp_path,
+            max_movable_objects=20,
+            randomizer_seed=42
+        )
+        loader = SceneLoader(config)
         state = self._make_sample_state()
 
         json_path = tmp_path / "valid_json.json"
@@ -233,7 +284,13 @@ class TestSceneLoaderJsonIO:
 
     def test_output_directory_created_automatically(self, tmp_path: Path) -> None:
         """La directory di output deve essere creata automaticamente se mancante."""
-        loader = SceneLoader()
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=tmp_path,
+            max_movable_objects=20,
+            randomizer_seed=42
+        )
+        loader = SceneLoader(config)
         state = self._make_sample_state()
 
         nested_path = tmp_path / "deep" / "nested" / "dir" / "state.json"
@@ -241,3 +298,66 @@ class TestSceneLoaderJsonIO:
 
         loader.save_state_to_json(state, nested_path)
         assert nested_path.exists()
+
+class TestSceneLoaderExtraction:
+    """Test per l'estrazione dello stato tramite bpy mocks."""
+
+    def test_extract_scene_state(self) -> None:
+        """Verifica l'estrazione dello stato da oggetti Blender mockati."""
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=Path("outputs"),
+            max_movable_objects=2,
+            randomizer_seed=42
+        )
+        loader = SceneLoader(config)
+        
+        mock_bpy = MagicMock()
+        mock_obj = MagicMock()
+        mock_obj.name = "test_chair"
+        mock_obj.type = "MESH"
+        mock_obj.location = MagicMock(x=1.0, y=2.0, z=0.0)
+        mock_obj.rotation_euler = MagicMock(x=0.0, y=0.0, z=0.0)
+        mock_obj.dimensions = MagicMock(x=0.5, y=0.5, z=0.9)
+        
+        mock_bpy.context.scene.objects = [mock_obj]
+        mock_bpy.context.scene.name = "Scene"
+        
+        with patch.dict("sys.modules", {"bpy": mock_bpy}):
+            state = loader.extract_scene_state()
+            assert state.scene_name == "Scene"
+            assert len(state.objects) == 1
+            assert state.objects[0].name == "test_chair"
+            assert state.objects[0].is_movable is True
+
+    def test_extract_scene_state_movable_limit(self) -> None:
+        """Verifica il rispetto del limite massimo di oggetti movibili."""
+        config = PipelineConfig(
+            scenes_dir=Path("scenes"),
+            outputs_dir=Path("outputs"),
+            max_movable_objects=1,
+            randomizer_seed=42
+        )
+        loader = SceneLoader(config)
+        
+        mock_bpy = MagicMock()
+        mock_obj1 = MagicMock(name="Chair1")
+        mock_obj1.name = "Chair1"
+        mock_obj1.type = "MESH"
+        mock_obj1.location = MagicMock(x=1.0, y=1.0, z=0.0)
+        mock_obj1.rotation_euler = MagicMock(x=0.0, y=0.0, z=0.0)
+        mock_obj1.dimensions = MagicMock(x=1, y=1, z=1)
+        
+        mock_obj2 = MagicMock(name="Chair2")
+        mock_obj2.name = "Chair2"
+        mock_obj2.type = "MESH"
+        mock_obj2.location = MagicMock(x=2.0, y=2.0, z=0.0)
+        mock_obj2.rotation_euler = MagicMock(x=0.0, y=0.0, z=0.0)
+        mock_obj2.dimensions = MagicMock(x=1, y=1, z=1)
+        
+        mock_bpy.context.scene.objects = [mock_obj1, mock_obj2]
+        
+        with patch.dict("sys.modules", {"bpy": mock_bpy}):
+            state = loader.extract_scene_state()
+            movable = [o for o in state.objects if o.is_movable]
+            assert len(movable) == 1

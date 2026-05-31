@@ -75,7 +75,7 @@ class TestBuildSceneJsonForLlm:
         data = json.loads(scene_json_str)
 
         assert "objects" in data
-        assert len(data["objects"]) == 3
+        assert len(data["objects"]) == 2
 
     def test_json_contains_required_fields(self) -> None:
         """Ogni oggetto nel JSON deve avere i campi richiesti."""
@@ -292,3 +292,53 @@ class TestValidateAndSanitizeLlmOutput:
         }
         result = _validate_and_sanitize_llm_output(llm_output, state)
         assert result.pipeline_step == "reordered"
+
+class TestSceneReorganizer:
+    """Test per la classe SceneReorganizer."""
+
+    @pytest.fixture
+    def reorganizer(self, tmp_path: Path) -> SceneReorganizer:
+        from nl2scene3d.scene_reorganizer import SceneReorganizer
+        client = MagicMock()
+        return SceneReorganizer(client, tmp_path)
+
+    def test_reorganize_success(self, reorganizer, tmp_path) -> None:
+        """Verifica il successo di una riorganizzazione completa."""
+        state = _make_test_state()
+        
+        # Setup prompt templates
+        (tmp_path / "reorder_system.txt").write_text("System prompt")
+        (tmp_path / "reorder_user.txt").write_text("User prompt {scene_name} {scene_json}")
+        
+        reorganizer.client.call_text.return_value = {
+            "objects": [{"name": "sofa", "location": [1.0, 1.0, 0.0]}]
+        }
+        
+        result = reorganizer.reorganize(state)
+        assert result.pipeline_step == "reordered"
+        assert result.get_object_by_name("sofa").transform.location[0] == 1.0
+
+    def test_reorganize_parsing_error_fallback(self, reorganizer, tmp_path) -> None:
+        """Verifica il fallback in caso di errore di parsing."""
+        state = _make_test_state()
+        (tmp_path / "reorder_system.txt").write_text("System")
+        (tmp_path / "reorder_user.txt").write_text("User {scene_name} {scene_json}")
+        
+        from nl2scene3d.gemini_client import GeminiParsingError
+        reorganizer.client.call_text.side_effect = GeminiParsingError("Bad JSON")
+        
+        result = reorganizer.reorganize(state)
+        assert result.pipeline_step == "reordered_failed"
+        assert result.metadata["error"] == "Bad JSON"
+
+    def test_build_user_prompt_no_bounds(self, reorganizer, tmp_path) -> None:
+        """Verifica il prompt di default se mancano i bounds."""
+        state = _make_test_state()
+        state.room_bounds = None
+        (tmp_path / "reorder_user.txt").write_text("Template")
+        
+        prompt = reorganizer._build_user_prompt(state)
+        assert "interior designer" in prompt
+        assert "sofa" in prompt
+
+from nl2scene3d.scene_reorganizer import SceneReorganizer

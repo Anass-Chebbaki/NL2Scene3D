@@ -122,6 +122,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+from typing import Callable
+
 def run_single_scene(
     blend_path: Path,
     output_dir: Path,
@@ -129,7 +131,7 @@ def run_single_scene(
     skip_vision: bool,
     max_objects: int,
     log_level: str,
-    run_pipeline_fn: object,
+    run_pipeline_fn: Callable[[argparse.Namespace], None],
 ) -> dict:
     """
     Lancia la pipeline per una singola scena .blend.
@@ -153,20 +155,10 @@ def run_single_scene(
     logger.info("Avvio elaborazione per scena: %s", scene_name)
 
     try:
-        try:
-            import bpy  # noqa: PLC0415
-            bpy.ops.wm.open_mainfile(filepath=str(blend_path))
-        except Exception as exc:
-            logger.error(
-                "Impossibile aprire il file .blend '%s': %s", blend_path, exc
-            )
-            raise RuntimeError(
-                f"Errore nell'apertura del file Blender: {exc}"
-            ) from exc
-
         mock_args = argparse.Namespace(
             scene_name=scene_name,
             output_dir=output_dir,
+            blend_file=blend_path,
             prompts_dir=None,
             seed=seed,
             skip_vision=skip_vision,
@@ -209,13 +201,13 @@ def main() -> None:
 
     args = parse_args()
 
-    log_level = args.log_level or app_config.logging.level
+    log_level = args.log_level or "INFO"
     setup_logging(level=log_level, logger_name="nl2scene3d.batch")
 
     scenes_dir: Path = args.scenes_dir or app_config.pipeline.scenes_dir
     outputs_dir: Path = args.outputs_dir or app_config.pipeline.outputs_dir
     seed: int = (
-        args.seed if args.seed is not None else app_config.pipeline.randomizer_seed
+        args.seed if args.seed is not None else app_config.randomizer.seed
     )
     max_objects: int = (
         args.max_objects

@@ -12,13 +12,28 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "NL2Scene3D Team" }]
 dependencies = [
-    "google-generativeai>=0.8.0",
+    "google-genai>=1.0.0",
     "google-api-core>=2.15.0",
     "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-core>=2.0.0",
+    "cryptography>=41.0.0",
+    "cffi>=1.15.0",
+    "requests>=2.31.0",
+    "PySide6>=6.6.0",
+    "PySide6-Essentials>=6.6.0",
+    "PySide6-Addons>=6.6.0",
+    "Pillow>=10.0.0",
+    "packaging>=23.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    "tomli-w>=1.0.0",
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PySide6>=6.6.0",
+    "Pillow>=10.0.0",
+]
 dev = [
     "black>=24.0.0",
     "ruff>=0.4.0",
@@ -61,3 +76,11 @@ addopts = "--cov=src/nl2scene3d --cov-report=term-missing"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nl2scene3d"]
+
+[tool.pyrefly]
+# Pyrefly deve cercare nl2scene3d in src/ (package installabile)
+# e src/nl2scene3d_addon/ (package Blender).
+search_path = [
+    "src/nl2scene3d_addon",
+    "src",
+]

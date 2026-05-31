@@ -1,4 +1,4 @@
-# src/nl2scene3d/metrics.py
+# nl2scene3d/metrics.py
 """
 Calcolo delle metriche di valutazione qualitativa della pipeline.
 
@@ -208,11 +208,18 @@ def compute_metrics(
     mean_rot_delta = sum(rotation_deltas) / len(rotation_deltas)
 
     improvement_score: float | None = None
-    if disordered_deltas and len(disordered_deltas) == len(position_deltas):
-        mean_dis_delta = sum(disordered_deltas) / len(disordered_deltas)
-        if mean_dis_delta > 0.0:
-            raw_score = 1.0 - (mean_pos_delta / mean_dis_delta)
-            improvement_score = max(0.0, min(1.0, raw_score))
+    if disordered_deltas:
+        if len(disordered_deltas) == len(position_deltas):
+            mean_dis_delta = sum(disordered_deltas) / len(disordered_deltas)
+            if mean_dis_delta > 0.0:
+                raw_score = 1.0 - (mean_pos_delta / mean_dis_delta)
+                improvement_score = max(0.0, min(1.0, raw_score))
+        else:
+            logger.warning(
+                "Impossibile calcolare improvement_score: numero di oggetti "
+                "nel disordered_state (%d) diverso dal reference_state (%d).",
+                len(disordered_deltas), len(position_deltas)
+            )
 
     metrics = SceneMetrics(
         scene_name=evaluated_state.scene_name,

@@ -46,11 +46,12 @@ def test_env_override() -> None:
         "pipeline": {"max_movable_objects": 10}
     }
     
-    with patch.dict(os.environ, {"GEMINI_MODEL_PRIMARY": "from-env"}):
-        config = AppConfig.from_dict(toml_data)
-        assert config.gemini.model_primary == "from-env"
-        # Questo non e' in env, quindi deve venire dal toml
-        assert config.pipeline.max_movable_objects == 10
+    with patch("os.environ", {}):
+        with patch.dict(os.environ, {"GEMINI_MODEL_PRIMARY": "from-env", "GEMINI_API_KEY": "dummy"}):
+            config = AppConfig.from_dict(toml_data)
+            assert config.gemini.model_primary == "from-env"
+            # Questo non e' in env, quindi deve venire dal toml
+            assert config.pipeline.max_movable_objects == 10
 
 def test_toml_loading() -> None:
     """Verifica il caricamento del file TOML (Bug 2.1)."""
