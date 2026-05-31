@@ -374,6 +374,81 @@ def _group_penetration_vector(
     return best_dx, best_dy
 
 
+def _find_free_group_position(
+    orig_obj: SceneObject,
+    obj: SceneObject,
+    current_children: list[SceneObject],
+    collidable: list[SceneObject],
+    room_bounds: RoomBounds,
+    by_name_orig: dict[str, SceneObject],
+    corrected: dict[str, SceneObject],
+) -> bool:
+    """
+    Cerca su una griglia una posizione libera per l'intero gruppo (parent+figli)
+    quando l'MTV non riesce a separarlo. Scansiona la stanza con passo decrescente
+    e si ferma alla prima posizione senza collisioni. Aggiorna obj e i figli in
+    `corrected` in-place. Restituisce True se ha trovato una posizione libera.
+    """
+    rz = obj.transform.rotation_euler[2]
+    z_lock = obj.transform.location[2]
+
+    # AABB del gruppo nella posizione attuale -> half-extents per restare nei bounds
+    gx_min, gx_max, gy_min, gy_max = _group_aabb_xy(obj, obj.transform.location, rz, current_children, margin=0.0)
+    half_w = (gx_max - gx_min) / 2.0
+    half_d = (gy_max - gy_min) / 2.0
+    cx_now = obj.transform.location[0]
+    cy_now = obj.transform.location[1]
+
+    wm = REORDER_WALL_MARGIN
+    x_lo = room_bounds.x_min + wm + half_w
+    x_hi = room_bounds.x_max - wm - half_w
+    y_lo = room_bounds.y_min + wm + half_d
+    y_hi = room_bounds.y_max - wm - half_d
+    if x_hi <= x_lo or y_hi <= y_lo:
+        return False  # gruppo troppo grande per la stanza
+
+    def _try(cx: float, cy: float) -> bool:
+        test = obj.copy()
+        test.transform.location = [cx, cy, z_lock]
+        test_children = [
+            _apply_rigid_child_transform(
+                by_name_orig[c],
+                old_parent_loc=orig_obj.transform.location,
+                old_parent_rz=orig_obj.transform.rotation_euler[2],
+                new_parent_loc=[cx, cy, z_lock],
+                new_parent_rz=rz,
+            )
+            for c in orig_obj.children if c in by_name_orig
+        ]
+        if _group_has_collision(test, test_children, collidable, wall_margin=wm, furniture_margin=0.02, room_bounds=room_bounds):
+            return False
+        # Posizione libera: applica
+        obj.transform.location = [cx, cy, z_lock]
+        for c in orig_obj.children:
+            if c in by_name_orig:
+                corrected[c] = _apply_rigid_child_transform(
+                    by_name_orig[c],
+                    old_parent_loc=orig_obj.transform.location,
+                    old_parent_rz=orig_obj.transform.rotation_euler[2],
+                    new_parent_loc=[cx, cy, z_lock],
+                    new_parent_rz=rz,
+                )
+        return True
+
+    # Griglia a risoluzione crescente; prova prima i punti piu' vicini a dov'e' ora
+    for steps in (5, 9, 15):
+        xs = [x_lo + (x_hi - x_lo) * k / (steps - 1) for k in range(steps)]
+        ys = [y_lo + (y_hi - y_lo) * k / (steps - 1) for k in range(steps)]
+        candidates = sorted(
+            ((x, y) for x in xs for y in ys),
+            key=lambda p: (p[0] - cx_now) ** 2 + (p[1] - cy_now) ** 2,
+        )
+        for cx, cy in candidates:
+            if _try(cx, cy):
+                return True
+    return False
+
+
 def _validate_and_sanitize_llm_output(
     llm_output: dict | list,
     original_state: SceneState,
@@ -599,7 +674,7 @@ def _validate_and_sanitize_llm_output(
                 o for o in final_list
                 if o.category in main_cats or not o.is_movable
             ]
-            max_iter = 20
+            max_iter = 60
             # Figli correnti del candidato (già spostati rigidamente dopo il LLM)
             current_children = [corrected[c] for c in orig_obj.children if c in corrected]
 
@@ -646,10 +721,25 @@ def _validate_and_sanitize_llm_output(
                 if not moved:
                     break
             else:
-                jitter_failed += 1
-                logger.warning(
-                    "Collisione irrisolvibile per '%s' dopo %d iterazioni.", obj.name, max_iter
-                )
+                # MTV non e' riuscito a separare il gruppo: cerca una posizione
+                # libera nella stanza (come fa il randomizer) invece di lasciare
+                # il gruppo sovrapposto (es. scrivania sopra il letto).
+                relocated = False
+                if room_bounds is not None:
+                    relocated = _find_free_group_position(
+                        orig_obj, obj, current_children, collidable,
+                        room_bounds, by_name_orig, corrected,
+                    )
+                if relocated:
+                    jitter_resolved += 1
+                    current_children = [corrected[c] for c in orig_obj.children if c in corrected]
+                    logger.info("Gruppo '%s' rilocato in posizione libera (MTV fallito).", obj.name)
+                else:
+                    jitter_failed += 1
+                    logger.warning(
+                        "Collisione irrisolvibile per '%s' dopo %d iterazioni (nessuna posizione libera).",
+                        obj.name, max_iter,
+                    )
 
             if not _group_has_collision(obj, current_children, collidable, wall_margin=REORDER_WALL_MARGIN, furniture_margin=0.02, room_bounds=room_bounds):
                 if i > 0:
