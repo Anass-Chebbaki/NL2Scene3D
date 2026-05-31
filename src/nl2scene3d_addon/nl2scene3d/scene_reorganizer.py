@@ -32,6 +32,16 @@ from nl2scene3d.models import SceneObject, SceneState, Transform, RoomBounds
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Margine dai muri per il reorder.
+# DEVE essere uguale al randomizer (RandomizerConfig.wall_margin = 0.20):
+# i room_bounds arrivano alla faccia ESTERNA dei muri (includono lo spessore),
+# quindi un margine troppo piccolo (es. 0.10) lascia gli oggetti a filo o dentro
+# la faccia interna del muro -> la scrivania "buca" la parete.
+# Tienilo allineato a wall_margin_meters in settings.toml.
+# ---------------------------------------------------------------------------
+REORDER_WALL_MARGIN = 0.20
+
 
 # ---------------------------------------------------------------------------
 # Prompt helpers
@@ -87,7 +97,7 @@ def _build_flat_json_for_llm(state: SceneState) -> str:
                 "y_max": round(y_max, 3),
             },
             # Margini richiesti (in metri)
-            "wall_margin_required": 0.10,  # minima distanza dai muri della stanza
+            "wall_margin_required": REORDER_WALL_MARGIN,  # minima distanza dai muri della stanza
             "collision_margin_required": 0.05,  # minima distanza fra due oggetti
         }
         if obj.children:
@@ -306,7 +316,7 @@ def _clamp_parent_group_location(
     Clampa la posizione del parent usando l'AABB reale del gruppo (parent+figli)
     per garantire che tutto il gruppo rimanga dentro i bounds con margine di 15 cm.
     """
-    wall_margin = 0.10
+    wall_margin = REORDER_WALL_MARGIN
     g_x_min, g_x_max, g_y_min, g_y_max = _group_aabb_xy(
         orig_parent, proposed_loc, proposed_rz, orig_children, margin=0.0
     )
@@ -562,16 +572,32 @@ def _validate_and_sanitize_llm_output(
     jitter_resolved = 0
     jitter_failed = 0
 
-    for orig_obj in original_state.objects:
-        if not orig_obj.is_movable or orig_obj.parent is not None:
-            continue  # strutturali già aggiunti; figli vengono dopo il parent
+    def _group_volume(o: SceneObject) -> float:
+        """Volume del gruppo (root + figli): le ancore grandi vanno risolte prima."""
+        d = o.transform.dimensions
+        vol = d[0] * d[1] * d[2]
+        for c in o.children:
+            cc = by_name_orig.get(c)
+            if cc:
+                dd = cc.transform.dimensions
+                vol += dd[0] * dd[1] * dd[2]
+        return vol
+
+    # Risolviamo le collisioni partendo dai gruppi piu' grandi (come il randomizer):
+    # cosi' un oggetto piccolo piazzato prima non blocca un mobile grande.
+    movable_roots = [
+        o for o in original_state.objects if o.is_movable and o.parent is None
+    ]
+    movable_roots.sort(key=_group_volume, reverse=True)
+
+    for orig_obj in movable_roots:
 
         obj = corrected[orig_obj.name]
 
         if obj.category in main_cats:
             collidable = [
                 o for o in final_list
-                if o.category in main_cats or o.category == "structural"
+                if o.category in main_cats or not o.is_movable
             ]
             max_iter = 20
             # Figli correnti del candidato (già spostati rigidamente dopo il LLM)
@@ -579,7 +605,7 @@ def _validate_and_sanitize_llm_output(
 
             for i in range(max_iter):
                 # Controlla l'intero gruppo (root + figli) per collisioni
-                if not _group_has_collision(obj, current_children, collidable, wall_margin=0.05, furniture_margin=0.02, room_bounds=room_bounds):
+                if not _group_has_collision(obj, current_children, collidable, wall_margin=REORDER_WALL_MARGIN, furniture_margin=0.02, room_bounds=room_bounds):
                     break
                 moved = False
                 for other in collidable:
@@ -625,9 +651,34 @@ def _validate_and_sanitize_llm_output(
                     "Collisione irrisolvibile per '%s' dopo %d iterazioni.", obj.name, max_iter
                 )
 
-            if not _group_has_collision(obj, current_children, collidable, wall_margin=0.05, furniture_margin=0.02, room_bounds=room_bounds):
+            if not _group_has_collision(obj, current_children, collidable, wall_margin=REORDER_WALL_MARGIN, furniture_margin=0.02, room_bounds=room_bounds):
                 if i > 0:
                     jitter_resolved += 1
+
+        # GARANZIA DI CONTENIMENTO: ogni gruppo (anche decorazioni/luci non in
+        # main_cats) viene riportato dentro i bounds usando l'AABB del gruppo
+        # (parent + figli). Evita che un figlio sporga dai muri rispetto al parent.
+        if room_bounds is not None:
+            current_children = [corrected[c] for c in orig_obj.children if c in corrected]
+            clamped = _clamp_parent_group_location(
+                obj,
+                obj.transform.location,
+                obj.transform.rotation_euler[2],
+                current_children,
+                room_bounds,
+            )
+            if clamped != obj.transform.location:
+                obj.transform.location = clamped
+                for child_name in orig_obj.children:
+                    oc = by_name_orig.get(child_name)
+                    if oc:
+                        corrected[child_name] = _apply_rigid_child_transform(
+                            oc,
+                            old_parent_loc=orig_obj.transform.location,
+                            old_parent_rz=orig_obj.transform.rotation_euler[2],
+                            new_parent_loc=obj.transform.location,
+                            new_parent_rz=obj.transform.rotation_euler[2],
+                        )
 
         final_list.append(obj)
 
@@ -681,8 +732,8 @@ class SceneReorganizer:
         n_roots = len(root_objects)
 
         if room_bounds is not None:
-            # Sottrai un margine di sicurezza di 15 cm da ogni lato per evitare qualsiasi incastro con i muri
-            wall_safety_margin = 0.10
+            # Sottrai un margine di sicurezza da ogni lato per evitare incastri coi muri
+            wall_safety_margin = REORDER_WALL_MARGIN
             safe_x_min = room_bounds.x_min + wall_safety_margin
             safe_x_max = room_bounds.x_max - wall_safety_margin
             safe_y_min = room_bounds.y_min + wall_safety_margin

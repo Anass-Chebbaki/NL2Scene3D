@@ -293,8 +293,9 @@ class SceneRandomizer:
         new_objects: list[SceneObject] = [obj.copy() for obj in state.objects]
         by_name = {obj.name: obj for obj in new_objects}
 
-        # Già piazzati (strutturali) — partono come "ostacoli fissi"
-        placed: list[SceneObject] = [obj for obj in new_objects if obj.category == "structural"]
+        # Già piazzati (strutturali + oggetti resi statici come mensole/lampade a muro)
+        # — partono come "ostacoli fissi" così i mobili non li attraversano.
+        placed: list[SceneObject] = [obj for obj in new_objects if not obj.is_movable]
 
         # Root movibili ordinati per volume decrescente
         roots = sorted(

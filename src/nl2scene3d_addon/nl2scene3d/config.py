@@ -158,6 +158,10 @@ class PipelineConfig:
         default_factory=lambda: ["ceiling", "pendant", "chandelier"]
     )
 
+    # Regole per rendere statici gli oggetti appoggiati a muri/soffitto.
+    static_height_threshold: float = 1.0   # m: un ROOT con base Z >= N diventa statico (mensole, lampade a muro)
+    freeze_ceiling_objects: bool = True     # congela anche gli oggetti attaccati al soffitto
+
     def __post_init__(self) -> None:
         if not isinstance(self.non_mesh_types, frozenset):
             self.non_mesh_types = frozenset(self.non_mesh_types)
@@ -185,6 +189,8 @@ class PipelineConfig:
             ceiling_light_patterns=cls_toml.get(
                 "ceiling_light_patterns", ["ceiling", "pendant", "chandelier"]
             ),
+            static_height_threshold=float(p.get("static_height_threshold_meters", 1.0)),
+            freeze_ceiling_objects=bool(p.get("freeze_ceiling_objects", True)),
         )
 
 

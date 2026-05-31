@@ -104,6 +104,11 @@ def classify_object(
     if _has_kw(("plant", "pianta", "vase", "vaso"), name_lower):
         return "decoration", True
 
+    # Comodino / nightstand: mobile piccolo ma SEMPRE parent-eligibile (mai figlio),
+    # cosi' la lampada sovrastante resta agganciata come figlio.
+    if _has_kw(("nightstand", "comodino", "bedside", "bedside_table"), name_lower):
+        return "furniture", True
+
     return "furniture", True
 
 
@@ -288,14 +293,20 @@ def compute_grouping(objects: list[SceneObject]) -> None:
                 continue
 
             cand_vol = _volume(candidate)
-            if cand_vol < child_vol * 1.2:
-                continue  # Il parent deve essere almeno un po' più grande
+            # Footprint XY: per oggetti IMPILATI e' molto piu' affidabile del volume.
+            # Una lampada alta ha volume grande ma footprint piccolo: usando il volume,
+            # un comodino piccolo non veniva riconosciuto come parent e i due si separavano
+            # (la lampada restava sospesa alla sua Z mentre il comodino si spostava).
+            child_area = child.transform.dimensions[0] * child.transform.dimensions[1]
+            cand_area = candidate.transform.dimensions[0] * candidate.transform.dimensions[1]
+            parent_bigger_footprint = cand_area >= child_area * 1.05   # per "appoggiato sopra"
+            parent_bigger_volume = cand_vol >= child_vol * 1.2          # per "contenuto"/"prossimita'"
 
             par_z_min, par_z_max = candidate.transform.z_range()
 
             # --- Criterio 1: appoggiato sopra ---
             z_diff_top = child_z_min - par_z_max
-            is_on_top = -0.05 <= z_diff_top <= 0.15   # sopra entro 15cm, nega falsi positivi sopra 5cm
+            is_on_top = -0.08 <= z_diff_top <= 0.20   # finestra leggermente allargata
 
             # --- Criterio 2: contenuto nel range Z del parent ---
             is_inside = (
@@ -310,7 +321,7 @@ def compute_grouping(objects: list[SceneObject]) -> None:
             matched = False
             score = 0.0
 
-            if is_on_top or is_inside:
+            if (is_on_top and parent_bigger_footprint) or (is_inside and parent_bigger_volume):
                 # Check sovrapposizione XY diretta
                 par_poly = candidate.transform.obb_corners_xy(margin=0.0)
                 if _sat_overlap(child_poly, par_poly):
@@ -325,7 +336,8 @@ def compute_grouping(objects: list[SceneObject]) -> None:
                 allowed_proximity_parents = {"table", "desk", "storage", "seating_large", "bed", "furniture"}
 
                 if (child.category in allowed_proximity_children and 
-                    candidate.category in allowed_proximity_parents):
+                    candidate.category in allowed_proximity_parents and
+                    parent_bigger_volume):
                     
                     par_poly_expanded = candidate.transform.obb_corners_xy(margin=0.15)
                     if _sat_overlap(child_poly, par_poly_expanded):
@@ -359,6 +371,56 @@ def compute_grouping(objects: list[SceneObject]) -> None:
     n_groups = sum(1 for o in objects if o.children)
     n_children = sum(1 for o in objects if o.parent is not None)
     logger.info("Grouping completato: %d gruppi, %d oggetti figlio.", n_groups, n_children)
+
+
+# ---------------------------------------------------------------------------
+# Regole di staticita' per oggetti su muri / soffitto
+# ---------------------------------------------------------------------------
+
+def apply_static_placement_rules(objects, room_bounds, config) -> None:
+    """
+    Congela (is_movable=False) i ROOT appoggiati in alto sui muri (mensole,
+    lampade a muro, quadri) e gli oggetti attaccati al soffitto, propagando lo
+    stato statico a tutti i loro figli.
+
+    Va chiamata DOPO compute_grouping:
+    - usa obj.parent/children per propagare la staticita' ai figli;
+    - agisce solo sui ROOT (parent is None): un oggetto appoggiato su un mobile
+      (es. lampada da tavolo) e' un figlio e si muove rigidamente col parent,
+      quindi NON viene congelato.
+
+    Criterio:
+    - base Z (z_min) >= static_height_threshold  -> appoggiato in alto a muro;
+    - top Z (z_max) vicino al soffitto           -> oggetto a soffitto.
+    """
+    by_name = {o.name: o for o in objects}
+
+    def freeze(name: str) -> None:
+        o = by_name.get(name)
+        if not o:
+            return
+        o.is_movable = False
+        for c in o.children:
+            freeze(c)
+
+    n = config.static_height_threshold
+    ceil = room_bounds.z_ceiling
+    frozen = 0
+    for o in objects:
+        if not o.is_movable or o.parent is not None:
+            continue  # solo i root movibili
+        z_min, z_max = o.transform.z_range()
+        on_wall_high = z_min >= n
+        on_ceiling = config.freeze_ceiling_objects and z_max >= ceil - 0.15
+        if on_wall_high or on_ceiling:
+            freeze(o.name)
+            frozen += 1
+            logger.info(
+                "Reso statico '%s' (z_min=%.2f, z_max=%.2f, soffitto=%.2f).",
+                o.name, z_min, z_max, ceil,
+            )
+    if frozen:
+        logger.info("Regole di staticita': %d gruppi resi statici.", frozen)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +551,9 @@ class SceneLoader:
 
         # Calcola grouping — annota parent/children su ogni oggetto
         compute_grouping(objects)
+
+        # Congela mensole/lampade a muro e oggetti a soffitto (e i loro figli)
+        apply_static_placement_rules(objects, room_bounds, self.config)
 
         return SceneState(
             scene_name=effective_name,
