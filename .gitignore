@@ -19,6 +19,8 @@ scenes/originals/*.blend
 
 # File installazione plugin blender
 addon/*.zip
+src/nl2scene3d_addon/vendor/
+src/nl2scene3d_addon.zip
 
 #structure root 4 debugging
 structure.txt
