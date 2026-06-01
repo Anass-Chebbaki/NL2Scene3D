@@ -834,3 +834,53 @@ class SceneReorganizer:
         reordered_state = _validate_and_sanitize_llm_output(llm_output, disordered_state)
         logger.info("LLM reorganization complete for '%s'.", reordered_state.scene_name)
         return reordered_state
+
+    def reorganize_multimodal(
+            self,
+            disordered_state: SceneState,
+            image_paths: list[Path],
+    ) -> SceneState:
+        """
+        Reorganizes the scene via a MULTIMODAL LLM call (reference images + JSON).
+
+        Sends rendered views of the current (disordered) scene together with the
+        flat JSON, so the model can see the room shape and the real size of each
+        object. Output is validated and sanitized exactly like reorganize().
+        """
+        logger.info(
+            "Starting MULTIMODAL reorganization for '%s'. Root objects: %d, images: %d.",
+            disordered_state.scene_name,
+            len(disordered_state.root_movable_objects),
+            len(image_paths),
+        )
+
+        system_prompt = _load_prompt_template(self.prompts_dir / "reorder_system.txt")
+        user_prompt = self._build_user_prompt(disordered_state)
+
+        # call_vision_multi has no separate system parameter: merge everything into
+        # a single prompt and describe the attached views.
+        visual_note = (
+            "\n\n--- REFERENCE IMAGES ---\n"
+            "You are also given rendered views of the CURRENT (disordered) scene "
+            "(a top-down view and an isometric view). Use them to understand the "
+            "room shape, the real size of each object, and where things are now. "
+            "Then produce the reorganized layout. Return ONLY the updated JSON array, "
+            "using the EXACT object names from the JSON above."
+        )
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}{visual_note}"
+
+        try:
+            llm_output = self.client.call_vision_multi(image_paths, combined_prompt)
+        except GeminiParsingError as exc:
+            logger.error("LLM parsing failed: %s. Returning disordered state.", exc)
+            return SceneState(
+                scene_name=disordered_state.scene_name,
+                objects=copy.deepcopy(disordered_state.objects),
+                room_bounds=disordered_state.room_bounds,
+                pipeline_step="reordered_failed",
+                metadata={"error": str(exc)},
+            )
+
+        reordered_state = _validate_and_sanitize_llm_output(llm_output, disordered_state)
+        logger.info("Multimodal reorganization complete for '%s'.", reordered_state.scene_name)
+        return reordered_state

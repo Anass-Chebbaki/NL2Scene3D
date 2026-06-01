@@ -73,34 +73,56 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 class NL2SCENE3D_AddonPreferences(AddonPreferences):
-    """Stores the API key and model selection for the addon."""
+    """Backend choice + Gemini and Ollama settings."""
 
     bl_idname = Path(__file__).resolve().parent.name
 
+    backend: EnumProperty(             # type: ignore
+        name="Backend",
+        description="Where to run the model",
+        items=[
+            ("GEMINI", "Gemini (cloud)", "Google Gemini API (needs a key)"),
+            ("OLLAMA", "Ollama (local)", "Local model via Ollama (no key, no quota)"),
+        ],
+        default="GEMINI",
+    )
+
     api_key: StringProperty(           # type: ignore
-        name="Gemini API Key",
-        description="Your Google Gemini API key",
-        default="",
-        subtype="PASSWORD",
+        name="Gemini API Key", description="Your Google Gemini API key",
+        default="", subtype="PASSWORD",
     )
 
     model_name: EnumProperty(          # type: ignore
-        name="Model",
-        description="Gemini model to use for scene reorganization",
+        name="Gemini Model", description="Gemini model to use",
         items=[
+            ("gemini-2.5-flash", "Gemini 2.5 Flash", "Stable flash model"),
             ("gemini-3.5-flash", "Gemini 3.5 Flash", "Latest high-speed model"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash", "Standard stable flash model"),
-            ("gemini-2.5-pro",   "Gemini 2.5 Pro",   "High-intelligence model"),
         ],
-        default="gemini-3.5-flash",
+        default="gemini-2.5-flash",
+    )
+
+    ollama_model: StringProperty(      # type: ignore
+        name="Ollama Model", description="Local model tag (e.g. qwen3.5:4b, qwen3.5:2b)",
+        default="qwen3.5:4b",
+    )
+
+    ollama_url: StringProperty(        # type: ignore
+        name="Ollama URL", description="Ollama server URL",
+        default="http://localhost:11434",
     )
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "api_key")
-        layout.prop(self, "model_name")
-        if not self.api_key:
-            layout.label(text="Get an API key at aistudio.google.com", icon="INFO")
+        layout.prop(self, "backend")
+        if self.backend == "GEMINI":
+            layout.prop(self, "api_key")
+            layout.prop(self, "model_name")
+            if not self.api_key:
+                layout.label(text="Get an API key at aistudio.google.com", icon="INFO")
+        else:
+            layout.prop(self, "ollama_model")
+            layout.prop(self, "ollama_url")
+            layout.label(text="Make sure the Ollama app is running.", icon="INFO")
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +131,8 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
 
 def get_pipeline_context():
     """
-    Initializes all core pipeline components using the current addon preferences.
-
-    Injects the API key into the environment before importing core modules,
-    so that config validation finds it immediately.
-
-    Returns a tuple (config, loader, applicator, randomizer, reorganizer),
-    or (None, None, None, None, None) if preferences are unavailable.
+    Builds the core pipeline components from the current addon preferences.
+    Returns (config, loader, applicator, randomizer, reorganizer) or 5x None.
     """
     addon_id = Path(__file__).resolve().parent.name
 
@@ -129,22 +146,36 @@ def get_pipeline_context():
         return None, None, None, None, None
     prefs = addon_ref.preferences
 
-    # Inject the API key before importing modules that validate it.
-    if prefs.api_key:
+    backend = getattr(prefs, "backend", "GEMINI")
+
+    # config validation requires a non-empty GEMINI_API_KEY even in Ollama mode:
+    # set a harmless placeholder (the Ollama client never uses it).
+    if backend == "OLLAMA":
+        os.environ.setdefault("GEMINI_API_KEY", "ollama-local")
+    elif prefs.api_key:
         os.environ["GEMINI_API_KEY"] = prefs.api_key
 
-    from nl2scene3d.config          import get_config
-    from nl2scene3d.gemini_client   import GeminiClient
-    from nl2scene3d.randomizer      import SceneRandomizer
+    from nl2scene3d.config           import get_config
+    from nl2scene3d.gemini_client    import GeminiClient
+    from nl2scene3d.randomizer       import SceneRandomizer
     from nl2scene3d.scene_applicator import SceneApplicator
-    from nl2scene3d.scene_state     import SceneLoader
+    from nl2scene3d.scene_state      import SceneLoader
     from nl2scene3d.scene_reorganizer import SceneReorganizer
     import nl2scene3d
 
     config = get_config()
-    config.gemini.model_primary = prefs.model_name  # UI override
 
-    client      = GeminiClient(config.gemini)
+    if backend == "OLLAMA":
+        from nl2scene3d.ollama_client import OllamaClient
+        client = OllamaClient(
+            model=prefs.ollama_model,
+            base_url=prefs.ollama_url,
+            temperature=config.gemini.temperature,
+        )
+    else:
+        config.gemini.model_primary = prefs.model_name  # UI override
+        client = GeminiClient(config.gemini)
+
     loader      = SceneLoader(config.pipeline)
     applicator  = SceneApplicator()
     randomizer  = SceneRandomizer(config.randomizer)
@@ -232,36 +263,53 @@ class NL2SCENE3D_OT_reorganize(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
+        import tempfile
         try:
             config, loader, applicator, _, reorganizer = get_pipeline_context()
-
             if config is None:
                 self.report({"ERROR"}, "Add-on configuration not found. Check Preferences.")
                 return {"CANCELLED"}
-
             if not (loader and applicator and reorganizer):
                 self.report({"ERROR"}, "Add-on components not initialized properly.")
                 return {"CANCELLED"}
+
+            from nl2scene3d.blender.renderer import BlenderRenderer
 
             wm = context.window_manager
             wm.progress_begin(0, 100)
             for window in wm.windows:
                 window.cursor_set("WAIT")
 
-            # Step 1: extract the current scene state.
-            wm.progress_update(20)
-            self.report({"INFO"}, "Extracting scene state...")
+            # 1. Extract current (disordered) state.
+            wm.progress_update(10)
+            self.report({"INFO"}, "Extracting current scene state...")
             state = loader.extract_scene_state()
-            root_count = len(state.root_movable_objects)
 
-            # Step 2: call Gemini (text-only, flat JSON, root objects only).
-            wm.progress_update(40)
-            self.report({"INFO"}, f"Calling Gemini AI for {root_count} root objects... (10-30s)")
-            new_state = reorganizer.reorganize(state)
+            # 2. Render reference views (top + isometric).
+            wm.progress_update(30)
+            self.report({"INFO"}, "Rendering reference views (top + iso)...")
+            out_dir = Path(tempfile.gettempdir()) / "nl2scene3d_reorder_ref"
+            renderer = BlenderRenderer(output_dir=out_dir, config=config.render)
+            render_paths = renderer.render_step(
+                step_name="reorder_ref", state=state, quality="preview"
+            )
+            image_paths = [render_paths["top"], render_paths["iso"]]
 
-            # Step 3: apply the LLM-produced layout to the Blender scene.
+            # 3. Multimodal reorder (images + JSON).
+            wm.progress_update(60)
+            self.report({"INFO"}, "Calling Gemini (images + JSON)... (20-40s)")
+            new_state = reorganizer.reorganize_multimodal(state, image_paths)
+
+            if new_state.pipeline_step == "reordered_failed":
+                wm.progress_end()
+                for window in wm.windows:
+                    window.cursor_set("DEFAULT")
+                self.report({"ERROR"}, "LLM response could not be parsed. Scene unchanged.")
+                return {"CANCELLED"}
+
+            # 4. Apply the new layout.
             wm.progress_update(85)
-            self.report({"INFO"}, "Applying reorganized state...")
+            self.report({"INFO"}, "Applying reorganized layout...")
             applicator.apply_state(new_state)
 
             wm.progress_update(100)
@@ -271,21 +319,21 @@ class NL2SCENE3D_OT_reorganize(Operator):
 
             clamped = new_state.metadata.get("clamped_count", 0)
             missing = new_state.metadata.get("missing_count", 0)
-
-            if new_state.pipeline_step == "reordered_failed":
-                error = new_state.metadata.get("error", "unknown")
-                self.report({"WARNING"}, f"Reorganization failed: {error}")
-            else:
-                self.report(
-                    {"INFO"},
-                    f"Reorganization complete. Clamped: {clamped}, Missing: {missing}.",
-                )
-
+            self.report(
+                {"INFO"},
+                f"Multimodal reorder done. Clamped: {clamped}, missing: {missing}.",
+            )
             return {"FINISHED"}
 
         except Exception as exc:
-            self._reset_ui(context)
-            self.report({"ERROR"}, f"Reorganization failed: {exc}")
+            try:
+                wm = context.window_manager
+                wm.progress_end()
+                for window in wm.windows:
+                    window.cursor_set("DEFAULT")
+            except Exception:
+                pass
+            self.report({"ERROR"}, f"Reorder failed: {exc}")
             traceback.print_exc()
             return {"CANCELLED"}
 
@@ -336,11 +384,13 @@ class NL2SCENE3D_PT_main_panel(Panel):
 
             # API key status box
             box = layout.box()
-            if not prefs.api_key:
+            if getattr(prefs, "backend", "GEMINI") == "OLLAMA":
+                box.label(text=f"Local: {prefs.ollama_model}", icon="CHECKMARK")
+            elif not prefs.api_key:
                 box.label(text="API Key Missing!", icon="ERROR")
                 box.operator("wm.url_open", text="Get Key").url = "https://aistudio.google.com/"
             else:
-                box.label(text=f"Model: {prefs.model_name}", icon="CHECKMARK")
+                box.label(text=f"Gemini: {prefs.model_name}", icon="CHECKMARK")
 
             layout.separator()
             layout.label(text="Scene Controls", icon="SCENE_DATA")
