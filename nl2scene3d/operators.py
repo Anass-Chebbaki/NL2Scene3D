@@ -13,7 +13,7 @@ import bpy  # type: ignore
 from bpy.types import Operator  # type: ignore
 
 from .core import scene_io
-from .core.classify import classify_object
+from .core.classify import default_classification, suggest_grouping
 from .core.randomizer import SceneRandomizer
 
 
@@ -28,7 +28,7 @@ def _build_overrides(context):
     """
     Costruisce il dict di override dalle voci della Scene, oppure None se gli
     override manuali sono disattivati o la lista e' vuota. Il core riceve solo
-    dati puri (niente bpy).
+    dati puri (niente bpy): per ogni oggetto lo stato fisso e il padre scelto.
     """
     scene = context.scene
     if not getattr(scene, "nl2_overrides_enabled", False):
@@ -37,7 +37,7 @@ def _build_overrides(context):
     if not items or len(items) == 0:
         return None
     return {
-        e.name: {"fixed": bool(e.fixed)}
+        e.name: {"fixed": bool(e.fixed), "parent": e.parent or ""}
         for e in items
     }
 
@@ -50,7 +50,7 @@ def _listable_objects(scene):
 def _sync_overrides(scene) -> tuple[int, int]:
     """
     Allinea la lista override agli oggetti della scena: aggiunge i nuovi (con
-    default automatici), rimuove i mancanti, preserva quelli gia' editati.
+    default automatici fisso/mobile), rimuove i mancanti, preserva gli editati.
     Ritorna (aggiunti, rimossi).
     """
     items = scene.nl2_overrides
@@ -62,7 +62,7 @@ def _sync_overrides(scene) -> tuple[int, int]:
         if obj.name in existing:
             continue
         dims = [obj.dimensions.x, obj.dimensions.y, obj.dimensions.z]
-        _cat, mov = classify_object(obj.name, obj.type, dims)
+        _cat, mov = default_classification(obj.name, obj.type, dims)
         entry = items.add()
         entry.name = obj.name
         entry.fixed = not mov
@@ -107,11 +107,39 @@ class NL2SCENE3D_OT_overrides_autodetect(Operator):
             if obj is None:
                 continue
             dims = [obj.dimensions.x, obj.dimensions.y, obj.dimensions.z]
-            _cat, mov = classify_object(obj.name, obj.type, dims)
+            _cat, mov = default_classification(obj.name, obj.type, dims)
             entry.fixed = not mov
             n += 1
         self.report({"INFO"}, f"Auto-classificate {n} voci.")
         return {"FINISHED"}
+
+
+class NL2SCENE3D_OT_overrides_suggest_groups(Operator):
+    """Propone i rapporti padre-figlio in base alla geometria (poi li correggi)."""
+
+    bl_idname  = "nl2scene3d.overrides_suggest_groups"
+    bl_label   = "Suggerisci gruppi"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        try:
+            _sync_overrides(context.scene)
+            # Estrae lo stato (con gli override fisso/mobile correnti) e propone i gruppi.
+            state = scene_io.extract_scene_state(overrides=_build_overrides(context))
+            mapping = suggest_grouping(state.objects)
+
+            entries = {e.name: e for e in context.scene.nl2_overrides}
+            applied = 0
+            for child, parent in mapping.items():
+                if child in entries:
+                    entries[child].parent = parent
+                    applied += 1
+            self.report({"INFO"}, f"Proposti {applied} rapporti padre-figlio. Controllali nella lista.")
+            return {"FINISHED"}
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"Suggerimento gruppi fallito: {exc}")
+            traceback.print_exc()
+            return {"CANCELLED"}
 
 
 class NL2SCENE3D_OT_overrides_clear(Operator):
@@ -244,6 +272,7 @@ class NL2SCENE3D_OT_randomize(Operator):
 _classes = (
     NL2SCENE3D_OT_overrides_sync,
     NL2SCENE3D_OT_overrides_autodetect,
+    NL2SCENE3D_OT_overrides_suggest_groups,
     NL2SCENE3D_OT_overrides_clear,
     NL2SCENE3D_OT_reset_home,
     NL2SCENE3D_OT_inspect,

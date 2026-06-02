@@ -21,11 +21,8 @@ class Constants:
     jitter_ratio: float = 0.80           # ampiezza del disordine, frazione della stanza
     max_placement_attempts: int = 200    # tentativi per trovare una posizione libera
 
-    # --- Classificazione oggetti ---
+    # --- Limiti ---
     max_movable_objects: int = 50        # oltre questo numero gli oggetti restano fissi
-    min_object_dimension: float = 0.05   # oggetti piu' piccoli = decorazioni fisse (m)
-    static_height_threshold: float = 1.0 # oggetti con base >= a questa quota = fissi (m)
-    freeze_ceiling_objects: bool = True  # congela anche gli oggetti a soffitto
 
     # --- Rendering (usato dallo Step 4) ---
     render_edge_px: int = 768            # lato del render inviato all'LLM (= no resize lato Ollama)
@@ -35,16 +32,18 @@ class Constants:
 CONST = Constants()
 
 
-# Tipi Blender mai mobili (non-mesh).
+# Tipi Blender mai mobili (non-mesh): fissi di default.
 NON_MESH_TYPES = frozenset(
     {"CAMERA", "LIGHT", "SPEAKER", "ARMATURE", "EMPTY", "CURVE"}
 )
 
-# Pattern di nome che identificano elementi strutturali (multilingua IT/EN).
+# Piccolo insieme di parole che identificano elementi STRUTTURALI (muri/pavimento/
+# stanza/porte/finestre), multilingua IT/EN. Serve SOLO a:
+#   - stimare fissi di default questi elementi (comportamento che l'utente apprezza);
+#   - definire i confini della stanza.
+# NON esistono piu' categorie per i mobili: quelle le decide l'utente (fisso/mobile
+# e padre-figlio) dal pannello.
 STRUCTURAL_PATTERNS = [
     "wall", "floor", "ceiling", "room", "door", "window",
     "muro", "parete", "pavimento", "soffitto", "porta", "finestra", "stanza",
 ]
-
-# Pattern di luci a soffitto (restano fisse) - IT/EN.
-CEILING_LIGHT_PATTERNS = ["ceiling", "pendant", "chandelier", "soffitto", "plafoniera", "lampadario"]

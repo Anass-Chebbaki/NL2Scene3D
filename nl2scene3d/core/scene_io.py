@@ -4,13 +4,13 @@ Unico ponte tra Blender e il nucleo puro.
 
 Due sole responsabilita':
   - extract_scene_state(): legge la scena bpy aperta e costruisce un SceneState
-    (classificazione, confini stanza, grouping, regole statiche).
+    (classificazione minima fisso/mobile, confini stanza, padri manuali).
   - apply_state():         scrive location e rotation_euler degli oggetti bpy a
     partire da un SceneState. Niente altro: nessun raycast, nessuno snap a terra.
 
-La persistenza del grouping (custom property 'nl2_parent') vive QUI, non dentro
-compute_grouping: cosi' la logica di grouping resta pura e testabile, e Blender
-e' l'unico a sapere come ricordare i gruppi tra una chiamata e l'altra.
+Niente piu' categorie di mobili ne' grouping automatico: cosa e' fisso e chi e'
+figlio di chi lo decide l'utente dal pannello. L'automatico stima fissi solo
+camera/luci e gli elementi strutturali (per nome), e ricava i confini stanza.
 
 Z non viene MAI modificata: il suo valore e' responsabilita' del file .blend
 originale. Se un oggetto "fluttua" nell'originale, mantiene quella quota.
@@ -22,9 +22,7 @@ import logging
 from typing import Optional
 
 from .classify import (
-    apply_static_placement_rules,
-    classify_object,
-    compute_grouping,
+    apply_manual_parents,
     compute_room_bounds,
     resolve_classification,
 )
@@ -33,9 +31,8 @@ from .settings import CONST, Constants
 
 logger = logging.getLogger(__name__)
 
-_GROUP_PROP = "nl2_parent"  # custom property usata per ricordare il grouping
-_HOME_LOC   = "nl2_home_loc"  # posa originale: location locale
-_HOME_ROT   = "nl2_home_rot"  # posa originale: rotation_euler locale
+_HOME_LOC = "nl2_home_loc"  # posa originale: location locale
+_HOME_ROT = "nl2_home_rot"  # posa originale: rotation_euler locale
 
 
 # ---------------------------------------------------------------------------
@@ -93,34 +90,6 @@ def reset_home_state() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Persistenza del grouping (solo qui si tocca bpy per i gruppi)
-# ---------------------------------------------------------------------------
-
-def _read_prior_grouping(objects: list[SceneObject]) -> dict[str, str]:
-    """Legge 'nl2_parent' dagli oggetti Blender e ritorna {figlio: padre}."""
-    import bpy  # noqa: PLC0415
-    names = {o.name for o in objects}
-    prior: dict[str, str] = {}
-    for o in objects:
-        b_obj = bpy.data.objects.get(o.name)
-        if b_obj is None:
-            continue
-        parent = b_obj.get(_GROUP_PROP)
-        if parent and parent in names:
-            prior[o.name] = parent
-    return prior
-
-
-def _persist_grouping(objects: list[SceneObject]) -> None:
-    """Scrive 'nl2_parent' su ogni oggetto Blender (vuoto se senza padre)."""
-    import bpy  # noqa: PLC0415
-    for o in objects:
-        b_obj = bpy.data.objects.get(o.name)
-        if b_obj is not None:
-            b_obj[_GROUP_PROP] = o.parent if o.parent else ""
-
-
-# ---------------------------------------------------------------------------
 # Estrazione
 # ---------------------------------------------------------------------------
 
@@ -133,13 +102,13 @@ def extract_scene_state(
     Estrae lo stato completo della scena Blender attualmente aperta.
 
     Passi:
-        1. Itera gli oggetti -> classifica (auto + eventuale override) -> SceneObject.
-        2. Calcola i RoomBounds.
-        3. Calcola/riusa il grouping padre-figlio e lo annota su ogni oggetto.
-        4. Congela mensole/oggetti a soffitto, rispettando gli override "mobile".
+        1. Itera gli oggetti -> classificazione minima (fisso/mobile) + override.
+        2. Calcola i RoomBounds (geometrici).
+        3. Applica i rapporti padre-figlio MANUALI scelti dall'utente.
 
-    overrides (o None): dict {nome_oggetto: {"fixed": bool, "category": str}}.
-    Se fornito, vince sulla classificazione automatica per quegli oggetti.
+    overrides (o None): dict {nome_oggetto: {"fixed": bool, "parent": str}}.
+        "fixed"  -> vince sulla stima automatica fisso/mobile.
+        "parent" -> nome del padre scelto a mano (stringa vuota = nessun padre).
     """
     try:
         import bpy        # type: ignore  # noqa: PLC0415
@@ -149,6 +118,7 @@ def extract_scene_state(
 
     scene          = bpy.context.scene
     effective_name = scene_name or scene.name
+    overrides      = overrides or {}
 
     logger.info("Estraggo scena '%s' (%d oggetti).", effective_name, len(scene.objects))
 
@@ -161,7 +131,7 @@ def extract_scene_state(
         dimensions = [b_obj.dimensions.x, b_obj.dimensions.y, b_obj.dimensions.z]
 
         category, is_movable = resolve_classification(
-            name, obj_type, dimensions, (overrides or {}).get(name), const
+            name, obj_type, dimensions, overrides.get(name), const
         )
 
         # Limite di oggetti mobili.
@@ -205,17 +175,13 @@ def extract_scene_state(
 
     room_bounds = compute_room_bounds(objects)
 
-    # Grouping: riusa quello memorizzato se presente, altrimenti lo calcola e lo salva.
-    prior = _read_prior_grouping(objects)
-    compute_grouping(objects, prior=prior)
-    _persist_grouping(objects)
-
-    # Oggetti dichiarati esplicitamente MOBILI dall'utente: non vanno congelati.
-    protected = {
-        name for name, ov in (overrides or {}).items()
-        if isinstance(ov, dict) and ov.get("fixed") is False
+    # Parenting MANUALE: la mappa {figlio: padre} arriva dagli override dell'utente.
+    parent_map = {
+        n: ov["parent"]
+        for n, ov in overrides.items()
+        if isinstance(ov, dict) and ov.get("parent")
     }
-    apply_static_placement_rules(objects, room_bounds, const, protected=protected)
+    apply_manual_parents(objects, parent_map)
 
     return SceneState(
         scene_name=effective_name,
@@ -279,9 +245,18 @@ def format_inspection(state: SceneState) -> str:
 
 def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
     """
-    Applica un SceneState alla scena Blender aperta: aggiorna location e
-    rotation_euler degli oggetti che corrispondono per nome. Non aggiunge,
-    rimuove o sposta in Z autonomamente.
+    Applica un SceneState alla scena Blender aperta: porta ogni oggetto mobile
+    alla posa MONDO indicata (location + rotation_euler). Non aggiunge, rimuove
+    o sposta in Z autonomamente.
+
+    Imposta direttamente `matrix_world`: cosi' Blender ricalcola correttamente la
+    matrice locale tenendo conto di un eventuale parent nativo E della
+    `matrix_parent_inverse` (la matrice che Blender salva quando fai un parenting
+    "Keep Transform"). E' il motivo per cui un approccio "world -> local" fatto a
+    mano sbaglierebbe la quota dei figli imparentati.
+
+    Gli oggetti vengono processati in ordine di profondita' del parent nativo,
+    cosi' un padre nativo e' sempre posizionato prima dei suoi figli.
 
     Ritorna i contatori {'updated', 'not_found', 'skipped'}.
     """
@@ -299,9 +274,14 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
         state.scene_name, state.pipeline_step, len(state.objects),
     )
 
-    roots_to_process: list[tuple] = []
-    children_to_process: list[tuple] = []
+    def native_depth(b_obj) -> int:
+        d, p = 0, b_obj.parent
+        while p is not None:
+            d += 1
+            p = p.parent
+        return d
 
+    to_process: list[tuple] = []
     for scene_obj in state.objects:
         b_obj = scene.objects.get(scene_obj.name)
         if b_obj is None:
@@ -310,69 +290,41 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
         if not scene_obj.is_movable or b_obj.type in ("CAMERA", "LIGHT"):
             counters["skipped"] += 1
             continue
-        (roots_to_process if b_obj.parent is None else children_to_process).append(
-            (scene_obj, b_obj)
-        )
+        to_process.append((scene_obj, b_obj))
+
+    # Padri nativi prima dei figli (profondita' crescente).
+    to_process.sort(key=lambda pair: native_depth(pair[1]))
 
     def process_object(scene_obj, b_obj) -> bool:
-        import mathutils  # noqa: PLC0415
         t = scene_obj.transform
-        updated = False
 
-        # --- Location ---
-        cur = b_obj.matrix_world.translation
-        cur_loc = [cur.x, cur.y, cur.z]
-        if any(abs(t.location[i] - cur_loc[i]) > tolerance for i in range(3)):
-            if b_obj.parent is not None:
-                try:
-                    world_vec = mathutils.Vector(t.location)
-                    local_vec = b_obj.parent.matrix_world.inverted() @ world_vec
-                    b_obj.location = (local_vec.x, local_vec.y, local_vec.z)
-                except Exception:
-                    b_obj.location = (t.location[0], t.location[1], t.location[2])
-            else:
-                b_obj.location = (t.location[0], t.location[1], t.location[2])
-            updated = True
-
-        # --- Rotation ---
+        cur     = b_obj.matrix_world.translation
         cur_rot = b_obj.matrix_world.to_euler("XYZ")
-        if any(abs(t.rotation_euler[i] - cur_rot[i]) > tolerance for i in range(3)):
-            b_obj.rotation_mode = "XYZ"
-            if b_obj.parent is not None:
-                try:
-                    world_rot = mathutils.Euler(t.rotation_euler, "XYZ")
-                    local_mat = (
-                        b_obj.parent.matrix_world.to_3x3().inverted()
-                        @ world_rot.to_matrix()
-                    )
-                    local_rot = local_mat.to_euler("XYZ")
-                    b_obj.rotation_euler = (local_rot.x, local_rot.y, local_rot.z)
-                except Exception:
-                    b_obj.rotation_euler = tuple(t.rotation_euler)
-            else:
-                b_obj.rotation_euler = tuple(t.rotation_euler)
-            updated = True
+        moved = (
+            any(abs(t.location[i] - cur[i]) > tolerance for i in range(3))
+            or any(abs(t.rotation_euler[i] - cur_rot[i]) > tolerance for i in range(3))
+        )
+        if not moved:
+            return False
 
-        return updated
+        b_obj.rotation_mode = "XYZ"
+        loc_m = mathutils.Matrix.Translation(t.location)
+        rot_m = mathutils.Euler(t.rotation_euler, "XYZ").to_matrix().to_4x4()
+        scl   = b_obj.matrix_world.to_scale()
+        scl_m = mathutils.Matrix.Diagonal((scl.x, scl.y, scl.z, 1.0))
+        # Impostare matrix_world fa gestire a Blender parent + matrix_parent_inverse.
+        b_obj.matrix_world = loc_m @ rot_m @ scl_m
+        return True
 
-    # Pass 1: root.
-    for scene_obj, b_obj in roots_to_process:
-        counters["updated" if process_object(scene_obj, b_obj) else "skipped"] += 1
-
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
-
-    # Pass 2: figli (aggiorna le matrici tra una scrittura e l'altra).
-    for scene_obj, b_obj in children_to_process:
-        upd = process_object(scene_obj, b_obj)
-        counters["updated" if upd else "skipped"] += 1
-        if upd:
+    for scene_obj, b_obj in to_process:
+        if process_object(scene_obj, b_obj):
+            counters["updated"] += 1
             try:
                 bpy.context.view_layer.update()
             except Exception:
                 pass
+        else:
+            counters["skipped"] += 1
 
     try:
         bpy.context.view_layer.update()

@@ -123,7 +123,7 @@ def wall_collision(
 
     for wall in wall_objects:
         name_lower = wall.name.lower()
-        if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
+        if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra", "stanza")):
             continue
 
         # Check rapido di sovrapposizione Z prima del SAT.
@@ -374,7 +374,7 @@ def collision_score(
 
         if obj.category == "structural" and check_walls:
             name_lower = obj.name.lower()
-            if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra")):
+            if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra", "stanza")):
                 is_door   = any(k in name_lower for k in ("door", "porta"))
                 is_window = any(k in name_lower for k in ("window", "finestra"))
                 clearance_depth = 0.90 if is_door else 0.50

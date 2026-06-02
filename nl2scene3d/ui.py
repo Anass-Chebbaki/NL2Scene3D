@@ -77,7 +77,7 @@ def get_prefs(context):
 # ---------------------------------------------------------------------------
 
 class NL2_ObjectOverride(PropertyGroup):
-    """Una riga della lista: solo nome + stato fisso/mobile (la categoria e' automatica)."""
+    """Una riga della lista: nome, stato fisso/mobile e padre (tutti scelti dall'utente)."""
 
     name: StringProperty(name="Object")  # type: ignore
     fixed: BoolProperty(  # type: ignore
@@ -85,17 +85,25 @@ class NL2_ObjectOverride(PropertyGroup):
         description="Se attivo, l'oggetto non verra' mai spostato",
         default=False,
     )
+    parent: StringProperty(  # type: ignore
+        name="Padre",
+        description="Nome dell'oggetto padre: questo oggetto si muovera' insieme a lui "
+                    "(vuoto = nessun padre)",
+        default="",
+    )
 
 
 class NL2SCENE3D_UL_overrides(UIList):
-    """Lista degli oggetti con un solo controllo: il lucchetto fisso/mobile."""
+    """Lista degli oggetti: scelta del padre + lucchetto fisso/mobile."""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {"DEFAULT", "COMPACT"}:
             row = layout.row(align=True)
             row.label(text=item.name, icon="OBJECT_DATA")
+            # Ricerca del padre tra gli oggetti della scena (vuoto = nessuno).
+            row.prop_search(item, "parent", context.scene, "objects", text="", icon="CON_CHILDOF")
             row.prop(
-                item, "fixed", text="Fisso", toggle=True,
+                item, "fixed", text="", toggle=True,
                 icon="LOCKED" if item.fixed else "UNLOCKED",
             )
         elif self.layout_type == "GRID":
@@ -133,12 +141,13 @@ class NL2SCENE3D_PT_main_panel(Panel):
         # --- Override manuali fisso/mobile ---
         layout.separator()
         col = layout.column(align=True)
-        col.prop(scene, "nl2_overrides_enabled", text="Override manuali (fisso / mobile)")
+        col.prop(scene, "nl2_overrides_enabled", text="Override manuali (fisso / padre)")
         if scene.nl2_overrides_enabled:
             row = col.row(align=True)
             row.operator("nl2scene3d.overrides_sync", text="Sincronizza", icon="FILE_REFRESH")
-            row.operator("nl2scene3d.overrides_autodetect", text="Auto", icon="ZOOM_SELECTED")
+            row.operator("nl2scene3d.overrides_autodetect", text="Auto fisso", icon="ZOOM_SELECTED")
             row.operator("nl2scene3d.overrides_clear", text="", icon="TRASH")
+            col.operator("nl2scene3d.overrides_suggest_groups", text="Suggerisci gruppi", icon="CON_CHILDOF")
             if len(scene.nl2_overrides) == 0:
                 col.label(text="Premi 'Sincronizza' per popolare la lista.", icon="INFO")
             else:
@@ -148,6 +157,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
                     scene, "nl2_overrides_index",
                     rows=6,
                 )
+                col.label(text="Icona catena = padre, lucchetto = fisso/mobile.", icon="INFO")
 
         # --- Step 1: disordina + reset ---
         layout.separator()
