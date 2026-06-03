@@ -12,8 +12,9 @@ import traceback
 import bpy  # type: ignore
 from bpy.types import Operator  # type: ignore
 
-from .core import scene_io
+from .core import reorganizer, scene_io
 from .core.classify import default_classification, suggest_grouping
+from .core.ollama_client import OllamaClient, OllamaError
 from .core.randomizer import SceneRandomizer
 
 
@@ -22,6 +23,13 @@ def _get_prefs(context):
         return context.preferences.addons[__package__].preferences
     except (KeyError, AttributeError):
         return None
+
+
+def _write_text(name: str, content: str) -> None:
+    """Scrive (sovrascrivendo) un Text datablock apribile nel Text Editor."""
+    txt = bpy.data.texts.get(name) or bpy.data.texts.new(name)
+    txt.clear()
+    txt.write(content)
 
 
 def _build_overrides(context):
@@ -269,6 +277,101 @@ class NL2SCENE3D_OT_randomize(Operator):
             pass
 
 
+class NL2SCENE3D_OT_ai_reorder(Operator):
+    """Riorganizza la scena con l'AI locale (Ollama): estrae -> prompt -> applica."""
+
+    bl_idname  = "nl2scene3d.ai_reorder"
+    bl_label   = "AI Reorder (Ollama)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefs = _get_prefs(context)
+        if prefs is None:
+            self.report({"ERROR"}, "Preferenze add-on non disponibili.")
+            return {"CANCELLED"}
+
+        wm = context.window_manager
+        try:
+            wm.progress_begin(0, 100)
+            for w in wm.windows:
+                w.cursor_set("WAIT")
+
+            # Fotografa l'originale al primo intervento (per 'Reset to Original').
+            if not context.scene.nl2_has_home:
+                scene_io.capture_home_state()
+                context.scene.nl2_has_home = True
+
+            wm.progress_update(15)
+            state = scene_io.extract_scene_state(overrides=_build_overrides(context))
+            roots = [o for o in state.objects if o.is_movable and o.is_root]
+            if not roots:
+                self._reset_ui(context)
+                self.report({"WARNING"}, "Nessun oggetto mobile da riorganizzare.")
+                return {"CANCELLED"}
+
+            prompt = reorganizer.build_prompt(state, getattr(context.scene, "nl2_ai_instruction", ""))
+            _write_text("NL2_AI_Prompt", prompt)  # ispezionabile nel Text Editor
+            client = OllamaClient(
+                prefs.ollama_url, prefs.ollama_model, prefs.temperature,
+                timeout=getattr(prefs, "request_timeout", 300),
+            )
+
+            wm.progress_update(30)
+            if not client.is_available():
+                self._reset_ui(context)
+                self.report(
+                    {"ERROR"},
+                    f"Ollama non raggiungibile su {prefs.ollama_url}. Avvia 'ollama serve'.",
+                )
+                return {"CANCELLED"}
+
+            wm.progress_update(45)
+            raw = client.generate(prompt, images=None)
+            _write_text("NL2_AI_Response", raw or "(risposta vuota)")  # ispezionabile
+
+            wm.progress_update(80)
+            parsed = reorganizer.extract_json(raw) or {}
+            n_prop = len(parsed.get("placements", []) if isinstance(parsed.get("placements"), list) else [])
+            new_state = reorganizer.sanitize_response(state, raw)
+            counters = scene_io.apply_state(new_state)
+
+            wm.progress_update(100)
+            self._reset_ui(context)
+            if n_prop == 0:
+                self.report(
+                    {"WARNING"},
+                    "Il modello non ha restituito posizioni valide (vedi il Text "
+                    "'NL2_AI_Response'). Prova ad alzare la temperatura o cambiare istruzione.",
+                )
+            else:
+                self.report(
+                    {"INFO"},
+                    f"AI Reorder: {n_prop} proposte, {counters['updated']} oggetti spostati. "
+                    f"'Reset to Original' per annullare; vedi 'NL2_AI_Prompt'/'NL2_AI_Response'.",
+                )
+            return {"FINISHED"}
+
+        except OllamaError as exc:
+            self._reset_ui(context)
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # noqa: BLE001
+            self._reset_ui(context)
+            self.report({"ERROR"}, f"AI Reorder fallito: {exc}")
+            traceback.print_exc()
+            return {"CANCELLED"}
+
+    @staticmethod
+    def _reset_ui(context):
+        try:
+            wm = context.window_manager
+            wm.progress_end()
+            for w in wm.windows:
+                w.cursor_set("DEFAULT")
+        except Exception:
+            pass
+
+
 _classes = (
     NL2SCENE3D_OT_overrides_sync,
     NL2SCENE3D_OT_overrides_autodetect,
@@ -277,6 +380,7 @@ _classes = (
     NL2SCENE3D_OT_reset_home,
     NL2SCENE3D_OT_inspect,
     NL2SCENE3D_OT_randomize,
+    NL2SCENE3D_OT_ai_reorder,
 )
 
 

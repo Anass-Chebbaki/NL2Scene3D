@@ -23,6 +23,8 @@ from bpy.props import (  # type: ignore
 )
 from bpy.types import AddonPreferences, Panel, PropertyGroup, UIList  # type: ignore
 
+from .core.reorganizer import DEFAULT_INSTRUCTION
+
 
 # ---------------------------------------------------------------------------
 # Preferenze (solo Ollama, niente Gemini, niente API key)
@@ -53,12 +55,19 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
         description="Seme del disordine. 0 = casuale a ogni click; >0 = riproducibile",
         default=0, min=0,
     )
+    request_timeout: IntProperty(  # type: ignore
+        name="Timeout (s)",
+        description="Tempo massimo di attesa per la risposta di Ollama. Il primo "
+                    "caricamento del modello in VRAM puo' essere lento su GPU piccole",
+        default=300, min=30, max=3600,
+    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "ollama_model")
         layout.prop(self, "ollama_url")
         layout.prop(self, "temperature")
+        layout.prop(self, "request_timeout")
         layout.prop(self, "seed")
         layout.label(text="Assicurati che l'app Ollama sia in esecuzione.", icon="INFO")
 
@@ -170,11 +179,14 @@ class NL2SCENE3D_PT_main_panel(Panel):
         else:
             col1.label(text="Nessun originale (premi Randomize una volta).", icon="INFO")
 
-        # --- Step 2 (placeholder) ---
+        # --- Step 2: riordino con AI ---
         layout.separator()
         col2 = layout.column(align=True)
         col2.label(text="Step 2: Riordina con AI")
-        col2.label(text="(in arrivo)", icon="INFO")
+        col2.label(text="Istruzione per il modello:")
+        col2.prop(scene, "nl2_ai_instruction", text="")
+        col2.operator("nl2scene3d.ai_reorder", text="AI Reorder (Ollama)", icon="SHADERFX")
+        col2.label(text="Richiede Ollama in esecuzione.", icon="INFO")
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +218,17 @@ def register():
         description="Indica se e' stato salvato uno stato originale per il reset",
         default=False,
     )
+    bpy.types.Scene.nl2_ai_instruction = StringProperty(
+        name="Istruzione AI",
+        description="Istruzione inviata al modello (le regole tecniche JSON vengono "
+                    "aggiunte automaticamente). Personalizzala come preferisci",
+        default=DEFAULT_INSTRUCTION,
+    )
 
 
 def unregister():
-    for attr in ("nl2_overrides", "nl2_overrides_index", "nl2_overrides_enabled", "nl2_has_home"):
+    for attr in ("nl2_overrides", "nl2_overrides_index", "nl2_overrides_enabled",
+                 "nl2_has_home", "nl2_ai_instruction"):
         if hasattr(bpy.types.Scene, attr):
             delattr(bpy.types.Scene, attr)
 
