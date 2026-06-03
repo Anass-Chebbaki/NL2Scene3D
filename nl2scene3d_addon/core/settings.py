@@ -3,9 +3,8 @@
 Costanti di NL2Scene3D (sostituisce il vecchio config.py + settings.toml).
 
 Filosofia: niente singleton, niente TOML, niente .env. Le poche manopole reali
-vivono qui come costanti pure (testabili senza Blender). Le impostazioni
-specifiche del backend (modello Ollama, URL, temperature) e il seed stanno
-invece nelle Addon Preferences / nel pannello, perche' le sceglie l'utente.
+vivono qui come costanti pure (testabili senza Blender). Il seed del randomizer
+sta invece nelle Addon Preferences, perche' lo sceglie l'utente.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ class Constants:
     max_movable_objects: int = 50        # oltre questo numero gli oggetti restano fissi
 
     # --- Rendering (usato dallo Step 4) ---
-    render_edge_px: int = 768            # lato del render inviato all'LLM (= no resize lato Ollama)
+    render_edge_px: int = 768            # lato del render inviato all'LLM (= no resize lato LLM)
 
 
 # Istanza unica usata in tutto il package.

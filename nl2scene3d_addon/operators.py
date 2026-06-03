@@ -14,7 +14,6 @@ from bpy.types import Operator  # type: ignore
 
 from .core import reorganizer, scene_io
 from .core.classify import default_classification, suggest_grouping
-from .core.ollama_client import OllamaClient, OllamaError
 from .core.randomizer import SceneRandomizer
 
 
@@ -277,99 +276,161 @@ class NL2SCENE3D_OT_randomize(Operator):
             pass
 
 
-class NL2SCENE3D_OT_ai_reorder(Operator):
-    """Riorganizza la scena con l'AI locale (Ollama): estrae -> prompt -> applica."""
+_RESPONSE_TEXT = "NL2_AI_Response"  # Text datablock dove l'utente incolla il JSON dell'LLM
 
-    bl_idname  = "nl2scene3d.ai_reorder"
-    bl_label   = "AI Reorder (Ollama)"
-    bl_options = {"REGISTER", "UNDO"}
+
+class NL2SCENE3D_OT_export_for_llm(Operator):
+    """Genera il prompt + JSON della scena e lo scrive in un Text, pronto da copiare nell'LLM."""
+
+    bl_idname  = "nl2scene3d.export_for_llm"
+    bl_label   = "Esporta prompt per LLM"
+    bl_options = {"REGISTER"}
 
     def execute(self, context):
-        prefs = _get_prefs(context)
-        if prefs is None:
-            self.report({"ERROR"}, "Preferenze add-on non disponibili.")
-            return {"CANCELLED"}
-
-        wm = context.window_manager
         try:
-            wm.progress_begin(0, 100)
-            for w in wm.windows:
-                w.cursor_set("WAIT")
-
             # Fotografa l'originale al primo intervento (per 'Reset to Original').
             if not context.scene.nl2_has_home:
                 scene_io.capture_home_state()
                 context.scene.nl2_has_home = True
 
-            wm.progress_update(15)
             state = scene_io.extract_scene_state(overrides=_build_overrides(context))
             roots = [o for o in state.objects if o.is_movable and o.is_root]
             if not roots:
-                self._reset_ui(context)
                 self.report({"WARNING"}, "Nessun oggetto mobile da riorganizzare.")
                 return {"CANCELLED"}
 
-            prompt = reorganizer.build_prompt(state, getattr(context.scene, "nl2_ai_instruction", ""))
-            _write_text("NL2_AI_Prompt", prompt)  # ispezionabile nel Text Editor
-            client = OllamaClient(
-                prefs.ollama_url, prefs.ollama_model, prefs.temperature,
-                timeout=getattr(prefs, "request_timeout", 300),
+            prompt = reorganizer.build_prompt(state)  # istruzione di default fissa
+            _write_text("NL2_AI_Prompt", prompt)
+
+            # Prepara (vuota) la casella in cui incollerai la risposta dell'LLM.
+            txt = bpy.data.texts.get(_RESPONSE_TEXT) or bpy.data.texts.new(_RESPONSE_TEXT)
+            txt.clear()
+
+            self.report(
+                {"INFO"},
+                f"Prompt pronto nel Text 'NL2_AI_Prompt' ({len(roots)} oggetti). "
+                f"Copialo nell'LLM, poi incolla la risposta nel Text '{_RESPONSE_TEXT}'.",
             )
-
-            wm.progress_update(30)
-            if not client.is_available():
-                self._reset_ui(context)
-                self.report(
-                    {"ERROR"},
-                    f"Ollama non raggiungibile su {prefs.ollama_url}. Avvia 'ollama serve'.",
-                )
-                return {"CANCELLED"}
-
-            wm.progress_update(45)
-            raw = client.generate(prompt, images=None)
-            _write_text("NL2_AI_Response", raw or "(risposta vuota)")  # ispezionabile
-
-            wm.progress_update(80)
-            parsed = reorganizer.extract_json(raw) or {}
-            n_prop = len(parsed.get("placements", []) if isinstance(parsed.get("placements"), list) else [])
-            new_state = reorganizer.sanitize_response(state, raw)
-            counters = scene_io.apply_state(new_state)
-
-            wm.progress_update(100)
-            self._reset_ui(context)
-            if n_prop == 0:
-                self.report(
-                    {"WARNING"},
-                    "Il modello non ha restituito posizioni valide (vedi il Text "
-                    "'NL2_AI_Response'). Prova ad alzare la temperatura o cambiare istruzione.",
-                )
-            else:
-                self.report(
-                    {"INFO"},
-                    f"AI Reorder: {n_prop} proposte, {counters['updated']} oggetti spostati. "
-                    f"'Reset to Original' per annullare; vedi 'NL2_AI_Prompt'/'NL2_AI_Response'.",
-                )
             return {"FINISHED"}
 
-        except OllamaError as exc:
-            self._reset_ui(context)
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
         except Exception as exc:  # noqa: BLE001
-            self._reset_ui(context)
-            self.report({"ERROR"}, f"AI Reorder fallito: {exc}")
+            self.report({"ERROR"}, f"Esportazione fallita: {exc}")
             traceback.print_exc()
             return {"CANCELLED"}
 
-    @staticmethod
-    def _reset_ui(context):
+
+def _apply_llm_response(operator, context, raw_text: str):
+    """
+    Cuore condiviso della metà 'a valle': identico a cio' che faceva l'AI Reorder
+    dopo aver ricevuto la risposta del modello, ma il testo arriva da te (casella
+    incollata o file). Rilegge la scena viva, sanifica il JSON e applica.
+    """
+    wm = context.window_manager
+    try:
+        wm.progress_begin(0, 100)
+        for w in wm.windows:
+            w.cursor_set("WAIT")
+
+        # Fotografa l'originale se non e' stato gia' fatto (export o randomize).
+        if not context.scene.nl2_has_home:
+            scene_io.capture_home_state()
+            context.scene.nl2_has_home = True
+
+        wm.progress_update(20)
+        state = scene_io.extract_scene_state(overrides=_build_overrides(context))
+
+        wm.progress_update(50)
+        parsed = reorganizer.extract_json(raw_text) or {}
+        placements = parsed.get("placements")
+        n_prop = len(placements) if isinstance(placements, list) else 0
+        if n_prop == 0:
+            _reset_wm(context)
+            operator.report(
+                {"WARNING"},
+                "Nessuna posizione valida trovata nel JSON. Controlla di aver incollato "
+                "la risposta completa del modello (deve contenere \"placements\").",
+            )
+            return {"CANCELLED"}
+
+        wm.progress_update(80)
+        new_state = reorganizer.sanitize_response(state, raw_text)
+        counters = scene_io.apply_state(new_state)
+
+        wm.progress_update(100)
+        _reset_wm(context)
+        operator.report(
+            {"INFO"},
+            f"Applicato: {n_prop} proposte, {counters['updated']} oggetti spostati. "
+            f"'Reset to Original' per annullare.",
+        )
+        return {"FINISHED"}
+
+    except Exception as exc:  # noqa: BLE001
+        _reset_wm(context)
+        operator.report({"ERROR"}, f"Applicazione fallita: {exc}")
+        traceback.print_exc()
+        return {"CANCELLED"}
+
+
+def _reset_wm(context):
+    try:
+        wm = context.window_manager
+        wm.progress_end()
+        for w in wm.windows:
+            w.cursor_set("DEFAULT")
+    except Exception:
+        pass
+
+
+class NL2SCENE3D_OT_apply_from_text(Operator):
+    """Applica la risposta dell'LLM incollata nel Text 'NL2_AI_Response'."""
+
+    bl_idname  = "nl2scene3d.apply_from_text"
+    bl_label   = "Applica risposta (dal testo incollato)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        txt = bpy.data.texts.get(_RESPONSE_TEXT)
+        if txt is None:
+            self.report(
+                {"ERROR"},
+                f"Text '{_RESPONSE_TEXT}' non trovato. Premi prima 'Esporta prompt per LLM', "
+                f"poi incolla lì la risposta del modello.",
+            )
+            return {"CANCELLED"}
+        raw = txt.as_string()
+        if not raw.strip():
+            self.report({"WARNING"}, f"Il Text '{_RESPONSE_TEXT}' e' vuoto: incolla il JSON del modello.")
+            return {"CANCELLED"}
+        return _apply_llm_response(self, context, raw)
+
+
+class NL2SCENE3D_OT_apply_from_file(Operator):
+    """Applica la risposta dell'LLM caricandola da un file (.json o .txt)."""
+
+    bl_idname  = "nl2scene3d.apply_from_file"
+    bl_label   = "Applica risposta (da file)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    # Fornito da invoke(): percorso scelto nel file browser.
+    filepath:   bpy.props.StringProperty(subtype="FILE_PATH")  # type: ignore
+    filter_glob: bpy.props.StringProperty(default="*.json;*.txt", options={"HIDDEN"})  # type: ignore
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        if not self.filepath:
+            self.report({"WARNING"}, "Nessun file selezionato.")
+            return {"CANCELLED"}
         try:
-            wm = context.window_manager
-            wm.progress_end()
-            for w in wm.windows:
-                w.cursor_set("DEFAULT")
-        except Exception:
-            pass
+            with open(self.filepath, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as exc:
+            self.report({"ERROR"}, f"Impossibile leggere il file: {exc}")
+            return {"CANCELLED"}
+        return _apply_llm_response(self, context, raw)
 
 
 _classes = (
@@ -380,7 +441,9 @@ _classes = (
     NL2SCENE3D_OT_reset_home,
     NL2SCENE3D_OT_inspect,
     NL2SCENE3D_OT_randomize,
-    NL2SCENE3D_OT_ai_reorder,
+    NL2SCENE3D_OT_export_for_llm,
+    NL2SCENE3D_OT_apply_from_text,
+    NL2SCENE3D_OT_apply_from_file,
 )
 
 

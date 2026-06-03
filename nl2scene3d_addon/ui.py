@@ -1,7 +1,7 @@
 # nl2scene3d/ui.py
 """
-Interfaccia Blender: preferenze (solo Ollama), pannello in sidebar, la lista
-degli override fisso/mobile e i comandi di reset allo stato originale.
+Interfaccia Blender: preferenze (solo il seed del randomizer), pannello in
+sidebar, la lista degli override fisso/mobile e i comandi di reset.
 
 Override manuali:
   - Ogni voce e' un NL2_ObjectOverride (nome + flag 'fisso') salvato in una
@@ -17,59 +17,35 @@ import bpy  # type: ignore
 from bpy.props import (  # type: ignore
     BoolProperty,
     CollectionProperty,
-    FloatProperty,
     IntProperty,
     StringProperty,
 )
 from bpy.types import AddonPreferences, Panel, PropertyGroup, UIList  # type: ignore
 
-from .core.reorganizer import DEFAULT_INSTRUCTION
-
 
 # ---------------------------------------------------------------------------
-# Preferenze (solo Ollama, niente Gemini, niente API key)
+# Preferenze (solo il seed del randomizer)
 # ---------------------------------------------------------------------------
 
 class NL2SCENE3D_AddonPreferences(AddonPreferences):
-    """Impostazioni del backend locale Ollama."""
+    """Impostazioni dell'add-on."""
 
     bl_idname = __package__
 
-    ollama_model: StringProperty(  # type: ignore
-        name="Ollama Model",
-        description="Tag del modello locale (es. qwen3.5:4b, qwen3.5:2b)",
-        default="qwen3.5:4b",
-    )
-    ollama_url: StringProperty(  # type: ignore
-        name="Ollama URL",
-        description="URL del server Ollama",
-        default="http://localhost:11434",
-    )
-    temperature: FloatProperty(  # type: ignore
-        name="Temperature",
-        description="Creativita' del modello (0 = deterministico)",
-        default=0.2, min=0.0, max=2.0,
-    )
     seed: IntProperty(  # type: ignore
         name="Randomizer Seed",
-        description="Seme del disordine. 0 = casuale a ogni click; >0 = riproducibile",
+        description="Seme del disordine. 0 = casuale a ogni click; >0 = riproducibile "
+                    "(utile per testare piu' LLM sulla stessa scena disordinata)",
         default=0, min=0,
-    )
-    request_timeout: IntProperty(  # type: ignore
-        name="Timeout (s)",
-        description="Tempo massimo di attesa per la risposta di Ollama. Il primo "
-                    "caricamento del modello in VRAM puo' essere lento su GPU piccole",
-        default=300, min=30, max=3600,
     )
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "ollama_model")
-        layout.prop(self, "ollama_url")
-        layout.prop(self, "temperature")
-        layout.prop(self, "request_timeout")
         layout.prop(self, "seed")
-        layout.label(text="Assicurati che l'app Ollama sia in esecuzione.", icon="INFO")
+        layout.label(
+            text="Flusso manuale: esporta il prompt, usalo nel tuo LLM, incolla qui la risposta.",
+            icon="INFO",
+        )
 
 
 def get_prefs(context):
@@ -142,7 +118,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
         if prefs is None:
             box.label(text="Add-on non abilitato correttamente", icon="ERROR")
             return
-        box.label(text=f"Locale: {prefs.ollama_model}", icon="CHECKMARK")
+        box.label(text="Flusso LLM manuale (esporta / applica)", icon="SHADERFX")
 
         layout.separator()
         layout.operator("nl2scene3d.inspect", text="Inspect Scene (dry-run)", icon="VIEWZOOM")
@@ -179,14 +155,16 @@ class NL2SCENE3D_PT_main_panel(Panel):
         else:
             col1.label(text="Nessun originale (premi Randomize una volta).", icon="INFO")
 
-        # --- Step 2: riordino con AI ---
+        # --- Step 2: riordino con AI (flusso manuale) ---
         layout.separator()
         col2 = layout.column(align=True)
-        col2.label(text="Step 2: Riordina con AI")
-        col2.label(text="Istruzione per il modello:")
-        col2.prop(scene, "nl2_ai_instruction", text="")
-        col2.operator("nl2scene3d.ai_reorder", text="AI Reorder (Ollama)", icon="SHADERFX")
-        col2.label(text="Richiede Ollama in esecuzione.", icon="INFO")
+        col2.label(text="Step 2: Riordina con AI (manuale)")
+        col2.operator("nl2scene3d.export_for_llm", text="1. Esporta prompt per LLM", icon="EXPORT")
+        col2.label(text="Copia 'NL2_AI_Prompt' nel tuo LLM, incolla la risposta", icon="INFO")
+        col2.label(text="nel Text 'NL2_AI_Response', poi:")
+        row2 = col2.row(align=True)
+        row2.operator("nl2scene3d.apply_from_text", text="2. Applica (incollato)", icon="PASTEDOWN")
+        row2.operator("nl2scene3d.apply_from_file", text="…da file", icon="FILEBROWSER")
 
 
 # ---------------------------------------------------------------------------
@@ -218,17 +196,11 @@ def register():
         description="Indica se e' stato salvato uno stato originale per il reset",
         default=False,
     )
-    bpy.types.Scene.nl2_ai_instruction = StringProperty(
-        name="Istruzione AI",
-        description="Istruzione inviata al modello (le regole tecniche JSON vengono "
-                    "aggiunte automaticamente). Personalizzala come preferisci",
-        default=DEFAULT_INSTRUCTION,
-    )
 
 
 def unregister():
     for attr in ("nl2_overrides", "nl2_overrides_index", "nl2_overrides_enabled",
-                 "nl2_has_home", "nl2_ai_instruction"):
+                 "nl2_has_home"):
         if hasattr(bpy.types.Scene, attr):
             delattr(bpy.types.Scene, attr)
 

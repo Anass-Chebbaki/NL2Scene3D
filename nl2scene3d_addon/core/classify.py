@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Optional
 
 from .geometry import sat_overlap
@@ -29,9 +30,19 @@ from .settings import CONST, Constants, NON_MESH_TYPES, STRUCTURAL_PATTERNS
 logger = logging.getLogger(__name__)
 
 
+def _tokens(text: str) -> set[str]:
+    """Spezza un nome in parole (su _, -, spazi, numeri, ecc.). Es. 'decor_doorknob' -> {'decor','doorknob'}."""
+    return {t for t in re.split(r"[^a-z]+", text.lower()) if t}
+
+
 def _has_kw(keywords, text: str) -> bool:
-    """True se almeno una keyword e' contenuta in text."""
-    return any(k in text for k in keywords)
+    """
+    True se UNA keyword compare come PAROLA INTERA in text (non come sottostringa).
+    Cosi' 'doorknob' non viene scambiato per 'door', ne' 'window_blind' verrebbe
+    spezzato male: il match e' su token interi separati da _,-,spazi,numeri.
+    """
+    toks = _tokens(text)
+    return any(k in toks for k in keywords)
 
 
 # ---------------------------------------------------------------------------

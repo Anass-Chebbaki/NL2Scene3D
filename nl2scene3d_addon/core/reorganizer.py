@@ -13,7 +13,7 @@ Tre responsabilita', tutte testabili da riga di comando:
      dall'LLM -> dentro i muri, niente sovrapposizioni (risolte con MTV), Z mai
      modificata, figli spostati rigidamente col padre. Ritorna un nuovo SceneState.
 
-La chiamata vera al modello (Ollama) e l'I/O vivono altrove (Step 4): qui dentro
+La chiamata vera al modello e l'I/O vivono altrove (negli operatori): qui dentro
 non si tocca ne' Blender ne' la rete, cosi' la logica resta verificabile.
 """
 
@@ -24,7 +24,7 @@ import logging
 import math
 from typing import Optional
 
-from .geometry import is_finite_float, penetration_vector, snap_rotation_90
+from .geometry import group_aabb_xy, is_finite_float, penetration_vector, snap_rotation_90
 from .models import RoomBounds, SceneObject, SceneState
 from .randomizer import _clamp_parent_group_location, apply_rigid_transform
 from .settings import CONST, Constants
@@ -38,33 +38,78 @@ _SKIP_TYPES = ("CAMERA", "LIGHT")
 # 1) Costruzione della richiesta e del prompt
 # ---------------------------------------------------------------------------
 
+def _descendants(root: SceneObject, by_name: dict[str, SceneObject]) -> list[SceneObject]:
+    """Tutti i discendenti (figli, nipoti, ...) di un root, in ordine di visita."""
+    out: list[SceneObject] = []
+
+    def rec(name: str) -> None:
+        node = by_name.get(name)
+        if node is None:
+            return
+        for cname in node.children:
+            child = by_name.get(cname)
+            if child is not None:
+                out.append(child)
+                rec(cname)
+
+    rec(root.name)
+    return out
+
+
+def _footprint_item(o: SceneObject) -> dict:
+    """Voce {name,x,y,w,d} con centro geometrico e impronta XY (rotazione inclusa)."""
+    cx, cy = o.transform.geometric_center_xy()
+    x_min, x_max, y_min, y_max = o.transform.aabb_xy(margin=0.0)
+    return {
+        "name": o.name,
+        "x": round(cx, 3), "y": round(cy, 3),
+        "w": round(x_max - x_min, 3), "d": round(y_max - y_min, 3),
+    }
+
+
 def build_request(state: SceneState) -> dict:
     """
-    Costruisce il payload JSON per il modello: confini stanza, ostacoli fissi e
-    oggetti mobili ROOT (i figli non si elencano, seguono il padre).
+    Costruisce il payload JSON per il modello.
 
-    Coordinate = centro geometrico in metri; w/d = impronta XY attuale (tiene
-    conto della rotazione corrente).
+    - movable_objects: SOLO i root mobili (quelli che il modello deve riposizionare).
+      x/y = centro del root; w/d = impronta XY dell'INTERO GRUPPO (root + figli),
+      cosi' il modello lascia spazio anche per cio' che e' attaccato. Ogni root puo'
+      avere un campo "contains" con i figli (read-only): il modello sa che ci sono e
+      a chi appartengono, ma NON deve produrre una posizione per loro (seguono il padre).
+    - fixed_objects: ostacoli fissi NON strutturali (la stanza/i muri sono esclusi),
+      inclusi gli oggetti che l'utente ha marcato "fisso" a mano.
     """
     rb = state.room_bounds
+    by_name = {o.name: o for o in state.objects}
     fixed: list[dict] = []
     movable: list[dict] = []
 
     for o in state.objects:
         if o.object_type in _SKIP_TYPES:
             continue
-        cx, cy = o.transform.geometric_center_xy()
-        x_min, x_max, y_min, y_max = o.transform.aabb_xy(margin=0.0)
-        item = {
-            "name": o.name,
-            "x": round(cx, 3), "y": round(cy, 3),
-            "w": round(x_max - x_min, 3), "d": round(y_max - y_min, 3),
-        }
+
         if o.is_movable and o.is_root:
-            item["rotation_deg"] = int(round(math.degrees(o.transform.rotation_euler[2]))) % 360
+            cx, cy = o.transform.geometric_center_xy()
+            descendants = _descendants(o, by_name)
+            # Impronta dell'intero gruppo alla posa CORRENTE (transform identita').
+            gx_min, gx_max, gy_min, gy_max = group_aabb_xy(
+                o, list(o.transform.location), o.transform.rotation_euler[2],
+                descendants, margin=0.0,
+            )
+            item = {
+                "name": o.name,
+                "x": round(cx, 3), "y": round(cy, 3),
+                "w": round(gx_max - gx_min, 3), "d": round(gy_max - gy_min, 3),
+                "rotation_deg": int(round(math.degrees(o.transform.rotation_euler[2]))) % 360,
+            }
+            if descendants:
+                # Figli come contesto read-only (il modello non li piazza).
+                item["contains"] = [_footprint_item(c) for c in descendants]
             movable.append(item)
+
         elif (not o.is_movable) and o.category != "structural":
-            fixed.append(item)  # ostacolo fisso (la stanza/i muri sono esclusi)
+            # Ostacolo fisso (auto o marcato a mano dall'utente). La stanza/muri esclusi.
+            fixed.append(_footprint_item(o))
 
     return {
         "room": {
@@ -76,44 +121,130 @@ def build_request(state: SceneState) -> dict:
     }
 
 
-DEFAULT_INSTRUCTION = (
-    "Sei un interior designer esperto. Le posizioni attuali degli oggetti sono "
-    "DISORDINATE (sono state mescolate apposta): il tuo compito e' produrre una "
-    "disposizione COMPLETAMENTE NUOVA, ordinata, realistica e funzionale. "
-    "Allinea i mobili ai muri quando ha senso, lascia spazio di passaggio libero "
-    "al centro, raggruppa gli oggetti correlati e crea una stanza in cui si vive "
-    "bene. NON limitarti a piccoli aggiustamenti: ripensa il layout."
-)
+PROMPT_TEMPLATE = """# Interior Design Layout Optimization Task
 
-# Regole tecniche SEMPRE appese (anche se l'utente personalizza l'istruzione):
-# garantiscono il contratto col resto della pipeline.
-TECHNICAL_RULES = (
-    "Regole vincolanti:\n"
-    "- Ogni oggetto deve restare dentro i confini indicati in \"room\".\n"
-    "- Niente sovrapposizioni: ne' tra oggetti mobili, ne' con gli \"fixed_objects\".\n"
-    "- Puoi ruotare un oggetto solo di multipli di 90 gradi (rotation_deg in 0, 90, 180, 270).\n"
-    "- NON modificare l'altezza: la z non esiste in questi dati e non va inventata.\n"
-    "- Le coordinate (x, y) sono il CENTRO dell'oggetto, in metri.\n\n"
-    "Rispondi ESCLUSIVAMENTE con un oggetto JSON, senza testo prima o dopo, "
-    "in questo formato esatto:\n"
-    "{\"placements\":[{\"name\":\"<nome>\",\"x\":<float>,\"y\":<float>,"
-    "\"rotation_deg\":<int>}]}\n"
-    "Includi una voce per ogni oggetto presente in \"movable_objects\"."
-)
+You are a professional interior designer working on indoor scenes of ANY type:
+bedrooms, living rooms, kitchens, bathrooms, offices, dining rooms, retail or
+commercial spaces, and any other indoor environment made of furniture and props.
+Do not assume a specific room type in advance: infer it from the data and images.
+
+You are provided with:
+- A JSON description of the scene (schema below).
+- A perspective image of the room.
+- A top-down (floor plan) image of the room.
+
+The current object positions have been intentionally randomized and MUST NOT be
+considered a valid layout. Your task is to design a COMPLETELY NEW arrangement of
+the objects from scratch. Do not make small adjustments to the current layout:
+rethink the whole organization and produce the most realistic, functional layout
+possible, as a human interior designer would.
+
+## How to read the scene JSON
+
+Interpret every field exactly as defined here.
+
+- `room`: the rectangular floor boundary, in meters (`x_min, x_max, y_min, y_max`).
+  Every object must stay fully inside it.
+- `fixed_objects`: obstacles you must NOT move and must NOT overlap. They never
+  appear in your output. Treat them as hard, immovable constraints.
+- `movable_objects`: the ONLY objects you reposition. For each one you output a
+  new `x`, `y`, and `rotation_deg`.
+  - `x`, `y`: the object CENTER, in meters (current/randomized value, to replace).
+  - `w`, `d`: the footprint of the WHOLE GROUP, i.e. the object PLUS everything in
+    its `contains`. Treat each group as a single rigid block of size `w` x `d`.
+  - `rotation_deg`: current rotation; your new value must be 0, 90, 180 or 270.
+  - `contains` (optional): child objects rigidly attached to this object (for
+    example a desk's chair, monitor and keyboard, or a bed's nightstand and lamp).
+    They move together with their parent. DO NOT output placements for them:
+    placing the parent already places them.
 
 
-def build_prompt(state: SceneState, instruction: Optional[str] = None) -> str:
+What you MAY change: only `x`, `y` and `rotation_deg` of each `movable_objects`
+entry. What you MUST preserve: all object names, all `w`/`d` dimensions, any
+height, and the parent-child grouping. Do not add, remove, rename, resize, merge
+or split objects.
+
+## Goal
+
+Produce a layout that is realistic, functional, organized, visually balanced and
+plausible for a real-world environment.
+
+## Design Principles
+
+First infer the room's function from object names, dimensions and the images,
+then apply the conventions appropriate to THAT function.
+
+### Functional grouping
+Identify the likely purpose of each object and organize the space into coherent
+functional areas. Objects that belong together should sit near one another.
+
+### Furniture placement
+Place furniture where the room's function dictates. Many rooms anchor large
+pieces along the walls and keep the center clear; but some layouts have
+intentionally central elements (a dining or conference table, a kitchen island,
+a retail display). Decide based on the inferred room type, not by default.
+
+### Accessibility
+Keep natural circulation paths. People should move comfortably between areas
+without obstacles blocking doorways or passages.
+
+### Spatial coherence
+Position objects so their relationships make sense. Related objects should feel
+intentionally associated, not scattered.
+
+### Visual order
+Prefer clean alignments and structured arrangements. Avoid arbitrary orientations
+or placements that create visual clutter.
+
+### Space usage
+Use the available floor area efficiently. Avoid both overcrowding and large,
+purposeless empty zones.
+
+## Geometric Constraints (Mandatory)
+
+- Every object must remain completely inside the `room` boundaries.
+- No movable object may overlap another movable object.
+- No movable object may overlap any fixed object.
+- Respect the `w`, `d` group footprint; do not modify dimensions.
+- `x`, `y` are object centers, in meters.
+- Do not invent height (`z`) values; height is out of scope.
+
+## Rotation Constraints
+
+`rotation_deg` may only be 0, 90, 180 or 270. Any other value is invalid.
+
+## Optimization Strategy
+
+Before answering: (1) infer the room type from JSON and images; (2) identify the
+primary furniture and the focal areas; (3) consider several plausible layouts;
+(4) compare them on functionality, accessibility, realism and space efficiency;
+(5) pick the best; (6) verify every geometric and rotation constraint holds.
+
+## Output Requirements
+
+Return ONLY a raw JSON object. No explanations, no comments, no markdown, no code
+fences, no extra text. Use exactly this structure:
+
+```json
+{
+  "placements": [
+    { "name": "<object_name>", "x": <float>, "y": <float>, "rotation_deg": <int> }
+  ]
+}
+```
+
+Output exactly one placement for every entry in `movable_objects`, and never for
+objects listed under `contains` or in `fixed_objects`."""
+
+
+def build_prompt(state: SceneState) -> str:
     """
-    Prompt completo = istruzione (personalizzabile dall'utente) + regole tecniche
-    fisse + dati della scena in JSON.
-
-    Se `instruction` e' None o vuota, usa DEFAULT_INSTRUCTION. Le regole tecniche
-    e il formato JSON vengono SEMPRE aggiunti, cosi' l'utente non puo' rompere il
-    contratto modificando il testo.
+    Prompt completo = template generico fisso (PROMPT_TEMPLATE) + dati della scena
+    in JSON, appesi sotto. Il JSON viene rigenerato a ogni chiamata da build_request,
+    quindi rispecchia sempre lo stato corrente (root + contains + fissi).
     """
-    instr = (instruction or "").strip() or DEFAULT_INSTRUCTION
     payload = json.dumps(build_request(state), ensure_ascii=False, indent=2)
-    return f"{instr}\n\n{TECHNICAL_RULES}\n\nDati della scena:\n{payload}"
+    return f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
 
 
 # ---------------------------------------------------------------------------
