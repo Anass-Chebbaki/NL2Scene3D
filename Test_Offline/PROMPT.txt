@@ -1,0 +1,253 @@
+# Interior Design Layout Optimization Task
+
+You are a professional interior designer.
+
+You are provided with:
+
+* A JSON description of the scene.
+* A perspective image of the room.
+* A top-down (floor plan) image of the room.
+
+The current object positions have been intentionally randomized and **should not be considered a valid layout**.
+
+Your task is to design a **completely new arrangement** of the objects from scratch.
+
+Do not perform small adjustments to the existing layout. Instead, rethink the entire room organization and generate the most realistic and functional layout possible.
+
+## Goal
+
+Create a layout that is:
+
+* Realistic
+* Functional
+* Organized
+* Visually balanced
+* Plausible for a real-world environment
+
+The final arrangement should resemble the work of a human interior designer rather than a random placement algorithm.
+
+## Design Principles
+
+### Functional Grouping
+
+Identify the likely purpose of each object and organize the room into coherent functional areas.
+
+Objects that naturally belong together should be positioned near one another.
+
+### Wall Utilization
+
+When appropriate, place large furniture items along walls.
+
+Avoid placing major furniture pieces in the middle of the room unless there is a clear functional reason.
+
+### Accessibility
+
+Maintain natural circulation paths throughout the room.
+
+People should be able to move comfortably between different areas without obstacles.
+
+### Spatial Coherence
+
+Objects should be positioned in ways that make sense relative to one another.
+
+Related objects should feel intentionally associated.
+
+### Visual Order
+
+Prefer clean alignments and structured layouts.
+
+Avoid random orientations or placements that create visual clutter.
+
+### Space Usage
+
+Use the available room area efficiently.
+
+Avoid both excessive crowding and large unused empty spaces.
+
+## Semantic Understanding
+
+Infer relationships between objects from:
+
+* Their names
+* Their dimensions
+* Their visual appearance in the provided images
+
+Place semantically related objects in meaningful configurations whenever appropriate.
+
+## Geometric Constraints (Mandatory)
+
+* Every object must remain completely inside the room boundaries defined in `"room"`.
+* No movable object may overlap another movable object.
+* No movable object may overlap any fixed object.
+* Object dimensions (`w`, `d`) must be respected.
+* Coordinates (`x`, `y`) represent the center of the object.
+* Do not modify object dimensions.
+* Do not invent height (`z`) values.
+* Do not add or remove objects.
+
+## Rotation Constraints
+
+Only the following rotations are allowed:
+
+* 0
+* 90
+* 180
+* 270
+
+Any other rotation value is invalid.
+
+## Optimization Strategy
+
+Before producing the final answer:
+
+1. Analyze the room type using both the JSON and the provided images.
+2. Identify the primary furniture and focal areas.
+3. Generate multiple plausible layout candidates mentally.
+4. Compare them in terms of:
+
+   * Functionality
+   * Accessibility
+   * Realism
+   * Efficient use of space
+5. Select the best layout.
+6. Verify that all geometric constraints are satisfied.
+
+## Output Requirements
+
+Return **ONLY** a valid JSON object.
+
+Do not include:
+
+* Explanations
+* Comments
+* Markdown
+* Additional text
+
+Use exactly the following format:
+
+```json
+{
+  "placements": [
+    {
+      "name": "<object_name>",
+      "x": <float>,
+      "y": <float>,
+      "rotation_deg": <int>
+    }
+  ]
+}
+```
+
+The output must contain exactly one placement entry for every object present in `"movable_objects"`.
+
+## JSON Scene data:
+
+```json
+{
+  "room": {
+    "x_min": -4.725,
+    "x_max": 4.914,
+    "y_min": -4.959,
+    "y_max": 4.679
+  },
+  "fixed_objects": [],
+  "movable_objects": [
+    {
+      "name": "decor_trashbin",
+      "x": -3.688,
+      "y": -3.717,
+      "w": 1.082,
+      "d": 0.776,
+      "rotation_deg": 180
+    },
+    {
+      "name": "furniture_bed",
+      "x": -1.568,
+      "y": 0.595,
+      "w": 4.458,
+      "d": 7.443,
+      "rotation_deg": 180
+    },
+    {
+      "name": "decor_bottle",
+      "x": 1.871,
+      "y": 1.444,
+      "w": 0.224,
+      "d": 0.224,
+      "rotation_deg": 0
+    },
+    {
+      "name": "furniture_desk",
+      "x": 3.692,
+      "y": -2.486,
+      "w": 1.848,
+      "d": 4.535,
+      "rotation_deg": 0
+    },
+    {
+      "name": "decor_computer_tower",
+      "x": 3.053,
+      "y": -2.336,
+      "w": 1.685,
+      "d": 0.774,
+      "rotation_deg": 180
+    },
+    {
+      "name": "decor_monitor",
+      "x": 2.501,
+      "y": -3.586,
+      "w": 2.477,
+      "d": 0.674,
+      "rotation_deg": 90
+    },
+    {
+      "name": "furniture_chair",
+      "x": 2.839,
+      "y": 2.137,
+      "w": 3.168,
+      "d": 2.488,
+      "rotation_deg": 18
+    },
+    {
+      "name": "decor_keyboard_and_mouse",
+      "x": 2.808,
+      "y": 1.852,
+      "w": 0.909,
+      "d": 2.41,
+      "rotation_deg": 180
+    },
+    {
+      "name": "furniture_nightstand",
+      "x": 1.666,
+      "y": -1.53,
+      "w": 1.634,
+      "d": 1.627,
+      "rotation_deg": 270
+    },
+    {
+      "name": "decor_lamp",
+      "x": 1.026,
+      "y": 3.633,
+      "w": 0.606,
+      "d": 0.606,
+      "rotation_deg": 90
+    },
+    {
+      "name": "furniture_shelf",
+      "x": -0.601,
+      "y": 0.735,
+      "w": 2.41,
+      "d": 0.923,
+      "rotation_deg": 0
+    },
+    {
+      "name": "decor_books",
+      "x": -0.708,
+      "y": 1.156,
+      "w": 0.703,
+      "d": 1.34,
+      "rotation_deg": 270
+    }
+  ]
+}
+```
