@@ -1,14 +1,12 @@
 # nl2scene3d/ui.py
 """
 Interfaccia Blender: preferenze (solo il seed del randomizer), pannello in
-sidebar, la lista degli override fisso/mobile e i comandi di reset.
+sidebar, la lista degli override (fisso / padre / etichetta) e i comandi.
 
 Override manuali:
-  - Ogni voce e' un NL2_ObjectOverride (nome + flag 'fisso') salvato in una
-    CollectionProperty sulla Scene, quindi persiste nel .blend.
-  - La CATEGORIA non e' piu' modificabile a mano: viene sempre dedotta dal nome
-    (resta visibile in sola lettura nell'Inspect). L'unico controllo manuale e'
-    fisso/mobile, che e' quello critico per la sicurezza.
+  - Ogni voce e' un NL2_ObjectOverride (nome + 'fisso' + 'padre' + 'label').
+  - 'label' decide se il nome di quell'oggetto compare nei render. E' attivo di
+    default; spegnilo per togliere l'etichetta di quell'oggetto.
 
 Questo modulo viene importato SOLO dentro register(): contiene bpy.
 """
@@ -62,7 +60,7 @@ def get_prefs(context):
 # ---------------------------------------------------------------------------
 
 class NL2_ObjectOverride(PropertyGroup):
-    """Una riga della lista: nome, stato fisso/mobile e padre (tutti scelti dall'utente)."""
+    """Una riga della lista: nome, fisso/mobile, padre, ed etichetta nei render."""
 
     name: StringProperty(name="Object")  # type: ignore
     fixed: BoolProperty(  # type: ignore
@@ -76,14 +74,25 @@ class NL2_ObjectOverride(PropertyGroup):
                     "(vuoto = nessun padre)",
         default="",
     )
+    label: BoolProperty(  # type: ignore
+        name="Etichetta",
+        description="Se attivo, il nome di questo oggetto compare nei render. "
+                    "Spegnilo per non etichettarlo",
+        default=True,
+    )
 
 
 class NL2SCENE3D_UL_overrides(UIList):
-    """Lista degli oggetti: scelta del padre + lucchetto fisso/mobile."""
+    """Lista oggetti: etichetta nei render + padre + lucchetto fisso/mobile."""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {"DEFAULT", "COMPACT"}:
             row = layout.row(align=True)
+            # toggle ETICHETTA (occhio): acceso = etichettato nei render
+            row.prop(
+                item, "label", text="", toggle=True,
+                icon="HIDE_OFF" if item.label else "HIDE_ON",
+            )
             row.label(text=item.name, icon="OBJECT_DATA")
             # Ricerca del padre tra gli oggetti della scena (vuoto = nessuno).
             row.prop_search(item, "parent", context.scene, "objects", text="", icon="CON_CHILDOF")
@@ -122,17 +131,24 @@ class NL2SCENE3D_PT_main_panel(Panel):
 
         layout.separator()
         layout.operator("nl2scene3d.inspect", text="Inspect Scene (dry-run)", icon="VIEWZOOM")
-
-        # --- Override manuali fisso/mobile ---
+        layout.operator("nl2scene3d.scale_to_real", text="Scala a misura reale", icon="FULLSCREEN_ENTER")
+        # --- Override manuali: etichetta / fisso / padre ---
         layout.separator()
         col = layout.column(align=True)
-        col.prop(scene, "nl2_overrides_enabled", text="Override manuali (fisso / padre)")
+        col.prop(scene, "nl2_overrides_enabled", text="Override manuali (etichetta / fisso / padre)")
         if scene.nl2_overrides_enabled:
             row = col.row(align=True)
             row.operator("nl2scene3d.overrides_sync", text="Sincronizza", icon="FILE_REFRESH")
             row.operator("nl2scene3d.overrides_autodetect", text="Auto fisso", icon="ZOOM_SELECTED")
             row.operator("nl2scene3d.overrides_clear", text="", icon="TRASH")
-            col.operator("nl2scene3d.overrides_suggest_groups", text="Suggerisci gruppi", icon="CON_CHILDOF")
+
+            row2 = col.row(align=True)
+            row2.operator("nl2scene3d.overrides_suggest_groups", text="Suggerisci gruppi", icon="CON_CHILDOF")
+            op_on  = row2.operator("nl2scene3d.overrides_labels_all", text="", icon="HIDE_OFF")
+            op_on.value = True
+            op_off = row2.operator("nl2scene3d.overrides_labels_all", text="", icon="HIDE_ON")
+            op_off.value = False
+
             if len(scene.nl2_overrides) == 0:
                 col.label(text="Premi 'Sincronizza' per popolare la lista.", icon="INFO")
             else:
@@ -142,7 +158,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
                     scene, "nl2_overrides_index",
                     rows=6,
                 )
-                col.label(text="Icona catena = padre, lucchetto = fisso/mobile.", icon="INFO")
+                col.label(text="Occhio = etichetta render, Icona catena = padre, lucchetto = fisso/mobile.", icon="INFO")
 
         # --- Step 1: disordina + reset ---
         layout.separator()
@@ -159,12 +175,13 @@ class NL2SCENE3D_PT_main_panel(Panel):
         layout.separator()
         col2 = layout.column(align=True)
         col2.label(text="Step 2: Riordina con AI (manuale)")
+        col2.operator("nl2scene3d.render_labeled", text="0. Render con etichette", icon="RENDER_STILL")
         col2.operator("nl2scene3d.export_for_llm", text="1. Esporta prompt per LLM", icon="EXPORT")
-        col2.label(text="Copia 'NL2_AI_Prompt' nel tuo LLM, incolla la risposta", icon="INFO")
-        col2.label(text="nel Text 'NL2_AI_Response', poi:")
-        row2 = col2.row(align=True)
-        row2.operator("nl2scene3d.apply_from_text", text="2. Applica (incollato)", icon="PASTEDOWN")
-        row2.operator("nl2scene3d.apply_from_file", text="…da file", icon="FILEBROWSER")
+        col2.label(text="Allega i 2 render + copia 'NL2_AI_Prompt' nel tuo LLM,", icon="INFO")
+        col2.label(text="incolla la risposta nel Text 'NL2_AI_Response', poi:")
+        row3 = col2.row(align=True)
+        row3.operator("nl2scene3d.apply_from_text", text="2. Applica (incollato)", icon="PASTEDOWN")
+        row3.operator("nl2scene3d.apply_from_file", text="…da file", icon="FILEBROWSER")
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +204,8 @@ def register():
     bpy.types.Scene.nl2_overrides_index = IntProperty(default=0)
     bpy.types.Scene.nl2_overrides_enabled = BoolProperty(
         name="Override manuali",
-        description="Se attivo, usa le scelte manuali fisso/mobile al posto "
-                    "dell'automatico",
+        description="Se attivo, usa le scelte manuali (etichetta / fisso / padre) "
+                    "al posto dell'automatico",
         default=False,
     )
     bpy.types.Scene.nl2_has_home = BoolProperty(

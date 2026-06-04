@@ -133,6 +133,9 @@ You are provided with:
 - A perspective image of the room.
 - A top-down (floor plan) image of the room.
 
+Both images have each object's name printed on top of it. Those names are exactly
+the `name` values used in the JSON below: use the labels to match what you see in
+the images to the objects in the data.
 The current object positions have been intentionally randomized and MUST NOT be
 considered a valid layout. Your task is to design a COMPLETELY NEW arrangement of
 the objects from scratch. Do not make small adjustments to the current layout:
@@ -146,7 +149,11 @@ Interpret every field exactly as defined here.
 - `room`: the rectangular floor boundary, in meters (`x_min, x_max, y_min, y_max`).
   Every object must stay fully inside it.
 - `fixed_objects`: obstacles you must NOT move and must NOT overlap. They never
-  appear in your output. Treat them as hard, immovable constraints.
+  appear in your output. Treat them as hard, immovable constraints. They may
+  include fixtures that mark an entrance (for example door hardware): keep the
+  area in front of such a fixture clear so the doorway stays usable. If
+  `fixed_objects` is empty, no fixed obstacle is defined and you only need to
+  respect the `room` boundary.
 - `movable_objects`: the ONLY objects you reposition. For each one you output a
   new `x`, `y`, and `rotation_deg`.
   - `x`, `y`: the object CENTER, in meters (current/randomized value, to replace).

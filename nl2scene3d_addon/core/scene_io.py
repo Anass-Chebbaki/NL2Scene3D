@@ -240,6 +240,24 @@ def format_inspection(state: SceneState) -> str:
         for n in suspicious:
             lines.append(f"  - {n}")
 
+    # Avviso scala: un oggetto che occupa una quota implausibile della stanza e'
+    # quasi sempre scala non applicata o unita' d'import sbagliate. Aiuta a capire
+    # cosa ridimensionare prima di mandare la scena all'LLM.
+    if rb is not None:
+        room_w, room_d = rb.x_max - rb.x_min, rb.y_max - rb.y_min
+        oversized = []
+        for o in state.objects:
+            if o.category in ("structural", "technical"):
+                continue
+            w, d = o.transform.dimensions[0], o.transform.dimensions[1]
+            if (room_w > 0 and w > 0.7 * room_w) or (room_d > 0 and d > 0.7 * room_d):
+                oversized.append((o.name, w, d))
+        if oversized:
+            lines.append("")
+            lines.append("ATTENZIONE: impronta sospetta (scala/unita'?), ridimensiona questi oggetti:")
+            for n, w, d in oversized:
+                lines.append(f"  - {n}: {w:.2f} x {d:.2f} m")
+
     return "\n".join(lines)
 
 

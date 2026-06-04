@@ -2,17 +2,15 @@
 """
 Operatori Blender. Sono volutamente SOTTILI: orchestrano i moduli del core e
 gestiscono UI/errori, senza contenere logica geometrica.
-
-Step 2: solo Randomize (estrai -> randomizza -> applica).
-Gli operatori di rendering/AI Reorder arrivano negli step successivi.
 """
 
+import os
 import traceback
 
 import bpy  # type: ignore
 from bpy.types import Operator  # type: ignore
 
-from .core import reorganizer, scene_io
+from .core import render, reorganizer, scene_io
 from .core.classify import default_classification, suggest_grouping
 from .core.randomizer import SceneRandomizer
 
@@ -49,6 +47,23 @@ def _build_overrides(context):
     }
 
 
+def _label_name_set(context):
+    """
+    Insieme dei nomi da etichettare nei render. Generico per qualsiasi scena:
+      - parte da tutti gli oggetti reali (esclude camere e luci);
+      - se nella lista override un oggetto ha 'label' spento, viene escluso.
+    Cosi' l'utente accende/spegne l'etichetta per ogni oggetto dal pannello,
+    senza dover attivare gli override fisso/mobile.
+    """
+    scene = context.scene
+    names = {o.name for o in scene.objects if o.type not in {"CAMERA", "LIGHT"}}
+    items = getattr(scene, "nl2_overrides", None)
+    if items and len(items):
+        excluded = {e.name for e in items if not e.label}
+        names -= excluded
+    return names
+
+
 def _listable_objects(scene):
     """Oggetti che ha senso elencare negli override (esclude camere e luci)."""
     return [o for o in scene.objects if o.type not in {"CAMERA", "LIGHT"}]
@@ -73,6 +88,7 @@ def _sync_overrides(scene) -> tuple[int, int]:
         entry = items.add()
         entry.name = obj.name
         entry.fixed = not mov
+        entry.label = True  # di default etichetta tutto
         added += 1
 
     removed = 0
@@ -149,6 +165,23 @@ class NL2SCENE3D_OT_overrides_suggest_groups(Operator):
             return {"CANCELLED"}
 
 
+class NL2SCENE3D_OT_overrides_labels_all(Operator):
+    """Accende o spegne l'etichetta su TUTTE le voci in un colpo solo."""
+
+    bl_idname  = "nl2scene3d.overrides_labels_all"
+    bl_label   = "Etichette: tutte/nessuna"
+    bl_options = {"REGISTER", "UNDO"}
+
+    value: bpy.props.BoolProperty(name="Etichetta", default=True)  # type: ignore
+
+    def execute(self, context):
+        _sync_overrides(context.scene)
+        for entry in context.scene.nl2_overrides:
+            entry.label = self.value
+        self.report({"INFO"}, f"Etichette {'attivate' if self.value else 'disattivate'} su tutte le voci.")
+        return {"FINISHED"}
+
+
 class NL2SCENE3D_OT_overrides_clear(Operator):
     """Svuota la lista degli override."""
 
@@ -196,7 +229,7 @@ class NL2SCENE3D_OT_inspect(Operator):
             state  = scene_io.extract_scene_state(overrides=_build_overrides(context))
             report = scene_io.format_inspection(state)
 
-            # Scrive il report in un Text datablock apribile nel Text Editor.
+             # Scrive il report in un Text datablock apribile nel Text Editor.
             name = "NL2_Inspect_Report"
             txt  = bpy.data.texts.get(name) or bpy.data.texts.new(name)
             txt.clear()
@@ -219,7 +252,152 @@ class NL2SCENE3D_OT_inspect(Operator):
             traceback.print_exc()
             return {"CANCELLED"}
 
+class NL2SCENE3D_OT_scale_to_real(Operator):
+    """Scala la scena a misura reale partendo da UN riferimento noto (uniforme)."""
 
+    bl_idname  = "nl2scene3d.scale_to_real"
+    bl_label   = "Scala a misura reale"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(  # type: ignore
+        name="Riferimento",
+        items=[
+            ("REFERENCE", "Oggetto noto", "Indichi un oggetto e la sua misura reale; il resto segue"),
+            ("ROOM", "Dimensione stanza", "Indichi quanto deve essere lungo il lato maggiore della stanza"),
+        ],
+        default="REFERENCE",
+    )
+    reference_object: bpy.props.StringProperty(  # type: ignore
+        name="Oggetto", description="Oggetto di cui conosci la misura reale",
+    )
+    target_size: bpy.props.FloatProperty(  # type: ignore
+        name="Misura reale (m)",
+        description="Lato piu' lungo reale: dell'oggetto scelto (modo Oggetto) o della stanza (modo Stanza)",
+        default=2.0, min=0.001, soft_max=20.0,
+    )
+    scale_structural: bpy.props.BoolProperty(  # type: ignore
+        name="Scala anche la stanza/strutturali",
+        description="Se spento, lascia stanza/muri e camera/luci come sono e scala solo arredi e oggetti",
+        default=False,
+    )
+    apply_scale: bpy.props.BoolProperty(  # type: ignore
+        name="Applica scala (consigliato)", default=True,
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=340)
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "mode")
+        if self.mode == "REFERENCE":
+            col.prop_search(self, "reference_object", context.scene, "objects")
+        col.prop(self, "target_size")
+        col.prop(self, "scale_structural")
+        col.prop(self, "apply_scale")
+
+    def execute(self, context):
+        import mathutils  # noqa: PLC0415
+        scene = context.scene
+
+        meshes = [o for o in scene.objects if o.type == "MESH"]
+        if not meshes:
+            self.report({"WARNING"}, "Nessun mesh nella scena.")
+            return {"CANCELLED"}
+
+        # AABB unione (mondo) dei mesh: centro-pivot + dimensione per il modo Stanza.
+        big = 1.0e9
+        mins = mathutils.Vector((big, big, big))
+        maxs = mathutils.Vector((-big, -big, -big))
+        for o in meshes:
+            for c in o.bound_box:
+                w = o.matrix_world @ mathutils.Vector(c)
+                mins = mathutils.Vector((min(mins.x, w.x), min(mins.y, w.y), min(mins.z, w.z)))
+                maxs = mathutils.Vector((max(maxs.x, w.x), max(maxs.y, w.y), max(maxs.z, w.z)))
+        center = (mins + maxs) / 2.0
+
+        if self.mode == "REFERENCE":
+            ref = scene.objects.get(self.reference_object)
+            if ref is None:
+                self.report({"ERROR"}, "Scegli un oggetto di riferimento valido.")
+                return {"CANCELLED"}
+            current = max(ref.dimensions.x, ref.dimensions.y, ref.dimensions.z)
+        else:
+            current = max(maxs.x - mins.x, maxs.y - mins.y)
+
+        if current <= 1e-9:
+            self.report({"ERROR"}, "Dimensione di riferimento nulla: impossibile calcolare il fattore.")
+            return {"CANCELLED"}
+
+        factor = float(self.target_size) / float(current)
+        if not (factor > 0.0) or factor != factor:  # >0 e non-NaN
+            self.report({"ERROR"}, "Fattore di scala non valido.")
+            return {"CANCELLED"}
+
+        def is_structural(o):
+            dims = [o.dimensions.x, o.dimensions.y, o.dimensions.z]
+            cat, _ = default_classification(o.name, o.type, dims)
+            return cat == "structural"
+
+        targets = []
+        for o in scene.objects:
+            if not self.scale_structural and (o.type in {"CAMERA", "LIGHT"} or is_structural(o)):
+                continue
+            targets.append(o)
+        if not targets:
+            self.report({"WARNING"}, "Nessun oggetto da scalare con queste opzioni.")
+            return {"CANCELLED"}
+
+        # Scala uniforme attorno al centro scena: S = T(C) . Scale(f) . T(-C)
+        S = (mathutils.Matrix.Translation(center)
+             @ mathutils.Matrix.Scale(factor, 4)
+             @ mathutils.Matrix.Translation(-center))
+
+        def native_depth(b):
+            d, p = 0, b.parent
+            while p is not None:
+                d += 1
+                p = p.parent
+            return d
+
+        orig = {o.name: o.matrix_world.copy() for o in targets}
+        for o in sorted(targets, key=native_depth):  # padri nativi prima dei figli
+            o.matrix_world = S @ orig[o.name]
+        try:
+            context.view_layer.update()
+        except Exception:
+            pass
+
+        if self.apply_scale:
+            try:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except Exception:
+                pass
+            try:
+                bpy.ops.object.select_all(action="DESELECT")
+                roots = [o for o in targets if o.type == "MESH" and o.parent is None]
+                for o in roots:
+                    o.select_set(True)
+                if roots:
+                    context.view_layer.objects.active = roots[0]
+                    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+            except Exception:
+                pass
+
+        # Lo stato "originale" salvato non e' piu' coerente con la nuova scala: azzeralo.
+        for o in scene.objects:
+            for key in ("nl2_home_loc", "nl2_home_rot"):
+                if key in o:
+                    del o[key]
+        scene.nl2_has_home = False
+
+        self.report(
+            {"INFO"},
+            f"Scena scalata di {factor:.3f}x ({len(targets)} oggetti). "
+            f"Rifai Randomize/Export. Stato originale azzerato.",
+        )
+        return {"FINISHED"}
+    
 class NL2SCENE3D_OT_randomize(Operator):
     """Disordina gli oggetti mobili dentro i confini della stanza."""
 
@@ -279,6 +457,46 @@ class NL2SCENE3D_OT_randomize(Operator):
 _RESPONSE_TEXT = "NL2_AI_Response"  # Text datablock dove l'utente incolla il JSON dell'LLM
 
 
+class NL2SCENE3D_OT_render_labeled(Operator):
+    """Renderizza le viste (prospettica + pianta) con i nomi degli oggetti sovrapposti."""
+
+    bl_idname  = "nl2scene3d.render_labeled"
+    bl_label   = "Render con etichette"
+    bl_options = {"REGISTER"}
+
+    add_top_down: bpy.props.BoolProperty(  # type: ignore
+        name="Vista dall'alto (pianta)",
+        description="Genera anche il render ortografico dall'alto",
+        default=True,
+    )
+    brighten: bpy.props.FloatProperty(  # type: ignore
+        name="Luminosita'",
+        description="Schiarisce i render (1.0 = invariato, >1 piu' chiaro)",
+        default=1.5, min=0.5, max=3.0,
+    )
+
+    def execute(self, context):
+        try:
+            names = _label_name_set(context)
+            paths = render.render_labeled_views(
+                add_top_down=self.add_top_down,
+                label_names=names,
+                brighten=self.brighten,
+            )
+            if not paths:
+                self.report({"WARNING"}, "Nessun render generato (manca la camera?).")
+                return {"CANCELLED"}
+            self.report(
+                {"INFO"},
+                f"Render salvati: {len(paths)} file in {os.path.dirname(paths[0])}",
+            )
+            return {"FINISHED"}
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"Render fallito: {exc}")
+            traceback.print_exc()
+            return {"CANCELLED"}
+
+
 class NL2SCENE3D_OT_export_for_llm(Operator):
     """Genera il prompt + JSON della scena e lo scrive in un Text, pronto da copiare nell'LLM."""
 
@@ -288,7 +506,6 @@ class NL2SCENE3D_OT_export_for_llm(Operator):
 
     def execute(self, context):
         try:
-            # Fotografa l'originale al primo intervento (per 'Reset to Original').
             if not context.scene.nl2_has_home:
                 scene_io.capture_home_state()
                 context.scene.nl2_has_home = True
@@ -302,7 +519,6 @@ class NL2SCENE3D_OT_export_for_llm(Operator):
             prompt = reorganizer.build_prompt(state)  # istruzione di default fissa
             _write_text("NL2_AI_Prompt", prompt)
 
-            # Prepara (vuota) la casella in cui incollerai la risposta dell'LLM.
             txt = bpy.data.texts.get(_RESPONSE_TEXT) or bpy.data.texts.new(_RESPONSE_TEXT)
             txt.clear()
 
@@ -323,8 +539,7 @@ def _apply_llm_response(operator, context, raw_text: str):
     """
     Cuore condiviso della metà 'a valle': identico a cio' che faceva l'AI Reorder
     dopo aver ricevuto la risposta del modello, ma il testo arriva da te (casella
-    incollata o file). Rilegge la scena viva, sanifica il JSON e applica.
-    """
+    incollata o file). Rilegge la scena viva, sanifica il JSON dell'LLM e applica."""
     wm = context.window_manager
     try:
         wm.progress_begin(0, 100)
@@ -437,10 +652,13 @@ _classes = (
     NL2SCENE3D_OT_overrides_sync,
     NL2SCENE3D_OT_overrides_autodetect,
     NL2SCENE3D_OT_overrides_suggest_groups,
+    NL2SCENE3D_OT_overrides_labels_all,
     NL2SCENE3D_OT_overrides_clear,
     NL2SCENE3D_OT_reset_home,
     NL2SCENE3D_OT_inspect,
+    NL2SCENE3D_OT_scale_to_real,
     NL2SCENE3D_OT_randomize,
+    NL2SCENE3D_OT_render_labeled,
     NL2SCENE3D_OT_export_for_llm,
     NL2SCENE3D_OT_apply_from_text,
     NL2SCENE3D_OT_apply_from_file,
