@@ -87,9 +87,61 @@ def _declutter(boxes: list, width: int, height: int, pad: int = 5, iterations: i
 # Disegno etichette (Pillow): schiarisce, declutter, richiami
 # ---------------------------------------------------------------------------
 
+def _gutter_layout(boxes, W, H, gap=10, edge=8):
+    """
+    PURO. Assegna ogni etichetta al bordo (L/R/T/B) piu' vicino al suo oggetto,
+    calcola i margini (cornice) necessari e impacchetta le etichette lungo ogni
+    bordo senza sovrapporle. Ritorna (ml, mr, mt, mb, Wp, Hp); scrive cx, cy
+    (centro box, in coordinate del canvas con cornice) e 'border' in ogni box.
+    """
+    for b in boxes:
+        dl, dr, dt, db = b["ax"], W - b["ax"], b["ay"], H - b["ay"]
+        m = min(dl, dr, dt, db)
+        b["border"] = "L" if m == dl else "R" if m == dr else "T" if m == dt else "B"
+
+    L = [b for b in boxes if b["border"] == "L"]
+    R = [b for b in boxes if b["border"] == "R"]
+    T = [b for b in boxes if b["border"] == "T"]
+    B = [b for b in boxes if b["border"] == "B"]
+
+    ml = (max(b["w"] for b in L) + 2 * gap) if L else gap
+    mr = (max(b["w"] for b in R) + 2 * gap) if R else gap
+    mt = (max(b["h"] for b in T) + 2 * gap) if T else gap
+    mb = (max(b["h"] for b in B) + 2 * gap) if B else gap
+    Wp, Hp = W + ml + mr, H + mt + mb
+
+    def pack(items, key, dim, lo, hi):
+        items = sorted(items, key=key)
+        total = sum(b[dim] for b in items) + gap * max(0, len(items) - 1)
+        cur = lo + max(0.0, (hi - lo - total)) / 2.0
+        for b in items:
+            b["_pos"] = cur + b[dim] / 2.0
+            cur += b[dim] + gap
+
+    pack(L, lambda b: b["ay"], "h", edge, Hp - edge)
+    for b in L:
+        b["cx"] = ml - gap - b["w"] / 2.0; b["cy"] = b["_pos"]
+    pack(R, lambda b: b["ay"], "h", edge, Hp - edge)
+    for b in R:
+        b["cx"] = Wp - mr + gap + b["w"] / 2.0; b["cy"] = b["_pos"]
+    pack(T, lambda b: b["ax"], "w", edge, Wp - edge)
+    for b in T:
+        b["cy"] = mt - gap - b["h"] / 2.0; b["cx"] = b["_pos"]
+    pack(B, lambda b: b["ax"], "w", edge, Wp - edge)
+    for b in B:
+        b["cy"] = Hp - mb + gap + b["h"] / 2.0; b["cx"] = b["_pos"]
+    return ml, mr, mt, mb, Wp, Hp
+
+
 def _draw_labels(image_path, points, font_size=18, brighten=1.5, gamma=1.6) -> bool:
+    """
+    Etichette nella CORNICE attorno alla scena (mai sopra la scena): la scena
+    resta interamente visibile, ogni etichetta sta nel margine del bordo piu'
+    vicino al suo oggetto ed e' collegata da una linea di richiamo.
+    """
     try:
-        from PIL import Image, ImageDraw, ImageEnhance, ImageFont  # type: ignore
+        from PIL import Image, ImageDraw, ImageEnhance, ImageFile, ImageFont  # type: ignore
+        ImageFile.LOAD_TRUNCATED_IMAGES = True  # tollera PNG non completati al 100%
     except ImportError:
         if points:
             sidecar = os.path.splitext(image_path)[0] + ".labels.json"
@@ -98,60 +150,66 @@ def _draw_labels(image_path, points, font_size=18, brighten=1.5, gamma=1.6) -> b
             logger.warning("Pillow non disponibile: etichette non disegnate, scritto %s", sidecar)
         return False
 
-    img = Image.open(image_path).convert("RGBA")
-
-    rgb = img.convert("RGB")
+    base = Image.open(image_path).convert("RGB")
     if brighten and abs(brighten - 1.0) > 1e-3:
-        rgb = ImageEnhance.Brightness(rgb).enhance(brighten)
+        base = ImageEnhance.Brightness(base).enhance(brighten)
     if gamma and abs(gamma - 1.0) > 1e-3:
         inv = 1.0 / gamma
         lut = [min(255, int(round(255.0 * ((i / 255.0) ** inv)))) for i in range(256)]
-        rgb = rgb.point(lut * 3)
-    img = rgb.convert("RGBA")
+        base = base.point(lut * 3)
 
-    if points:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-        except OSError:
-            font = ImageFont.load_default()
+    if not points:
+        base.save(image_path)
+        return True
 
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except OSError:
+        font = ImageFont.load_default()
 
-        boxes = []
-        for name, x, y in points:
-            tb = draw.textbbox((0, 0), name, font=font)
-            tw, th = tb[2] - tb[0], tb[3] - tb[1]
-            boxes.append({
-                "name": name, "ax": float(x), "ay": float(y),
-                "cx": float(x), "cy": float(y),
-                "w": tw + 8, "h": th + 6, "tw": tw, "th": th, "ox": tb[0], "oy": tb[1],
-            })
+    W, H = base.size
+    measure = ImageDraw.Draw(base)
+    boxes = []
+    for name, x, y in points:
+        tb = measure.textbbox((0, 0), name, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        boxes.append({"name": name, "ax": float(x), "ay": float(y),
+                      "w": tw + 10, "h": th + 8, "tw": tw, "th": th, "ox": tb[0], "oy": tb[1]})
 
-        _declutter(boxes, img.width, img.height, pad=16)
+    ml, mr, mt, mb, Wp, Hp = _gutter_layout(boxes, W, H)
 
-        for b in boxes:
-            # linea di richiamo dal punto dell'oggetto all'etichetta spostata
-            if (b["cx"] - b["ax"]) ** 2 + (b["cy"] - b["ay"]) ** 2 > 36:
-                draw.line((b["ax"], b["ay"], b["cx"], b["cy"]), fill=(255, 255, 255, 235), width=1)
-                draw.ellipse((b["ax"] - 2, b["ay"] - 2, b["ax"] + 2, b["ay"] + 2), fill=(255, 255, 255, 255))
-            # etichetta: riquadro NERO OPACO + testo bianco (nessuna trasparenza)
-            x0, y0 = b["cx"] - b["w"] / 2.0, b["cy"] - b["h"] / 2.0
-            draw.rectangle((x0, y0, x0 + b["w"], y0 + b["h"]), fill=(0, 0, 0, 255))
-            tx = b["cx"] - b["tw"] / 2.0 - b["ox"]
-            ty = b["cy"] - b["th"] / 2.0 - b["oy"]
-            draw.text((tx, ty), b["name"], font=font, fill=(255, 255, 255, 255))
+    # canvas con cornice: sfondo grigio scuro neutro, scena incollata al centro
+    canvas = Image.new("RGB", (int(Wp), int(Hp)), (40, 40, 40))
+    canvas.paste(base, (int(ml), int(mt)))
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-        img = Image.alpha_composite(img, overlay)
+    for b in boxes:
+        ax, ay = b["ax"] + ml, b["ay"] + mt          # ancora nello spazio del canvas
+        cx, cy = b["cx"], b["cy"]
+        # punto di partenza della linea: bordo del box rivolto verso la scena
+        if b["border"] == "L":   sx, sy = cx + b["w"] / 2.0, cy
+        elif b["border"] == "R": sx, sy = cx - b["w"] / 2.0, cy
+        elif b["border"] == "T": sx, sy = cx, cy + b["h"] / 2.0
+        else:                    sx, sy = cx, cy - b["h"] / 2.0
+        draw.line((sx, sy, ax, ay), fill=(255, 255, 255, 230), width=1)
+        draw.ellipse((ax - 2, ay - 2, ax + 2, ay + 2), fill=(255, 255, 255, 255))
+        # etichetta: riquadro NERO OPACO + testo bianco
+        x0, y0 = cx - b["w"] / 2.0, cy - b["h"] / 2.0
+        draw.rectangle((x0, y0, x0 + b["w"], y0 + b["h"]), fill=(0, 0, 0, 255))
+        tx = cx - b["tw"] / 2.0 - b["ox"]
+        ty = cy - b["th"] / 2.0 - b["oy"]
+        draw.text((tx, ty), b["name"], font=font, fill=(255, 255, 255, 255))
 
-    img.convert("RGB").save(image_path)
+    Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB").save(image_path)
     return True
 
 
 def _draw_overlay(image_path, axes_dirs, meters_per_pixel=None) -> None:
     """Disegna bussola assi (X rosso, Y verde) e, se ortho, la barra di scala."""
     try:
-        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+        from PIL import Image, ImageDraw, ImageFile, ImageFont  # type: ignore
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
     except ImportError:
         return
 
@@ -354,7 +412,7 @@ def _make_iso_camera(scene, aabb=None):
 def render_labeled_views(
     use_existing_camera: bool = True,
     add_top_down: bool = True,
-    add_iso: bool = True,
+    add_iso: bool = False,
     label_names: Optional[set] = None,
     brighten: float = 1.5,
     gamma: float = 1.6,
