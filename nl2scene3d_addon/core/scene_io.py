@@ -354,3 +354,105 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
         counters["updated"], counters["not_found"], counters["skipped"],
     )
     return counters
+
+# ===========================================================================
+# METRICHE DI SPOSTAMENTO (snapshot in spazio MONDO)
+# Confronta: originale (O) -> randomizzato (R) -> riordino corrente (C).
+# Da incollare in fondo a core/scene_io.py.
+# ===========================================================================
+
+def capture_pose_snapshot(tag: str) -> int:
+    """
+    Salva la posa MONDO (location + rotation Euler XYZ) di ogni MESH come custom
+    property nl2_{tag}_loc / nl2_{tag}_rot. Usato per le metriche.
+    """
+    import bpy  # noqa: PLC0415
+    kl, kr = f"nl2_{tag}_loc", f"nl2_{tag}_rot"
+    n = 0
+    for obj in bpy.context.scene.objects:
+        if obj.type in {"CAMERA", "LIGHT"}:
+            continue
+        m = obj.matrix_world
+        obj[kl] = tuple(m.translation)
+        obj[kr] = tuple(m.to_euler("XYZ"))
+        n += 1
+    return n
+
+
+def _read_snapshot(tag: str) -> dict:
+    import bpy  # noqa: PLC0415
+    kl, kr = f"nl2_{tag}_loc", f"nl2_{tag}_rot"
+    out = {}
+    for obj in bpy.context.scene.objects:
+        if kl in obj:
+            out[obj.name] = (tuple(obj[kl]), tuple(obj.get(kr, (0.0, 0.0, 0.0))))
+    return out
+
+
+def _read_current_world() -> dict:
+    import bpy  # noqa: PLC0415
+    out = {}
+    for obj in bpy.context.scene.objects:
+        if obj.type in {"CAMERA", "LIGHT"}:
+            continue
+        m = obj.matrix_world
+        out[obj.name] = (tuple(m.translation), tuple(m.to_euler("XYZ")))
+    return out
+
+
+def _yaw_delta_deg(rot_a, rot_b) -> float:
+    """Differenza di rotazione attorno a Z, normalizzata in [0,180]. PURO."""
+    import math  # noqa: PLC0415
+    d = math.degrees(rot_b[2] - rot_a[2])
+    return abs((d + 180.0) % 360.0 - 180.0)
+
+
+def _dist_xy(loc_a, loc_b) -> float:
+    """Distanza orizzontale (XY). PURO."""
+    dx = loc_b[0] - loc_a[0]
+    dy = loc_b[1] - loc_a[1]
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _fmt(v, w, dec) -> str:
+    return f"{'-':>{w}}" if v != v else f"{v:>{w}.{dec}f}"  # NaN -> '-'
+
+
+def format_metrics_report(orig: dict, rand: dict, cur: dict) -> str:
+    """Tabella con i confronti O->R e R->C. PURO (riceve dict, non bpy)."""
+    lines = ["NL2Scene3D - Metriche di spostamento (metri, gradi; piano XY)", "=" * 58]
+    if not rand:
+        lines.append("Nessuno snapshot 'randomizzato'. Esegui prima 'Randomize Layout',")
+        lines.append("poi applica una risposta: le metriche compaiono qui.")
+        return "\n".join(lines)
+
+    names = sorted(set(rand) | set(orig) | set(cur))
+    header = f"{'oggetto':28} {'O->R d':>8} {'R->C d':>8} {'R->C rot':>9}"
+    lines += [header, "-" * len(header)]
+
+    tot_rc, moved = 0.0, 0
+    for nm in names:
+        o, r, c = orig.get(nm), rand.get(nm), cur.get(nm)
+        d_or = _dist_xy(o[0], r[0]) if (o and r) else float("nan")
+        d_rc = _dist_xy(r[0], c[0]) if (r and c) else float("nan")
+        yaw  = _yaw_delta_deg(r[1], c[1]) if (r and c) else float("nan")
+        lines.append(f"{nm[:28]:28} {_fmt(d_or,8,3)} {_fmt(d_rc,8,3)} {_fmt(yaw,9,1)}")
+        if (r and c) and d_rc == d_rc:
+            tot_rc += d_rc
+            if d_rc > 1e-4:
+                moved += 1
+
+    lines.append("-" * len(header))
+    avg = (tot_rc / moved) if moved else 0.0
+    lines.append(f"Oggetti spostati dall'LLM (R->C): {moved}")
+    lines.append(f"Spostamento totale R->C: {tot_rc:.3f} m   medio: {avg:.3f} m")
+    lines += ["", "Legenda: O=originale, R=randomizzato, C=corrente (riordino).",
+              "O->R = quanto hai disordinato; R->C = quanto ha mosso l'LLM.",
+              "d = distanza orizzontale; rot = variazione di rotazione attorno a Z."]
+    return "\n".join(lines)
+
+
+def build_metrics_report() -> str:
+    """Legge gli snapshot O/R + posa corrente e produce il report. bpy-facing."""
+    return format_metrics_report(_read_snapshot("m_orig"), _read_snapshot("m_rand"),
+                                 _read_current_world())

@@ -130,12 +130,17 @@ Do not assume a specific room type in advance: infer it from the data and images
 
 You are provided with:
 - A JSON description of the scene (schema below).
-- A perspective image of the room.
-- A top-down (floor plan) image of the room.
+- One or more rendered images of the room: a top-down (floor plan) view and one
+  or more angled views (perspective and/or isometric).
 
-Both images have each object's name printed on top of it. Those names are exactly
+Every image has each object's name printed on top of it. Those names are exactly
 the `name` values used in the JSON below: use the labels to match what you see in
 the images to the objects in the data.
+Each ortho image (top-down and isometric) also shows a scale bar (a labeled
+segment, e.g. "0.5 m" or "1 m") indicating real-world size, and a small X/Y
+axes compass (X in red, Y in green) showing world orientation. Use the scale
+bar to judge real distances and the compass to read directions; the perspective
+view shows only the compass, not the scale bar.
 The current object positions have been intentionally randomized and MUST NOT be
 considered a valid layout. Your task is to design a COMPLETELY NEW arrangement of
 the objects from scratch. Do not make small adjustments to the current layout:
@@ -337,6 +342,10 @@ def _shift(obj: SceneObject, dx: float, dy: float, rb: RoomBounds, wall_margin: 
     obj.transform.location[1] += dy
     _clamp_object(obj, rb, wall_margin)
 
+def _footprint_area(o: SceneObject) -> float:
+    """Area dell'impronta XY dell'oggetto: serve a decidere chi e' 'piu' grande'."""
+    d = o.transform.dimensions
+    return float(d[0]) * float(d[1])
 
 def _resolve_collisions(
     movable_roots: list[SceneObject],

@@ -1,89 +1,105 @@
 # nl2scene3d/core/render.py
 """
-Render automatico delle viste della scena, con le etichette (nome oggetto)
-sovrapposte. E' lo "Step 4": generare le immagini da allegare all'LLM senza
-doverle fare a mano.
+Render automatico delle viste della scena, con etichette + bussola assi + barra di scala.
 
-Modulo bpy-facing (come scene_io): la logica di rendering vive qui, mentre la
-matematica di proiezione 3D -> 2D, che e' PURA, sta in _ndc_to_pixels /
-_is_in_frame e si puo' testare senza Blender (come il resto del core).
+  - Render OpenGL/Workbench: sempre illuminato, mai nero (luminosita' + gamma).
+  - Prospettica d'angolo auto-inquadrata (mostra tutta la stanza), top-down e iso.
+  - Etichette ANTI-SOVRAPPOSIZIONE (declutter) con linee di richiamo.
+  - OVERLAY: bussola assi X/Y in ogni vista; barra di scala metrica SOLO nelle
+    viste ortografiche (top-down/iso), dove un pixel vale sempre gli stessi metri.
+    Sulla prospettica la barra non c'e' (sarebbe imprecisa): solo la bussola.
 
-Le etichette vengono disegnate SULL'immagine renderizzata (con Pillow), non con
-text-object 3D: cosi' non si sporca la scena e non resta nulla da ripulire. Se
-Pillow non e' installato nel Python di Blender, il render viene comunque salvato
-SENZA etichette e accanto viene scritto un sidecar '.labels.json' con le
-posizioni in pixel: la funzione non fallisce mai per colpa di una dipendenza.
-
-Z non viene mai toccata: il render fotografa la scena com'e'.
+Generico: nessun nome/tipo-stanza cablato. Proiezione 3D->2D, declutter e
+"nice number" della barra sono PURI. Z non viene mai toccata.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
+from typing import Optional
 
-from .settings import CONST, Constants, STRUCTURAL_PATTERNS
+from .settings import CONST, Constants
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helper PURI (testabili senza Blender)
+# Helper PURI
 # ---------------------------------------------------------------------------
 
 def _ndc_to_pixels(ndc_x: float, ndc_y: float, width: int, height: int) -> tuple[int, int]:
-    """
-    Converte coordinate normalizzate camera-view (0..1, origine in BASSO a
-    sinistra, com'e' il valore di world_to_camera_view) in pixel immagine
-    (origine in ALTO a sinistra). Puro: nessun bpy.
-    """
-    px = int(round(ndc_x * width))
-    py = int(round((1.0 - ndc_y) * height))
-    return px, py
+    return int(round(ndc_x * width)), int(round((1.0 - ndc_y) * height))
 
 
 def _is_in_frame(cam_x: float, cam_y: float, cam_z: float, margin: float = 0.02) -> bool:
-    """True se il punto e' DAVANTI alla camera (z>0) e dentro il frame (+margine)."""
     return cam_z > 0.0 and -margin <= cam_x <= 1.0 + margin and -margin <= cam_y <= 1.0 + margin
 
 
 def _safe(name: str) -> str:
-    """Rende un nome scena/oggetto sicuro per un filename."""
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
 
 
-def _looks_movable(obj_name: str) -> bool:
-    """Stima rapida 'mobile' per nome (esclude gli strutturali). Puro."""
-    low = obj_name.lower()
-    return not any(p in low for p in STRUCTURAL_PATTERNS)
+def _nice_length(raw_m: float) -> float:
+    """Arrotonda una lunghezza a un valore 'tondo' 1/2/5 x 10^k. PURO."""
+    if raw_m <= 0:
+        return 1.0
+    k = math.floor(math.log10(raw_m))
+    base = raw_m / (10 ** k)
+    nice = 1 if base < 1.5 else (2 if base < 3.5 else 5)
+    return nice * (10 ** k)
+
+
+def _declutter(boxes: list, width: int, height: int, pad: int = 5, iterations: int = 150) -> list:
+    """Scosta i riquadri finche' non si sovrappongono (MTV in pixel). PURO."""
+    for _ in range(iterations):
+        moved = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                dx = b["cx"] - a["cx"]
+                dy = b["cy"] - a["cy"]
+                if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                    dy = 1.0
+                ox = (a["w"] + b["w"]) / 2.0 + pad - abs(dx)
+                oy = (a["h"] + b["h"]) / 2.0 + pad - abs(dy)
+                if ox > 0 and oy > 0:
+                    if ox < oy:
+                        s = ox / 2.0 * (1.0 if dx >= 0 else -1.0)
+                        a["cx"] -= s; b["cx"] += s
+                    else:
+                        s = oy / 2.0 * (1.0 if dy >= 0 else -1.0)
+                        a["cy"] -= s; b["cy"] += s
+                    moved = True
+        for bx in boxes:
+            hw, hh = bx["w"] / 2.0, bx["h"] / 2.0
+            bx["cx"] = min(max(bx["cx"], hw), width - hw)
+            bx["cy"] = min(max(bx["cy"], hh), height - hh)
+        if not moved:
+            break
+    return boxes
 
 
 # ---------------------------------------------------------------------------
-# Disegno etichette (Pillow, con fallback)
+# Disegno etichette (Pillow): schiarisce, declutter, richiami
 # ---------------------------------------------------------------------------
 
-def _draw_labels(image_path: str, points: list[tuple[str, int, int]], font_size: int = 18, brighten: float = 1.5,
-    gamma: float = 1.6,) -> bool:
-    """
-    Disegna le etichette sull'immagine gia' salvata. Ritorna True se ha usato
-    Pillow, False se Pillow non c'e' (in quel caso scrive un sidecar .labels.json
-    e non disegna nulla).
-    """
+def _draw_labels(image_path, points, font_size=18, brighten=1.5, gamma=1.6) -> bool:
     try:
-        from PIL import Image, ImageDraw, ImageEnhance, ImageFont 
+        from PIL import Image, ImageDraw, ImageEnhance, ImageFont  # type: ignore
     except ImportError:
-        sidecar = os.path.splitext(image_path)[0] + ".labels.json"
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump([{"name": n, "x": x, "y": y} for n, x, y in points], f, indent=2)
-        logger.warning("Pillow non disponibile: etichette non disegnate, scritto %s", sidecar)
+        if points:
+            sidecar = os.path.splitext(image_path)[0] + ".labels.json"
+            with open(sidecar, "w", encoding="utf-8") as f:
+                json.dump([{"name": n, "x": x, "y": y} for n, x, y in points], f, indent=2)
+            logger.warning("Pillow non disponibile: etichette non disegnate, scritto %s", sidecar)
         return False
 
     img = Image.open(image_path).convert("RGBA")
 
-    # 1) schiarisci: brightness lineare + un gamma che ALZA le ombre, cosi' anche
-    #    i materiali scuri (mobili neri) diventano leggibili senza bruciare le luci.
     rgb = img.convert("RGB")
     if brighten and abs(brighten - 1.0) > 1e-3:
         rgb = ImageEnhance.Brightness(rgb).enhance(brighten)
@@ -92,30 +108,93 @@ def _draw_labels(image_path: str, points: list[tuple[str, int, int]], font_size:
         lut = [min(255, int(round(255.0 * ((i / 255.0) ** inv)))) for i in range(256)]
         rgb = rgb.point(lut * 3)
     img = rgb.convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw    = ImageDraw.Draw(overlay)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-    except OSError:
-        font = ImageFont.load_default()
 
-    for name, x, y in points:
-        tb       = draw.textbbox((0, 0), name, font=font)
-        tw, th   = tb[2] - tb[0], tb[3] - tb[1]
-        bx, by   = x - tw // 2, y - th // 2
-        draw.rectangle((bx - 3, by - 3, bx + tw + 3, by + th + 3), fill=(0, 0, 0, 160))
-        draw.text((bx, by), name, font=font, fill=(255, 255, 255, 255))
+    if points:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except OSError:
+            font = ImageFont.load_default()
 
-    Image.alpha_composite(img, overlay).convert("RGB").save(image_path)
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        boxes = []
+        for name, x, y in points:
+            tb = draw.textbbox((0, 0), name, font=font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            boxes.append({
+                "name": name, "ax": float(x), "ay": float(y),
+                "cx": float(x), "cy": float(y),
+                "w": tw + 8, "h": th + 6, "tw": tw, "th": th, "ox": tb[0], "oy": tb[1],
+            })
+
+        _declutter(boxes, img.width, img.height, pad=16)
+
+        for b in boxes:
+            # linea di richiamo dal punto dell'oggetto all'etichetta spostata
+            if (b["cx"] - b["ax"]) ** 2 + (b["cy"] - b["ay"]) ** 2 > 36:
+                draw.line((b["ax"], b["ay"], b["cx"], b["cy"]), fill=(255, 255, 255, 235), width=1)
+                draw.ellipse((b["ax"] - 2, b["ay"] - 2, b["ax"] + 2, b["ay"] + 2), fill=(255, 255, 255, 255))
+            # etichetta: riquadro NERO OPACO + testo bianco (nessuna trasparenza)
+            x0, y0 = b["cx"] - b["w"] / 2.0, b["cy"] - b["h"] / 2.0
+            draw.rectangle((x0, y0, x0 + b["w"], y0 + b["h"]), fill=(0, 0, 0, 255))
+            tx = b["cx"] - b["tw"] / 2.0 - b["ox"]
+            ty = b["cy"] - b["th"] / 2.0 - b["oy"]
+            draw.text((tx, ty), b["name"], font=font, fill=(255, 255, 255, 255))
+
+        img = Image.alpha_composite(img, overlay)
+
+    img.convert("RGB").save(image_path)
     return True
 
 
+def _draw_overlay(image_path, axes_dirs, meters_per_pixel=None) -> None:
+    """Disegna bussola assi (X rosso, Y verde) e, se ortho, la barra di scala."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    except ImportError:
+        return
+
+    img = Image.open(image_path).convert("RGBA")
+    W, H = img.size
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 15)
+        font_axis = ImageFont.truetype("DejaVuSans.ttf", 24)   # bussola piu' grande
+    except OSError:
+        font = ImageFont.load_default()
+        font_axis = font
+
+    # --- bussola assi (in alto a destra), ingrandita ---
+    if axes_dirs:
+        (xdx, xdy), (ydx, ydy) = axes_dirs
+        ax, ay, L = W - 92, 92, 56
+        draw.line((ax, ay, ax + xdx * L, ay + xdy * L), fill=(235, 70, 70, 255), width=5)
+        draw.text((ax + xdx * (L + 14) - 7, ay + xdy * (L + 14) - 12), "X", font=font_axis, fill=(235, 70, 70, 255))
+        draw.line((ax, ay, ax + ydx * L, ay + ydy * L), fill=(70, 200, 70, 255), width=5)
+        draw.text((ax + ydx * (L + 14) - 7, ay + ydy * (L + 14) - 12), "Y", font=font_axis, fill=(70, 200, 70, 255))
+        draw.ellipse((ax - 5, ay - 5, ax + 5, ay + 5), fill=(255, 255, 255, 255))
+
+    # --- barra di scala (in basso a sinistra), solo viste ortografiche ---
+    if meters_per_pixel and meters_per_pixel > 0:
+        bar_m = _nice_length(140 * meters_per_pixel)
+        bar_px = int(round(bar_m / meters_per_pixel))
+        x0, y0 = 30, H - 36
+        draw.rectangle((x0 - 7, y0 - 22, x0 + bar_px + 7, y0 + 10), fill=(0, 0, 0, 150))
+        draw.line((x0, y0, x0 + bar_px, y0), fill=(255, 255, 255, 255), width=3)
+        draw.line((x0, y0 - 6, x0, y0 + 6), fill=(255, 255, 255, 255), width=3)
+        draw.line((x0 + bar_px, y0 - 6, x0 + bar_px, y0 + 6), fill=(255, 255, 255, 255), width=3)
+        draw.text((x0, y0 - 20), f"{bar_m:g} m", font=font, fill=(255, 255, 255, 255))
+
+    Image.alpha_composite(img, overlay).convert("RGB").save(image_path)
+
+
 # ---------------------------------------------------------------------------
-# Funzioni bpy-facing (import di bpy SOLO dentro le funzioni, come scene_io)
+# Funzioni bpy-facing
 # ---------------------------------------------------------------------------
 
 def _ensure_output_dir(subdir: str = "nl2_renders") -> str:
-    """Cartella di output: accanto al .blend se salvato, altrimenti in temp."""
     import bpy  # noqa: PLC0415
     base = bpy.path.abspath("//" + subdir + "/") if bpy.data.filepath \
         else os.path.join(tempfile.gettempdir(), subdir)
@@ -123,15 +202,65 @@ def _ensure_output_dir(subdir: str = "nl2_renders") -> str:
     return base
 
 
-def _label_points(scene, cam, mesh_objs, width: int, height: int) -> list[tuple[str, int, int]]:
+def _objects_aabb(objs):
+    """AABB unione (mondo) dei soli MESH nella lista. (mins, maxs, center)."""
+    import mathutils  # noqa: PLC0415
+    big = 1.0e9
+    mins = mathutils.Vector((big, big, big))
+    maxs = mathutils.Vector((-big, -big, -big))
+    found = False
+    for o in objs:
+        if getattr(o, "type", None) != "MESH":
+            continue
+        found = True
+        for c in o.bound_box:
+            w = o.matrix_world @ mathutils.Vector(c)
+            mins = mathutils.Vector((min(mins.x, w.x), min(mins.y, w.y), min(mins.z, w.z)))
+            maxs = mathutils.Vector((max(maxs.x, w.x), max(maxs.y, w.y), max(maxs.z, w.z)))
+    if not found:
+        z = mathutils.Vector((0.0, 0.0, 0.0))
+        return z, z, z
+    return mins, maxs, (mins + maxs) / 2.0
+
+
+def _scene_aabb(scene, objs=None):
     """
-    Per ogni oggetto, se il suo centro e' visibile in camera, ritorna
-    (nome, px, py). Usa world_to_camera_view (gestisce sia PERSP che ORTHO).
+    AABB di inquadratura. Se 'objs' e' fornito, inquadra SOLO quelli (gli oggetti
+    etichettati): cosi' mesh sparsi lontani (es. una collezione 'luces') non
+    gonfiano la vista. Altrimenti usa tutti i MESH della scena.
     """
+    if objs:
+        return _objects_aabb(objs)
+    return _objects_aabb(list(scene.objects))
+
+
+def _axes_screen_dirs(scene, cam, width, height, center):
+    """Direzioni schermo (unitarie) degli assi mondo +X e +Y, viste da 'cam'."""
     import mathutils  # noqa: PLC0415
     from bpy_extras.object_utils import world_to_camera_view  # noqa: PLC0415
 
-    pts: list[tuple[str, int, int]] = []
+    C = mathutils.Vector(center)
+    k = 0.5
+
+    def to_px(v):
+        co = world_to_camera_view(scene, cam, v)
+        return _ndc_to_pixels(co.x, co.y, width, height)
+
+    def unit(p, q):
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        n = (dx * dx + dy * dy) ** 0.5
+        return (1.0, 0.0) if n < 1e-6 else (dx / n, dy / n)
+
+    p0 = to_px(C)
+    return (unit(p0, to_px(C + mathutils.Vector((k, 0, 0)))),
+            unit(p0, to_px(C + mathutils.Vector((0, k, 0)))))
+
+
+def _label_points(scene, cam, mesh_objs, width: int, height: int):
+    import mathutils  # noqa: PLC0415
+    from bpy_extras.object_utils import world_to_camera_view  # noqa: PLC0415
+
+    pts = []
     for ob in mesh_objs:
         local_center = sum((mathutils.Vector(c) for c in ob.bound_box), mathutils.Vector()) / 8.0
         world_center = ob.matrix_world @ local_center
@@ -144,93 +273,112 @@ def _label_points(scene, cam, mesh_objs, width: int, height: int) -> list[tuple[
 
 
 def _render_to(path: str) -> None:
-    """
-    Render della vista corrente con il motore OpenGL/Workbench (come il viewport
-    in 'solid'): SEMPRE illuminato dalle studio-light, quindi non dipende dalle
-    luci della scena ne' dal mondo. Per far capire il layout all'LLM e' anche piu'
-    pulito e veloce. Se l'OpenGL non fosse disponibile, ripiega sul render normale.
-    """
     import bpy  # noqa: PLC0415
     scene = bpy.context.scene
     scene.render.filepath = path
-
-    # Workbench: studio-light sempre accesa + texture a colori.
     try:
         shading = scene.display.shading
         shading.light = "STUDIO"
         shading.color_type = "TEXTURE"
+        if hasattr(shading, "studiolight_intensity"):
+            shading.studiolight_intensity = 1.4
     except Exception:
         pass
-
     try:
         bpy.ops.render.opengl(write_still=True, view_context=False)
     except RuntimeError:
         bpy.ops.render.render(write_still=True)
 
-def _make_top_down_camera(scene):
-    """Crea una camera ortografica dall'alto, inquadrando tutti i MESH. Da rimuovere a fine render."""
-    import bpy        # noqa: PLC0415
-    import mathutils  # noqa: PLC0415
 
+def _make_top_down_camera(scene, aabb=None):
+    import bpy  # noqa: PLC0415
+    mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
     cam_data = bpy.data.cameras.new("NL2_TopDown")
     cam_data.type = "ORTHO"
-
-    big = 1.0e9
-    mins = mathutils.Vector((big, big, big))
-    maxs = mathutils.Vector((-big, -big, -big))
-    for o in scene.objects:
-        if o.type != "MESH":
-            continue
-        for c in o.bound_box:
-            w = o.matrix_world @ mathutils.Vector(c)
-            mins = mathutils.Vector((min(mins.x, w.x), min(mins.y, w.y), min(mins.z, w.z)))
-            maxs = mathutils.Vector((max(maxs.x, w.x), max(maxs.y, w.y), max(maxs.z, w.z)))
-
-    center = (mins + maxs) / 2.0
-    span   = max(maxs.x - mins.x, maxs.y - mins.y, 1.0) * 1.10
-    cam_data.ortho_scale = span
-
+    cam_data.ortho_scale = max(maxs.x - mins.x, maxs.y - mins.y, 1.0) * 1.10
     cam = bpy.data.objects.new("NL2_TopDown", cam_data)
     scene.collection.objects.link(cam)
     cam.location = (center.x, center.y, maxs.z + 5.0)
-    cam.rotation_euler = (0.0, 0.0, 0.0)  # la camera guarda lungo -Z: dritto in giu'
+    cam.rotation_euler = (0.0, 0.0, 0.0)
+    return cam
+
+
+def _make_corner_camera(scene, lens_mm: float = 24.0, aabb=None):
+    import bpy        # noqa: PLC0415
+    import mathutils  # noqa: PLC0415
+
+    mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
+    radius = max((maxs - mins).length / 2.0, 0.5)
+
+    cam_data = bpy.data.cameras.new("NL2_Corner")
+    cam_data.type = "PERSP"
+    cam_data.lens = float(lens_mm)
+    half_fov = max(cam_data.angle / 2.0, 1e-3)
+    dist = radius / math.sin(half_fov) * 1.15
+
+    direction = mathutils.Vector((1.0, -1.0, 1.6))   # alta: vede tutta la stanza
+    direction.normalize()
+    loc = center + direction * (dist * 1.15)
+
+    cam = bpy.data.objects.new("NL2_Corner", cam_data)
+    scene.collection.objects.link(cam)
+    cam.location = loc
+    cam.rotation_euler = (center - loc).to_track_quat("-Z", "Y").to_euler()
+    return cam
+
+
+def _make_iso_camera(scene, aabb=None):
+    import bpy        # noqa: PLC0415
+    import mathutils  # noqa: PLC0415
+
+    mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
+    diag = max((maxs - mins).length, 1.0)
+
+    cam_data = bpy.data.cameras.new("NL2_Iso")
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = diag * 1.05
+    cam_data.clip_start = 0.01
+    cam_data.clip_end = diag * 10.0
+
+    direction = mathutils.Vector((1.0, -1.0, 1.0))
+    direction.normalize()
+    loc = center + direction * (diag * 2.0)
+
+    cam = bpy.data.objects.new("NL2_Iso", cam_data)
+    scene.collection.objects.link(cam)
+    cam.location = loc
+    cam.rotation_euler = (center - loc).to_track_quat("-Z", "Y").to_euler()
     return cam
 
 
 def render_labeled_views(
     use_existing_camera: bool = True,
     add_top_down: bool = True,
+    add_iso: bool = True,
     label_names: Optional[set] = None,
     brighten: float = 1.5,
     gamma: float = 1.6,
+    lens_override: Optional[float] = None,
+    auto_perspective: bool = True,
+    auto_lens: float = 24.0,
     const: Constants = CONST,
 ) -> list[str]:
-    """
-    Renderizza la scena e salva PNG con i nomi degli oggetti sovrapposti.
- 
-    Parametri:
-        use_existing_camera: usa scene.camera (o la prima Camera trovata).
-        add_top_down:        aggiunge una vista ortografica dall'alto (camera
-                             temporanea, creata e rimossa al volo).
-        label_names:         insieme dei nomi da etichettare. Di norma sono i
-                             nomi che escono da reorganizer.build_request (root
-                             mobili + ostacoli fissi): cosi' l'immagine mostra
-                             ESATTAMENTE cio' che e' nel JSON, senza figli ne'
-                             stanza. Se None, etichetta tutti i MESH.
- 
-    Ritorna la lista dei file PNG generati (puo' essere vuota se non c'e' camera).
-    """
     import bpy  # noqa: PLC0415
- 
+
     scene   = bpy.context.scene
     out_dir = _ensure_output_dir()
     width   = height = int(const.render_edge_px)
- 
+
     if label_names is not None:
         mesh_objs = [o for o in scene.objects if o.type == "MESH" and o.name in label_names]
     else:
         mesh_objs = [o for o in scene.objects if o.type == "MESH"]
- 
+
+    # Inquadratura basata sugli oggetti ETICHETTATI (non tutta la scena): cosi'
+    # mesh lontani non etichettati (es. collezione 'luces') non gonfiano la vista.
+    frame_aabb = _objects_aabb(mesh_objs) if mesh_objs else _scene_aabb(scene)
+    center = frame_aabb[2]
+
     r = scene.render
     backup = (
         r.resolution_x, r.resolution_y, r.resolution_percentage,
@@ -240,34 +388,61 @@ def render_labeled_views(
     r.resolution_y = height
     r.resolution_percentage = 100
     r.image_settings.file_format = "PNG"
- 
-    created: list[str] = []
-    temp_objs: list = []
+
+    created = []
+    temp_objs = []
+
+    def _shoot(cam, suffix):
+        scene.camera = cam
+        path = os.path.join(out_dir, f"{_safe(scene.name)}_{suffix}.png")
+        _render_to(path)
+        _draw_labels(path, _label_points(scene, cam, mesh_objs, width, height),
+                     brighten=brighten, gamma=gamma)
+        # overlay: barra di scala solo se ortografica (mpp costante), bussola sempre
+        mpp = None
+        if getattr(cam.data, "type", "") == "ORTHO":
+            mpp = float(cam.data.ortho_scale) / float(width)
+        axes = _axes_screen_dirs(scene, cam, width, height, center)
+        _draw_overlay(path, axes, mpp)
+        created.append(path)
+
     try:
-        # 1) vista dalla camera esistente
-        cam = scene.camera or next((o for o in scene.objects if o.type == "CAMERA"), None)
-        if use_existing_camera and cam is not None:
-            scene.camera = cam
-            path = os.path.join(out_dir, f"{_safe(scene.name)}_cam.png")
-            _render_to(path)
-            _draw_labels(path, _label_points(scene, cam, mesh_objs, width, height), brighten=brighten, gamma=gamma)
-            created.append(path)
- 
-        # 2) vista ortografica dall'alto (camera temporanea)
+        # 1) prospettica
+        if auto_perspective:
+            pcam = _make_corner_camera(scene, auto_lens, aabb=frame_aabb)
+            temp_objs.append(pcam)
+            _shoot(pcam, "cam")
+        elif use_existing_camera:
+            pcam = scene.camera or next((o for o in scene.objects if o.type == "CAMERA"), None)
+            if pcam is not None:
+                cdata = pcam.data
+                lens_bk = None
+                if lens_override and lens_override > 0 and getattr(cdata, "type", "PERSP") == "PERSP" \
+                        and hasattr(cdata, "lens"):
+                    lens_bk = cdata.lens
+                    cdata.lens = float(lens_override)
+                try:
+                    _shoot(pcam, "cam")
+                finally:
+                    if lens_bk is not None:
+                        cdata.lens = lens_bk
+
+        # 2) pianta top-down
         if add_top_down:
-            tcam = _make_top_down_camera(scene)
+            tcam = _make_top_down_camera(scene, aabb=frame_aabb)
             temp_objs.append(tcam)
-            scene.camera = tcam
-            path = os.path.join(out_dir, f"{_safe(scene.name)}_top.png")
-            _render_to(path)
-            _draw_labels(path, _label_points(scene, tcam, mesh_objs, width, height), brighten=brighten, gamma=gamma)
-            created.append(path)
- 
+            _shoot(tcam, "top")
+
+        # 3) isometrica (opzionale)
+        if add_iso:
+            icam = _make_iso_camera(scene, aabb=frame_aabb)
+            temp_objs.append(icam)
+            _shoot(icam, "iso")
+
         logger.info("Render con etichette: %d file in %s", len(created), out_dir)
         return created
- 
+
     finally:
-        # ripristino impostazioni render + rimozione camere temporanee
         (r.resolution_x, r.resolution_y, r.resolution_percentage,
          r.filepath, r.image_settings.file_format, scene.camera) = backup
         for ob in temp_objs:

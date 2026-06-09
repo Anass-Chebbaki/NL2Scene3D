@@ -80,6 +80,11 @@ class NL2_ObjectOverride(PropertyGroup):
                     "Spegnilo per non etichettarlo",
         default=True,
     )
+    keep_scale: BoolProperty(  # type: ignore
+        name="Gia' in scala",
+        description="Se attivo, 'Scala a misura reale' NON tocca questo oggetto",
+        default=False,
+    )
 
 
 class NL2SCENE3D_UL_overrides(UIList):
@@ -100,6 +105,8 @@ class NL2SCENE3D_UL_overrides(UIList):
                 item, "fixed", text="", toggle=True,
                 icon="LOCKED" if item.fixed else "UNLOCKED",
             )
+            row.prop(item, "keep_scale", text="", toggle=True,
+                     icon="PINNED" if item.keep_scale else "UNPINNED")
         elif self.layout_type == "GRID":
             layout.alignment = "CENTER"
             layout.label(text=item.name)

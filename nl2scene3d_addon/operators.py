@@ -338,9 +338,13 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
             dims = [o.dimensions.x, o.dimensions.y, o.dimensions.z]
             cat, _ = default_classification(o.name, o.type, dims)
             return cat == "structural"
-
+        
         targets = []
+        keep = {e.name for e in getattr(scene, "nl2_overrides", [])
+                if getattr(e, "keep_scale", False)}
         for o in scene.objects:
+            if o.name in keep:
+                continue
             if not self.scale_structural and (o.type in {"CAMERA", "LIGHT"} or is_structural(o)):
                 continue
             targets.append(o)
@@ -419,8 +423,8 @@ class NL2SCENE3D_OT_randomize(Operator):
             # cosi' "Reset to Original" potra' sempre tornare alla scena pristina.
             if not context.scene.nl2_has_home:
                 scene_io.capture_home_state()
+                scene_io.capture_pose_snapshot("m_orig")   # originale, per le metriche
                 context.scene.nl2_has_home = True
-
             wm.progress_update(20)
             state = scene_io.extract_scene_state(overrides=_build_overrides(context))
 
@@ -429,7 +433,7 @@ class NL2SCENE3D_OT_randomize(Operator):
 
             wm.progress_update(80)
             scene_io.apply_state(randomized)
-
+            scene_io.capture_pose_snapshot("m_rand")        # randomizzato, per le metriche
             wm.progress_update(100)
             self._reset_ui(context)
 
@@ -474,14 +478,39 @@ class NL2SCENE3D_OT_render_labeled(Operator):
         description="Schiarisce i render (1.0 = invariato, >1 piu' chiaro)",
         default=1.5, min=0.5, max=3.0,
     )
+    perspective_lens: bpy.props.FloatProperty(  # type: ignore
+        name="Lente prospettica (mm)",
+        description="0 = camera invariata. Valori bassi (18-24) allargano il campo (meno zoomata)",
+        default=0.0, min=0.0, max=120.0,
+    )
+    auto_perspective: bpy.props.BoolProperty(  # type: ignore
+        name="Auto-inquadratura (tutta la stanza)",
+        description="Prospettica da un angolo alto che inquadra l'intera stanza, "
+                    "invece della camera della scena",
+        default=True,
+    )
+    auto_lens: bpy.props.FloatProperty(  # type: ignore
+        name="Lente auto (mm)",
+        description="Lente della camera auto: piu' bassa = campo piu' largo",
+        default=24.0, min=10.0, max=50.0,
+    )
+    add_iso: bpy.props.BoolProperty(  # type: ignore
+        name="Vista isometrica",
+        description="Aggiunge una vista isometrica ortografica (proporzioni coerenti, senza prospettiva)",
+        default=False,
+    )
 
     def execute(self, context):
         try:
             names = _label_name_set(context)
             paths = render.render_labeled_views(
                 add_top_down=self.add_top_down,
+                add_iso=self.add_iso,
                 label_names=names,
                 brighten=self.brighten,
+                lens_override=(self.perspective_lens if self.perspective_lens > 0 else None),
+                auto_perspective=self.auto_perspective,
+                auto_lens=self.auto_lens,
             )
             if not paths:
                 self.report({"WARNING"}, "Nessun render generato (manca la camera?).")
@@ -570,6 +599,15 @@ def _apply_llm_response(operator, context, raw_text: str):
         wm.progress_update(80)
         new_state = reorganizer.sanitize_response(state, raw_text)
         counters = scene_io.apply_state(new_state)
+        # --- metriche di spostamento (O -> R -> C) ---
+        try:
+            report = scene_io.build_metrics_report()
+            mtxt = bpy.data.texts.get("NL2_Metrics") or bpy.data.texts.new("NL2_Metrics")
+            mtxt.clear()
+            mtxt.write(report)
+            print("\n" + report + "\n")
+        except Exception:
+            traceback.print_exc()
 
         wm.progress_update(100)
         _reset_wm(context)
