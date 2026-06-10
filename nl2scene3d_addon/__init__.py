@@ -1,41 +1,47 @@
 # nl2scene3d/__init__.py
 """
-NL2Scene3D - Add-on Blender.
+NL2Scene3D - Blender Add-on.
 
-Riordina scene 3D preesistenti con un LLM, in modalita' MANUALE (human-in-the-loop):
-  - Step 1: Randomize    -> disordina la scena in modo plausibile.
-  - Step 2: Esporta/Applica -> l'add-on esporta prompt + JSON della scena; tu lo
-                            usi nel tuo LLM (es. Gemini in AI Studio), allegando a
-                            mano i render; poi incolli/carichi la risposta JSON e
-                            l'add-on la applica con i vincoli geometrici (muri,
-                            collisioni, Z intatta, figli al seguito).
+Riordina scene 3D preesistenti con un LLM, in modalita' manuale (human-in-the-loop):
 
-NOTA DI PROGETTO (import-safety):
-  Questo file NON importa bpy a livello di modulo e NON importa i sottomoduli
-  della UI al top-level. Gli import che dipendono da Blender avvengono solo
-  dentro register()/unregister(). Cosi' i moduli puri (nl2scene3d.core.*)
-  restano importabili da riga di comando per i test, senza Blender.
+    Step 1 - Randomize:
+        Disordina la scena in modo plausibile.
+
+    Step 2 - Esporta / Applica:
+        L'add-on esporta prompt + JSON della scena. L'utente li usa nel proprio
+        LLM (es. Gemini in AI Studio), allegando a mano i render; poi incolla o
+        carica la risposta JSON e l'add-on la applica rispettando i vincoli
+        geometrici (muri, collisioni, Z intatta, figli al seguito del padre).
+
+Nota sull'import-safety:
+    Questo file NON importa bpy a livello di modulo e NON importa i sottomoduli
+    della UI al top-level. Gli import che dipendono da Blender avvengono solo
+    dentro register() / unregister(). In questo modo i moduli puri (nl2scene3d.core.*)
+    restano importabili da riga di comando per i test, senza Blender installato.
 """
 
 bl_info = {
-    "name":        "NL2Scene3D",
-    "author":      "NL2Scene3D Team",
-    "version":     (0, 3, 0),
-    # Minimo conservativo: gira su 4.2+ e sul tuo 5.1.x. Alzalo se usi API piu' recenti.
-    "blender":     (4, 2, 0),
-    "location":    "View3D > Sidebar > NL2Scene3D",
+    "name": "NL2Scene3D",
+    "author": "NL2Scene3D Team",
+    "version": (0, 3, 0),
+    # Minimo conservativo: compatibile con Blender 4.2+ e 5.1.x.
+    # Alzare se si usano API piu' recenti.
+    "blender": (4, 2, 0),
+    "location": "View3D > Sidebar > NL2Scene3D",
     "description": "Reorganize 3D scenes via an external LLM (manual paste/load workflow)",
-    "category":    "3D View",
+    "category": "3D View",
 }
 
 
 def register():
+    """Registra gli operatori e il pannello UI dell'add-on."""
     from . import operators, ui
     operators.register()
     ui.register()
 
 
 def unregister():
+    """Deregistra il pannello UI e gli operatori dell'add-on."""
     from . import operators, ui
     ui.unregister()
     operators.unregister()

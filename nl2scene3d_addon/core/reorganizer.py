@@ -1,20 +1,32 @@
 # nl2scene3d/core/reorganizer.py
 """
-Riorganizzazione assistita dall'LLM - parte PURA (niente bpy, niente rete).
+Riorganizzazione assistita dall'LLM: modulo puro (nessuna dipendenza da bpy
+o da connessioni di rete).
 
-Tre responsabilita', tutte testabili da riga di comando:
-  1. build_request / build_prompt: dai un SceneState, produce i dati (JSON) e il
-     testo del prompt da inviare al modello. Vengono elencati SOLO gli oggetti
-     mobili root (i figli seguono il padre) piu' i confini stanza e gli ostacoli
-     fissi come contesto.
-  2. extract_json: estrae in modo robusto l'oggetto JSON dalla risposta del
-     modello, che spesso e' "sporca" (testo prima/dopo, recinti ```).
-  3. sanitize_response: valida e mette in sicurezza le posizioni proposte
-     dall'LLM -> dentro i muri, niente sovrapposizioni (risolte con MTV), Z mai
-     modificata, figli spostati rigidamente col padre. Ritorna un nuovo SceneState.
+Il modulo e' suddiviso in tre responsabilita' distinte, tutte testabili
+indipendentemente dalla riga di comando:
 
-La chiamata vera al modello e l'I/O vivono altrove (negli operatori): qui dentro
-non si tocca ne' Blender ne' la rete, cosi' la logica resta verificabile.
+    1. build_request / build_prompt
+       Dato un SceneState, produce il payload JSON e il testo del prompt da
+       inviare al modello linguistico. Vengono elencati solo gli oggetti root
+       mobili (i figli seguono il padre in modo rigido) piu' i confini della
+       stanza e gli ostacoli fissi come contesto di vincolo.
+
+    2. extract_json
+       Estrae in modo robusto il primo oggetto JSON ben bilanciato dalla
+       risposta del modello, che spesso contiene testo libero prima e dopo il
+       JSON e/o recinti con tripli backtick.
+
+    3. sanitize_response
+       Valida e mette in sicurezza le posizioni proposte dall'LLM:
+       - tiene gli oggetti dentro i muri (clamp),
+       - risolve le sovrapposizioni con il Minimum Translation Vector (MTV),
+       - non tocca mai la coordinata Z,
+       - aggiorna i figli con una trasformazione rigida rispetto al padre.
+       Restituisce un nuovo SceneState con pipeline_step="reorganized".
+
+La chiamata effettiva al modello e l'I/O di rete vivono negli operatori, non
+qui: in questo modo la logica rimane completamente verificabile.
 """
 
 from __future__ import annotations
@@ -31,6 +43,7 @@ from .settings import CONST, Constants
 
 logger = logging.getLogger(__name__)
 
+# Tipi di oggetti Blender ignorati nella costruzione del payload.
 _SKIP_TYPES = ("CAMERA", "LIGHT")
 
 
@@ -39,7 +52,17 @@ _SKIP_TYPES = ("CAMERA", "LIGHT")
 # ---------------------------------------------------------------------------
 
 def _descendants(root: SceneObject, by_name: dict[str, SceneObject]) -> list[SceneObject]:
-    """Tutti i discendenti (figli, nipoti, ...) di un root, in ordine di visita."""
+    """
+    Restituisce tutti i discendenti (figli, nipoti, ...) di un oggetto root,
+    in ordine di visita BFS/DFS (prima i figli diretti, poi i loro figli).
+
+    Args:
+        root:    L'oggetto radice da cui iniziare la visita.
+        by_name: Dizionario {nome: SceneObject} per la risoluzione dei figli.
+
+    Returns:
+        Lista ordinata di tutti i discendenti, escluso il root stesso.
+    """
     out: list[SceneObject] = []
 
     def rec(name: str) -> None:
@@ -57,27 +80,47 @@ def _descendants(root: SceneObject, by_name: dict[str, SceneObject]) -> list[Sce
 
 
 def _footprint_item(o: SceneObject) -> dict:
-    """Voce {name,x,y,w,d} con centro geometrico e impronta XY (rotazione inclusa)."""
+    """
+    Costruisce il dizionario descrittivo di un oggetto per il payload JSON,
+    con il centro geometrico e le dimensioni dell'impronta XY (rotazione inclusa).
+
+    Args:
+        o: L'oggetto da descrivere.
+
+    Returns:
+        Dict con chiavi 'name', 'x', 'y', 'w', 'd'.
+    """
     cx, cy = o.transform.geometric_center_xy()
     x_min, x_max, y_min, y_max = o.transform.aabb_xy(margin=0.0)
     return {
         "name": o.name,
-        "x": round(cx, 3), "y": round(cy, 3),
-        "w": round(x_max - x_min, 3), "d": round(y_max - y_min, 3),
+        "x": round(cx, 3),
+        "y": round(cy, 3),
+        "w": round(x_max - x_min, 3),
+        "d": round(y_max - y_min, 3),
     }
 
 
 def build_request(state: SceneState) -> dict:
     """
-    Costruisce il payload JSON per il modello.
+    Costruisce il payload JSON completo da inviare al modello linguistico.
 
-    - movable_objects: SOLO i root mobili (quelli che il modello deve riposizionare).
-      x/y = centro del root; w/d = impronta XY dell'INTERO GRUPPO (root + figli),
-      cosi' il modello lascia spazio anche per cio' che e' attaccato. Ogni root puo'
-      avere un campo "contains" con i figli (read-only): il modello sa che ci sono e
-      a chi appartengono, ma NON deve produrre una posizione per loro (seguono il padre).
-    - fixed_objects: ostacoli fissi NON strutturali (la stanza/i muri sono esclusi),
-      inclusi gli oggetti che l'utente ha marcato "fisso" a mano.
+    Il payload contiene:
+    - "room": i confini rettangolari della stanza in metri.
+    - "fixed_objects": ostacoli fissi non strutturali che il modello non deve
+      spostare e che non devono apparire nell'output. Gli elementi strutturali
+      (muri, soffitto, ecc.) sono esclusi perche' gia' impliciti nei confini.
+    - "movable_objects": gli unici oggetti che il modello deve riposizionare.
+      Per ciascuno vengono forniti il centro corrente (x, y), l'impronta XY
+      dell'INTERO GRUPPO (root + figli), la rotazione corrente e,
+      opzionalmente, la lista dei figli come contesto read-only. Il modello
+      non deve produrre posizioni per i figli: seguono il padre rigidamente.
+
+    Args:
+        state: Lo stato corrente della scena.
+
+    Returns:
+        Dizionario strutturato pronto per json.dumps.
     """
     rb = state.room_bounds
     by_name = {o.name: o for o in state.objects}
@@ -91,36 +134,50 @@ def build_request(state: SceneState) -> dict:
         if o.is_movable and o.is_root:
             cx, cy = o.transform.geometric_center_xy()
             descendants = _descendants(o, by_name)
-            # Impronta dell'intero gruppo alla posa CORRENTE (transform identita').
+
+            # Impronta dell'intero gruppo nella posa corrente.
             gx_min, gx_max, gy_min, gy_max = group_aabb_xy(
-                o, list(o.transform.location), o.transform.rotation_euler[2],
-                descendants, margin=0.0,
+                o,
+                list(o.transform.location),
+                o.transform.rotation_euler[2],
+                descendants,
+                margin=0.0,
             )
+
             item = {
                 "name": o.name,
-                "x": round(cx, 3), "y": round(cy, 3),
-                "w": round(gx_max - gx_min, 3), "d": round(gy_max - gy_min, 3),
+                "x": round(cx, 3),
+                "y": round(cy, 3),
+                "w": round(gx_max - gx_min, 3),
+                "d": round(gy_max - gy_min, 3),
                 "rotation_deg": int(round(math.degrees(o.transform.rotation_euler[2]))) % 360,
             }
+
+            # I figli sono contesto read-only: il modello sa che esistono ma
+            # non deve produrre una posizione per loro.
             if descendants:
-                # Figli come contesto read-only (il modello non li piazza).
                 item["contains"] = [_footprint_item(c) for c in descendants]
+
             movable.append(item)
 
         elif (not o.is_movable) and o.category != "structural":
-            # Ostacolo fisso (auto o marcato a mano dall'utente). La stanza/muri esclusi.
+            # Ostacolo fisso non strutturale (automatico o marcato dall'utente).
             fixed.append(_footprint_item(o))
 
     return {
         "room": {
-            "x_min": round(rb.x_min, 3), "x_max": round(rb.x_max, 3),
-            "y_min": round(rb.y_min, 3), "y_max": round(rb.y_max, 3),
+            "x_min": round(rb.x_min, 3),
+            "x_max": round(rb.x_max, 3),
+            "y_min": round(rb.y_min, 3),
+            "y_max": round(rb.y_max, 3),
         },
         "fixed_objects": fixed,
         "movable_objects": movable,
     }
 
 
+# Template del prompt inviato al modello linguistico.
+# Il testo e' in inglese per massimizzare la compatibilita' con i modelli.
 PROMPT_TEMPLATE = """# Interior Design Layout Optimization Task
 
 You are a professional interior designer working on indoor scenes of ANY type:
@@ -141,6 +198,7 @@ segment, e.g. "0.5 m" or "1 m") indicating real-world size, and a small X/Y
 axes compass (X in red, Y in green) showing world orientation. Use the scale
 bar to judge real distances and the compass to read directions; the perspective
 view shows only the compass, not the scale bar.
+
 The current object positions have been intentionally randomized and MUST NOT be
 considered a valid layout. Your task is to design a COMPLETELY NEW arrangement of
 the objects from scratch. Do not make small adjustments to the current layout:
@@ -169,7 +227,6 @@ Interpret every field exactly as defined here.
     example a desk's chair, monitor and keyboard, or a bed's nightstand and lamp).
     They move together with their parent. DO NOT output placements for them:
     placing the parent already places them.
-
 
 What you MAY change: only `x`, `y` and `rotation_deg` of each `movable_objects`
 entry. What you MUST preserve: all object names, all `w`/`d` dimensions, any
@@ -251,9 +308,18 @@ objects listed under `contains` or in `fixed_objects`."""
 
 def build_prompt(state: SceneState) -> str:
     """
-    Prompt completo = template generico fisso (PROMPT_TEMPLATE) + dati della scena
-    in JSON, appesi sotto. Il JSON viene rigenerato a ogni chiamata da build_request,
-    quindi rispecchia sempre lo stato corrente (root + contains + fissi).
+    Assembla il prompt completo da inviare al modello linguistico.
+
+    Il prompt e' composto dal template generico (PROMPT_TEMPLATE) seguito dai
+    dati JSON della scena corrente, generati da build_request. Il JSON viene
+    rigenerato ad ogni chiamata, quindi rispecchia sempre lo stato attuale
+    (root mobili, figli come contesto, ostacoli fissi).
+
+    Args:
+        state: Lo stato corrente della scena.
+
+    Returns:
+        Stringa contenente il prompt completo.
     """
     payload = json.dumps(build_request(state), ensure_ascii=False, indent=2)
     return f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
@@ -266,7 +332,20 @@ def build_prompt(state: SceneState) -> str:
 def extract_json(text) -> Optional[dict]:
     """
     Estrae il primo oggetto JSON ben bilanciato da un testo potenzialmente
-    sporco (recinti ```json, testo prima/dopo). Ritorna un dict o None.
+    "sporco", che puo' contenere:
+    - testo libero prima e/o dopo il JSON,
+    - recinti con tripli backtick (```json ... ```).
+
+    L'algoritmo scorre il testo carattere per carattere tenendo traccia della
+    profondita' delle graffe e dello stato "dentro una stringa", per trovare
+    l'esatto punto di chiusura del primo oggetto JSON valido.
+
+    Args:
+        text: Stringa grezza dalla risposta del modello, oppure dict gia' parsato.
+
+    Returns:
+        Il primo oggetto JSON trovato come dict Python, oppure None se non
+        e' stato possibile estrarne uno valido.
     """
     if isinstance(text, dict):
         return text
@@ -274,11 +353,11 @@ def extract_json(text) -> Optional[dict]:
         return None
 
     s = text.strip()
+
     # Rimuove i recinti di codice ```json ... ``` se presenti.
     if "```" in s:
         s = s.replace("```json", "```")
         parts = s.split("```")
-        # Prende il pezzo che contiene una graffa.
         for part in parts:
             if "{" in part:
                 s = part
@@ -291,8 +370,10 @@ def extract_json(text) -> Optional[dict]:
     depth = 0
     in_str = False
     escape = False
+
     for i in range(start, len(s)):
         ch = s[i]
+
         if in_str:
             if escape:
                 escape = False
@@ -301,6 +382,7 @@ def extract_json(text) -> Optional[dict]:
             elif ch == '"':
                 in_str = False
             continue
+
         if ch == '"':
             in_str = True
         elif ch == "{":
@@ -313,6 +395,7 @@ def extract_json(text) -> Optional[dict]:
                     return json.loads(blob)
                 except (json.JSONDecodeError, ValueError):
                     return None
+
     return None
 
 
@@ -321,31 +404,64 @@ def extract_json(text) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def _clamp_object(obj: SceneObject, rb: RoomBounds, wall_margin: float) -> None:
-    """Riporta l'AABB (ruotato) dell'oggetto dentro i muri. Solo XY."""
+    """
+    Riporta l'oggetto dentro i confini della stanza agendo sulla sua
+    location XY, calcolando l'AABB ruotato per tenere conto dell'orientamento.
+    La coordinata Z non viene mai modificata.
+
+    Args:
+        obj:         L'oggetto da correggere.
+        rb:          I confini della stanza.
+        wall_margin: Margine minimo da mantenere rispetto ai muri (in metri).
+    """
     x_min, x_max, y_min, y_max = obj.transform.aabb_xy(margin=0.0)
+
     dx = 0.0
     if x_min < rb.x_min + wall_margin:
         dx = (rb.x_min + wall_margin) - x_min
     elif x_max > rb.x_max - wall_margin:
         dx = (rb.x_max - wall_margin) - x_max
+
     dy = 0.0
     if y_min < rb.y_min + wall_margin:
         dy = (rb.y_min + wall_margin) - y_min
     elif y_max > rb.y_max - wall_margin:
         dy = (rb.y_max - wall_margin) - y_max
+
     obj.transform.location[0] += dx
     obj.transform.location[1] += dy
 
 
 def _shift(obj: SceneObject, dx: float, dy: float, rb: RoomBounds, wall_margin: float) -> None:
+    """
+    Sposta un oggetto di (dx, dy) e poi lo riclampa dentro i muri.
+
+    Args:
+        obj:         L'oggetto da spostare.
+        dx:          Spostamento sull'asse X in metri.
+        dy:          Spostamento sull'asse Y in metri.
+        rb:          I confini della stanza.
+        wall_margin: Margine minimo dai muri.
+    """
     obj.transform.location[0] += dx
     obj.transform.location[1] += dy
     _clamp_object(obj, rb, wall_margin)
 
+
 def _footprint_area(o: SceneObject) -> float:
-    """Area dell'impronta XY dell'oggetto: serve a decidere chi e' 'piu' grande'."""
+    """
+    Calcola l'area dell'impronta XY dell'oggetto (larghezza x profondita').
+    Usata per decidere quale oggetto e' "piu' grande" in caso di collisione.
+
+    Args:
+        o: L'oggetto di cui calcolare l'area.
+
+    Returns:
+        Area in metri quadrati.
+    """
     d = o.transform.dimensions
     return float(d[0]) * float(d[1])
+
 
 def _resolve_collisions(
     movable_roots: list[SceneObject],
@@ -355,17 +471,31 @@ def _resolve_collisions(
     max_iter: int = 80,
 ) -> int:
     """
-    Risolve le sovrapposizioni a livello di oggetti root con il Minimum
-    Translation Vector: gli ostacoli fissi spingono via i mobili; due mobili che
-    si sovrappongono si scostano a meta' a testa. Itera finche' non ci sono piu'
-    collisioni (o si esauriscono i tentativi). Ritorna il numero di iterazioni.
+    Risolve le sovrapposizioni tra oggetti root mobili e tra mobili e
+    ostacoli fissi, usando il Minimum Translation Vector (MTV).
+
+    Strategia:
+    - Gli ostacoli fissi spingono interamente il mobile sovrapposto.
+    - Due mobili sovrapposti si scostano di meta' ciascuno.
+    Il processo itera fino alla convergenza o al raggiungimento di max_iter.
+
+    Args:
+        movable_roots:    Lista degli oggetti root mobili.
+        fixed_obstacles:  Lista degli ostacoli fissi.
+        rb:               I confini della stanza.
+        const:            Costanti di configurazione (collision_margin, wall_margin).
+        max_iter:         Numero massimo di iterazioni.
+
+    Returns:
+        Il numero di iterazioni effettivamente eseguite.
     """
     margin = const.collision_margin
     it = 0
+
     for it in range(1, max_iter + 1):
         moved = False
 
-        # Mobili vs fissi: spinge interamente il mobile.
+        # Mobili vs fissi: il mobile viene spostato interamente.
         for m in movable_roots:
             for f in fixed_obstacles:
                 dx, dy = penetration_vector(m, f, margin)
@@ -373,7 +503,7 @@ def _resolve_collisions(
                     _shift(m, dx, dy, rb, const.wall_margin)
                     moved = True
 
-        # Mobili vs mobili: spinta divisa.
+        # Mobili vs mobili: la spinta e' divisa a meta'.
         for i in range(len(movable_roots)):
             for j in range(i + 1, len(movable_roots)):
                 a, b = movable_roots[i], movable_roots[j]
@@ -396,20 +526,31 @@ def sanitize_response(
 ) -> SceneState:
     """
     Valida e mette in sicurezza la risposta dell'LLM, producendo un nuovo
-    SceneState 'reorganized'.
+    SceneState con pipeline_step="reorganized".
 
-    llm_output puo' essere il testo grezzo del modello o un dict gia' parsato,
-    nella forma {"placements": [{"name","x","y","rotation_deg"}, ...]}.
+    Il parametro llm_output puo' essere la stringa grezza della risposta del
+    modello o un dict gia' parsato, nella forma:
+        {"placements": [{"name": ..., "x": ..., "y": ..., "rotation_deg": ...}]}
 
-    Garanzie:
-      - Z mai modificata (root e figli).
-      - ogni gruppo resta dentro i muri (clamp di gruppo + clamp per-oggetto).
-      - nessuna sovrapposizione residua tra root mobili / con gli ostacoli fissi.
-      - i figli seguono rigidamente il padre.
-      - nomi sconosciuti ignorati; oggetti senza proposta restano dov'erano.
+    Garanzie offerte da questa funzione:
+    - La coordinata Z non viene mai modificata, ne' per i root ne' per i figli.
+    - Ogni gruppo rimane dentro i muri (clamp di gruppo + clamp per oggetto).
+    - Non rimangono sovrapposizioni tra root mobili o con gli ostacoli fissi.
+    - I figli seguono il padre con una trasformazione rigida.
+    - I nomi sconosciuti vengono ignorati silenziosamente.
+    - Gli oggetti senza proposta mantengono la posizione originale.
+
+    Args:
+        state:      Lo stato corrente della scena (prima della riorganizzazione).
+        llm_output: Risposta del modello (stringa grezza o dict).
+        const:      Costanti di configurazione.
+
+    Returns:
+        Un nuovo SceneState con le posizioni sanitizzate.
     """
     data = extract_json(llm_output) or {}
     placements: dict[str, tuple] = {}
+
     raw = data.get("placements")
     if isinstance(raw, list):
         for p in raw:
@@ -437,25 +578,30 @@ def sanitize_response(
 
     applied = 0
 
-    # --- 1) Posa proposta (o originale) + rotazione + clamp di gruppo ---
+    # --- Fase 1: applica la posa proposta (o quella originale) e clamp di gruppo ---
     for root in movable_roots:
         orig = orig_by_name[root.name]
         orig_children = [orig_by_name[c] for c in orig.children if c in orig_by_name]
-        z = orig.transform.location[2]
+        z = orig.transform.location[2]  # La Z originale viene sempre preservata.
 
         if root.name in placements:
             px, py, rot = placements[root.name]
             proposed_rz = root.transform.rotation_euler[2]
+
             if rot is not None and is_finite_float(rot):
                 proposed_rz = snap_rotation_90(math.radians(float(rot)))
+
             proposed_loc = [float(px), float(py), z]
             applied += 1
         else:
+            # Nessuna proposta: mantieni la posizione originale.
             proposed_loc = [orig.transform.location[0], orig.transform.location[1], z]
-            proposed_rz  = orig.transform.rotation_euler[2]
+            proposed_rz = orig.transform.rotation_euler[2]
 
-        # Imposta la rotazione PRIMA del clamp, cosi' l'AABB e' quello giusto.
+        # La rotazione deve essere impostata PRIMA del clamp, affinche'
+        # l'AABB calcolato per il clamp rifletta l'orientamento corretto.
         root.transform.rotation_euler[2] = proposed_rz
+
         clamped = _clamp_parent_group_location(
             orig, proposed_loc, proposed_rz, orig_children, rb, const.wall_margin
         )
@@ -463,25 +609,32 @@ def sanitize_response(
         root.transform.location[1] = clamped[1]
         root.transform.location[2] = z  # Z intatta.
 
-    # --- 2) Collisioni (MTV) ---
+    # --- Fase 2: risoluzione delle collisioni (MTV) ---
     iters = _resolve_collisions(movable_roots, fixed_obstacles, rb, const)
 
-    # --- 3) I figli seguono il padre (rigido, Z originale) ---
+    # --- Fase 3: i figli seguono il padre con trasformazione rigida ---
     for root in movable_roots:
-        orig    = orig_by_name[root.name]
+        orig = orig_by_name[root.name]
         old_loc = orig.transform.location
-        old_rz  = orig.transform.rotation_euler[2]
+        old_rz = orig.transform.rotation_euler[2]
         new_loc = root.transform.location
-        new_rz  = root.transform.rotation_euler[2]
+        new_rz = root.transform.rotation_euler[2]
+
         for cname in orig.children:
-            child  = by_name.get(cname)
+            child = by_name.get(cname)
             ochild = orig_by_name.get(cname)
             if child is None or ochild is None:
                 continue
-            child.transform.location       = list(ochild.transform.location)
+
+            # Ripristina la posa originale del figlio prima di applicare
+            # la trasformazione rigida relativa al nuovo padre.
+            child.transform.location = list(ochild.transform.location)
             child.transform.rotation_euler = list(ochild.transform.rotation_euler)
+
             apply_rigid_transform(
-                child, old_loc, old_rz, new_loc, new_rz,
+                child,
+                old_loc, old_rz,
+                new_loc, new_rz,
                 original_z=ochild.transform.location[2],
             )
 

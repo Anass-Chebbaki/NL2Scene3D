@@ -2,19 +2,20 @@
 """
 Disordinamento controllato del layout di una scena 3D.
 
-Obiettivo: disordinare in modo plausibile - oggetti fuori posto ma non
-sovrapposti, non oltre i muri, con i valori Z originali intatti.
+Obiettivo:
+    Disordinare la scena in modo plausibile: oggetti fuori posto ma non
+    sovrapposti, non oltre i muri, con i valori Z originali intatti.
 
 Regole di progetto:
-  - La Z non viene MAI modificata. Un oggetto a 0.80 m (es. su una scrivania)
-    resta a 0.80 m. Niente drop-to-floor: metterebbe mensole e monitor a terra.
-  - I figli si muovono col padre tramite trasformazione rigida XY, mantenendo
-    le posizioni relative.
-  - Ogni oggetto (o gruppo padre+figli) e' trattato come blob con AABB espanso
-    di collision_margin, cosi' visivamente non si sovrappongono mai.
-  - Gli oggetti sono ordinati per volume decrescente: prima i pezzi grandi.
+    - La Z non viene MAI modificata. Un oggetto a 0.80 m (es. su una scrivania)
+      resta a 0.80 m. Niente drop-to-floor: abbasserebbe mensole e monitor a terra.
+    - I figli si muovono col padre tramite trasformazione rigida XY, mantenendo
+      le posizioni relative invariate.
+    - Ogni oggetto (o gruppo padre+figli) e' trattato come un blob con AABB
+      espanso di collision_margin, cosi' visivamente non si sovrappongono mai.
+    - Gli oggetti sono ordinati per volume decrescente: prima i pezzi grandi.
 
-PURO Python: nessuna dipendenza da bpy.
+Modulo puro Python: nessuna dipendenza da bpy.
 """
 
 from __future__ import annotations
@@ -44,9 +45,19 @@ def apply_rigid_transform(
     original_z:     float | None = None,
 ) -> None:
     """
-    Muove e ruota un figlio rigidamente rispetto al padre (solo XY).
-    La Z non viene mai modificata: se `original_z` e' dato lo usa, altrimenti
-    lascia invariata. Modifica child.transform in-place.
+    Muove e ruota un figlio rigidamente rispetto al padre (solo piano XY).
+
+    La Z non viene mai modificata: se `original_z` e' fornito viene usato,
+    altrimenti la coordinata Z del figlio rimane invariata.
+    Modifica child.transform in-place.
+
+    Args:
+        child:          Figlio da spostare.
+        old_parent_loc: Posizione precedente del padre.
+        old_parent_rz:  Rotazione Z precedente del padre.
+        new_parent_loc: Nuova posizione del padre.
+        new_parent_rz:  Nuova rotazione Z del padre.
+        original_z:     Quota Z originale del figlio (se None, lascia invariata).
     """
     rel_x = child.transform.location[0] - old_parent_loc[0]
     rel_y = child.transform.location[1] - old_parent_loc[1]
@@ -74,8 +85,11 @@ def _clamp_parent_group_location(
     wall_margin:   float,
 ) -> list[float]:
     """
-    Vincola la posizione del padre cosi' che padre e figli restino dentro i
-    confini stanza con il wall_margin dato. Usa l'AABB combinato del gruppo.
+    Vincola la posizione del padre cosi' che padre e tutti i figli restino
+    completamente dentro i confini della stanza con il margine dato.
+
+    Usa l'AABB combinato del gruppo per calcolare l'overflow su ogni lato
+    e corregge la posizione del padre di conseguenza.
     """
     g_x_min, g_x_max, g_y_min, g_y_max = group_aabb_xy(
         orig_parent, proposed_loc, proposed_rz, orig_children, margin=0.0
@@ -88,14 +102,14 @@ def _clamp_parent_group_location(
     overflow_front = max(0.0, (room_bounds.y_min + wall_margin) - g_y_min)
     overflow_back  = max(0.0, g_y_max - (room_bounds.y_max - wall_margin))
 
-    dx = overflow_left if overflow_left > overflow_right else -overflow_right
-    dy = overflow_front if overflow_front > overflow_back else -overflow_back
+    dx = overflow_left  if overflow_left  > overflow_right else -overflow_right
+    dy = overflow_front if overflow_front > overflow_back  else -overflow_back
 
     return [px + dx, py + dy, proposed_loc[2]]
 
 
 # ---------------------------------------------------------------------------
-# Generatori di posizione / rotazione
+# Generatori di posizione e rotazione
 # ---------------------------------------------------------------------------
 
 def _random_location(
@@ -109,9 +123,18 @@ def _random_location(
     rng:               random.Random,
 ) -> list[float]:
     """
-    Genera una posizione XY valida dentro la stanza, tenendo conto dell'AABB
-    ruotato e dell'origin offset. La Z resta sempre al valore originale.
+    Genera una posizione XY valida dentro la stanza.
+
+    Tiene conto dell'AABB ruotato e dell'origin offset per garantire che
+    l'oggetto rimanga completamente dentro i confini. La Z e' sempre
+    quella originale.
+
+    Il campionamento avviene in un'area centrata sulla posizione originale,
+    con raggio pari a jitter_ratio * dimensione stanza (per un disordine
+    localizzato ma plausibile). Se il range risultante e' invalido, viene
+    usato l'intero spazio disponibile.
     """
+    # Calcola l'offset dell'AABB rispetto all'origine (con la rotazione data).
     temp_tf = Transform(
         location=[0.0, 0.0, original_location[2]],
         rotation_euler=[0.0, 0.0, rotation_z],
@@ -120,14 +143,17 @@ def _random_location(
     )
     t_xmin, t_xmax, t_ymin, t_ymax = temp_tf.aabb_xy(margin=0.0)
 
+    # Range sicuro per l'origine (garantisce che l'intero AABB stia dentro la stanza).
     safe_x_min = room_bounds.x_min + wall_margin - t_xmin
     safe_x_max = room_bounds.x_max - wall_margin - t_xmax
     safe_y_min = room_bounds.y_min + wall_margin - t_ymin
     safe_y_max = room_bounds.y_max - wall_margin - t_ymax
 
     if safe_x_max <= safe_x_min or safe_y_max <= safe_y_min:
-        return list(original_location)  # Oggetto troppo grande per la stanza.
+        # L'oggetto e' troppo grande per la stanza: lascialo dov'era.
+        return list(original_location)
 
+    # Restringe il range di campionamento attorno alla posizione originale.
     jitter_x = room_bounds.width * jitter_ratio
     jitter_y = room_bounds.depth * jitter_ratio
     cx_orig  = original_location[0]
@@ -138,6 +164,7 @@ def _random_location(
     range_y_min = max(safe_y_min, cy_orig - jitter_y)
     range_y_max = min(safe_y_max, cy_orig + jitter_y)
 
+    # Fallback: se il range ristretto e' invalido, usa il range sicuro completo.
     if range_x_max < range_x_min:
         range_x_min, range_x_max = safe_x_min, safe_x_max
     if range_y_max < range_y_min:
@@ -145,11 +172,12 @@ def _random_location(
 
     new_x = rng.uniform(range_x_min, range_x_max)
     new_y = rng.uniform(range_y_min, range_y_max)
+
     return [new_x, new_y, original_location[2]]
 
 
 def _random_rotation(original_rz: float, rng: random.Random) -> float:
-    """Rotazione Z originale + un multiplo casuale di 90 gradi."""
+    """Restituisce la rotazione Z originale + un multiplo casuale di 90 gradi."""
     delta = rng.choice([0.0, math.pi / 2, math.pi, 3 * math.pi / 2])
     return (original_rz + delta) % (2 * math.pi)
 
@@ -163,14 +191,14 @@ class SceneRandomizer:
     Disordina artificialmente il layout di una scena 3D.
 
     Algoritmo:
-      1. Raccoglie i root mobili (senza padre).
-      2. Li ordina per volume decrescente (prima i pezzi grandi).
-      3. Per ogni root prova fino a max_placement_attempts posizioni casuali:
-           a. Rotazione Z casuale (multiplo di 90 gradi).
-           b. Posizione valida coerente con quella rotazione e i confini stanza.
-           c. Check di collisione (muri + mobili) con AABB espansi.
-           d. Se non trova posizione libera, usa quella col punteggio piu' basso.
-      4. Muove i figli con trasformazione rigida rispetto al padre.
+        1. Raccoglie i root mobili (oggetti senza padre).
+        2. Li ordina per volume decrescente (prima i pezzi grandi).
+        3. Per ogni root prova fino a max_placement_attempts posizioni casuali:
+            a. Genera una rotazione Z casuale (multiplo di 90 gradi).
+            b. Genera una posizione valida coerente con quella rotazione e i confini.
+            c. Verifica le collisioni (muri + mobili) con AABB espansi.
+            d. Se non trova posizione libera, usa quella col punteggio piu' basso.
+        4. Muove i figli con trasformazione rigida rispetto al padre.
     """
 
     def __init__(self, seed: int = 0, const: Constants = CONST) -> None:
@@ -183,7 +211,11 @@ class SceneRandomizer:
         )
 
     def randomize(self, state: SceneState) -> SceneState:
-        """Applica la randomizzazione a una copia profonda. L'originale non viene toccato."""
+        """
+        Applica la randomizzazione a una copia profonda dello SceneState.
+
+        L'originale non viene mai modificato.
+        """
         if state.room_bounds is None:
             raise ValueError("SceneState senza room_bounds. Estrai prima la scena.")
 
@@ -196,26 +228,32 @@ class SceneRandomizer:
         new_objects: list[SceneObject] = [obj.copy() for obj in state.objects]
         by_name = {obj.name: obj for obj in new_objects}
 
+        # Gli oggetti fissi sono gia' "piazzati" come ostacoli.
         placed: list[SceneObject] = [obj for obj in new_objects if not obj.is_movable]
 
+        # Root mobili ordinati per volume decrescente.
         roots = sorted(
             [obj for obj in new_objects if obj.is_movable and obj.is_root],
             key=lambda o: (
-                o.transform.dimensions[0] * o.transform.dimensions[1] * o.transform.dimensions[2]
+                o.transform.dimensions[0]
+                * o.transform.dimensions[1]
+                * o.transform.dimensions[2]
             ),
             reverse=True,
         )
 
-        placed_count   = 0
+        placed_count  = 0
         fallback_count = 0
 
         for root in roots:
             old_loc = list(root.transform.location)
             old_rz  = root.transform.rotation_euler[2]
 
+            # Valuta la posizione corrente come candidato iniziale.
             best_obj   = root.copy()
             best_score = self._group_collision_score(best_obj, root, by_name, placed, bounds)
 
+            # Prova posizioni casuali e tieni quella col punteggio migliore.
             for _ in range(self.const.max_placement_attempts):
                 candidate = root.copy()
 
@@ -235,7 +273,6 @@ class SceneRandomizer:
                 candidate.transform.location = new_loc
 
                 score = self._group_collision_score(candidate, root, by_name, placed, bounds)
-
                 if score == 0.0:
                     best_obj, best_score = candidate, 0.0
                     break
@@ -249,14 +286,17 @@ class SceneRandomizer:
                     root.name, self.const.max_placement_attempts, best_score,
                 )
 
+            # Applica la posizione migliore trovata al root nella lista di lavoro.
             final_root = by_name[root.name]
             new_loc    = list(best_obj.transform.location)
             new_rz     = best_obj.transform.rotation_euler[2]
 
+            # Raccoglie i figli originali per il clamp di gruppo.
             orig_children: list[SceneObject] = []
-            orig_by_name  = {o.name: o for o in state.objects}
+            orig_by_name = {o.name: o for o in state.objects}
 
             def gather_children(p_name: str):
+                """Raccoglie ricorsivamente tutti i discendenti del padre dato."""
                 p_obj = orig_by_name.get(p_name)
                 if p_obj:
                     for c_name in p_obj.children:
@@ -267,23 +307,31 @@ class SceneRandomizer:
 
             gather_children(root.name)
 
+            # Vincola il gruppo dentro i confini della stanza.
             clamped_loc = _clamp_parent_group_location(
                 root, new_loc, new_rz, orig_children, bounds, self.const.wall_margin
             )
             if clamped_loc != new_loc:
                 new_loc = clamped_loc
 
-            new_loc[2] = root.transform.location[2]  # Z lock assoluto.
+            # Blocco assoluto della Z: mai modificata.
+            new_loc[2] = root.transform.location[2]
 
-            final_root.transform.location          = new_loc
-            final_root.transform.rotation_euler[2]  = new_rz
+            final_root.transform.location         = new_loc
+            final_root.transform.rotation_euler[2] = new_rz
             placed.append(final_root)
             placed_count += 1
 
+            # Sposta i figli con trasformazione rigida.
             self._move_children(
-                root_name=root.name, old_loc=old_loc, old_rz=old_rz,
-                new_loc=new_loc, new_rz=new_rz, by_name=by_name,
-                placed=placed, orig_by_name=orig_by_name,
+                root_name=root.name,
+                old_loc=old_loc,
+                old_rz=old_rz,
+                new_loc=new_loc,
+                new_rz=new_rz,
+                by_name=by_name,
+                placed=placed,
+                orig_by_name=orig_by_name,
             )
 
         logger.info(
@@ -305,16 +353,18 @@ class SceneRandomizer:
 
     def _group_collision_score(
         self,
-        root_candidate:      SceneObject,
-        original_root:       SceneObject,
+        root_candidate:    SceneObject,
+        original_root:     SceneObject,
         all_objects_by_name: dict[str, SceneObject],
-        placed_objects:      list[SceneObject],
-        bounds:              RoomBounds,
+        placed_objects:    list[SceneObject],
+        bounds:            RoomBounds,
     ) -> float:
         """
-        Punteggio di collisione cumulativo del gruppo (padre + tutti i discendenti)
-        alla posizione candidata. Solo collisioni spaziali; nessun check sul
-        pavimento (la Z e' bloccata).
+        Calcola il punteggio di collisione cumulativo del gruppo (padre + discendenti)
+        alla posizione candidata.
+
+        Valuta solo le collisioni spaziali; il check sulla Z non viene eseguito
+        perche' la coordinata Z e' sempre bloccata al valore originale.
         """
         total_score = collision_score(
             root_candidate, placed_objects,
@@ -323,12 +373,19 @@ class SceneRandomizer:
             room_bounds=bounds,
         )
 
-        def _collect_and_score_children(parent_name, current_parent_loc, current_parent_rz):
+        def _collect_and_score_children(
+            parent_name:        str,
+            current_parent_loc: list[float],
+            current_parent_rz:  float,
+        ):
+            """Valuta ricorsivamente i figli, trasformati rigidamente rispetto al padre candidato."""
             nonlocal total_score
             orig_parent = all_objects_by_name[parent_name]
+
             for child_name in orig_parent.children:
                 orig_child  = all_objects_by_name[child_name]
                 moved_child = orig_child.copy()
+
                 apply_rigid_transform(
                     moved_child,
                     old_parent_loc=orig_parent.transform.location,
@@ -337,18 +394,24 @@ class SceneRandomizer:
                     new_parent_rz=current_parent_rz,
                     original_z=orig_child.transform.location[2],
                 )
+
                 total_score += collision_score(
                     moved_child, placed_objects,
                     wall_margin=self.const.wall_margin,
                     furniture_margin=self.const.collision_margin,
                     room_bounds=bounds,
                 )
+
+                # Penalita' aggiuntiva se il figlio e' fuori dai confini.
                 if bounds is not None and not bounds.contains_aabb(
-                    moved_child.transform.aabb_xy(margin=0.0), margin=self.const.wall_margin
+                    moved_child.transform.aabb_xy(margin=0.0),
+                    margin=self.const.wall_margin,
                 ):
                     total_score += 100.0
+
                 _collect_and_score_children(
-                    child_name, moved_child.transform.location,
+                    child_name,
+                    moved_child.transform.location,
                     moved_child.transform.rotation_euler[2],
                 )
 
@@ -357,6 +420,7 @@ class SceneRandomizer:
             root_candidate.transform.location,
             root_candidate.transform.rotation_euler[2],
         )
+
         return total_score
 
     def _move_children(
@@ -370,7 +434,12 @@ class SceneRandomizer:
         placed:       list[SceneObject],
         orig_by_name: dict[str, SceneObject] | None = None,
     ) -> None:
-        """Muove ricorsivamente tutti i discendenti del root con trasformazione rigida XY."""
+        """
+        Muove ricorsivamente tutti i discendenti del root con trasformazione rigida XY.
+
+        Per ogni figlio recupera la Z originale dallo snapshot orig_by_name
+        (se disponibile) per garantire che la quota non venga mai alterata.
+        """
         root_obj = by_name.get(root_name)
         if root_obj is None:
             return
@@ -392,10 +461,12 @@ class SceneRandomizer:
                     orig_child_rz    = orig_child.transform.rotation_euler[2]
 
             apply_rigid_transform(
-                child, old_loc, old_rz, new_loc, new_rz, original_z=original_child_z
+                child, old_loc, old_rz, new_loc, new_rz,
+                original_z=original_child_z,
             )
             placed.append(child)
 
+            # Ricorsione sui figli del figlio.
             self._move_children(
                 child_name, orig_child_loc, orig_child_rz,
                 list(child.transform.location), child.transform.rotation_euler[2],

@@ -1,0 +1,155 @@
+# =============================================================================
+# NL2Scene3D — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Type-checking caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# -----------------------------------------------------------------------------
+# Blender
+# -----------------------------------------------------------------------------
+# Rendered output produced by render.py (stored in nl2_renders/ next to .blend)
+nl2_renders/
+
+# Blender auto-saves and temporaries
+*.blend1
+*.blend2
+*.blend3
+*.blend4
+*.blend5
+*.blend6
+*.blend7
+*.blend8
+*.blend9
+*.bphys
+*.abc
+*.mdd
+
+# Blender script auto-generated text datablocks exported to disk
+NL2_AI_Prompt.txt
+NL2_AI_Response.txt
+NL2_Inspect_Report.txt
+NL2_Metrics.txt
+
+# Sidecar label files produced when Pillow is unavailable
+*.labels.json
+
+# -----------------------------------------------------------------------------
+# Offline testing / scratch
+# -----------------------------------------------------------------------------
+# The offline_testing directory contains example prompts and scripts that are
+# committed intentionally; exclude any local experiment outputs placed there.
+offline_testing/output/
+offline_testing/*.png
+offline_testing/*.json
+# Do NOT exclude offline_testing/*.txt (they are tracked source files)
+
+# -----------------------------------------------------------------------------
+# Operating system
+# -----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encdata
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.directory
+
+# -----------------------------------------------------------------------------
+# Editors and IDEs
+# -----------------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, IDEA, etc.)
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+Session.vim
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# -----------------------------------------------------------------------------
+# Distribution / packaging (if the addon is ever packaged as a .zip)
+# -----------------------------------------------------------------------------
+*.zip
+*.tar.gz
+*.tar.bz2
+release/
+
+# -----------------------------------------------------------------------------
+# Secrets and local configuration
+# -----------------------------------------------------------------------------
+.env
+.env.local
+secrets.py
+config_local.py
