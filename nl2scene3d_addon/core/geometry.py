@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -44,6 +45,25 @@ logger = logging.getLogger(__name__)
 
 # Tipi di oggetto Blender che non partecipano al rilevamento collisioni.
 _IGNORED_TYPES = frozenset({"CAMERA", "LIGHT", "EMPTY", "SPEAKER", "ARMATURE", "CURVE"})
+
+# Parole chiave (token interi) che identificano aperture e mesh-stanza, da
+# escludere dal check muri perche' non sono ostacoli fisici da evitare.
+_OPENING_KWS = ("door", "window", "room", "porta", "finestra", "stanza")
+_DOOR_KWS    = ("door", "porta")
+_WINDOW_KWS  = ("window", "finestra")
+
+
+def _name_has_kw(keywords, text: str) -> bool:
+    """
+    True se almeno una keyword compare come PAROLA INTERA in text.
+
+    Il match e' su token interi (separati da _, -, spazi, numeri), non come
+    sottostringa generica. Cosi' un muro chiamato 'bedroom_wall_north' non
+    viene scambiato per un'apertura solo perche' contiene la lettere 'room',
+    e 'doorknob' non viene confuso con 'door'.
+    """
+    toks = {t for t in re.split(r"[^a-z]+", text.lower()) if t}
+    return any(k in toks for k in keywords)
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +155,7 @@ def wall_collision(
     c_z_min, c_z_max = candidate.transform.z_range()
 
     for wall in wall_objects:
-        name_lower = wall.name.lower()
-        if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra", "stanza")):
+        if _name_has_kw(_OPENING_KWS, wall.name):
             continue  # escludi aperture e mesh-stanza
 
         # Ottimizzazione: check rapido di sovrapposizione Z prima del SAT.
@@ -211,9 +230,8 @@ def check_openings_clearance(
         - Finestra: 0.50 m (luce + accesso)
     """
     for obj in structural_objects:
-        name_lower = obj.name.lower()
-        is_door    = any(k in name_lower for k in ("door", "porta"))
-        is_window  = any(k in name_lower for k in ("window", "finestra"))
+        is_door    = _name_has_kw(_DOOR_KWS, obj.name)
+        is_window  = _name_has_kw(_WINDOW_KWS, obj.name)
 
         if not (is_door or is_window):
             continue
@@ -389,10 +407,9 @@ def collision_score(
             continue
 
         if obj.category == "structural" and check_walls:
-            name_lower = obj.name.lower()
-            if any(k in name_lower for k in ("door", "window", "room", "porta", "finestra", "stanza")):
-                is_door   = any(k in name_lower for k in ("door", "porta"))
-                is_window = any(k in name_lower for k in ("window", "finestra"))
+            if _name_has_kw(_OPENING_KWS, obj.name):
+                is_door   = _name_has_kw(_DOOR_KWS, obj.name)
+                is_window = _name_has_kw(_WINDOW_KWS, obj.name)
 
                 clearance_depth = 0.90 if is_door else 0.50
                 cx, cy          = obj.transform.geometric_center_xy()

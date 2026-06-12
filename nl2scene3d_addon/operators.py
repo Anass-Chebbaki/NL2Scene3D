@@ -505,10 +505,16 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
             except Exception:
                 pass
 
-        # Lo stato "originale" salvato non e' piu' coerente con la nuova scala:
-        # viene azzerato per evitare reset errati.
+        # Lo stato "originale" salvato e gli snapshot delle metriche non sono
+        # piu' coerenti con la nuova scala: vengono azzerati per evitare reset
+        # errati e metriche di spostamento prive di senso (pose in scale diverse).
+        stale_keys = (
+            "nl2_home_loc", "nl2_home_rot",
+            "nl2_m_orig_loc", "nl2_m_orig_rot",
+            "nl2_m_rand_loc", "nl2_m_rand_rot",
+        )
         for o in scene.objects:
-            for key in ("nl2_home_loc", "nl2_home_rot"):
+            for key in stale_keys:
                 if key in o:
                     del o[key]
         scene.nl2_has_home = False
@@ -546,7 +552,9 @@ class NL2SCENE3D_OT_randomize(Operator):
             # cosi' "Reset to Original" potra' sempre tornare alla scena pristina.
             if not context.scene.nl2_has_home:
                 scene_io.capture_home_state()
-                scene_io.capture_pose_snapshot("m_orig")  # snapshot originale per le metriche
+                # Snapshot originale per le metriche: non sovrascrivere se gia'
+                # presente (es. .blend riaperto dopo un Randomize precedente).
+                scene_io.capture_pose_snapshot("m_orig", overwrite=False)
                 context.scene.nl2_has_home = True
 
             wm.progress_update(20)
@@ -770,7 +778,7 @@ def _apply_llm_response(operator, context, raw_text: str):
             return {"CANCELLED"}
 
         wm.progress_update(80)
-        new_state = reorganizer.sanitize_response(state, raw_text)
+        new_state = reorganizer.sanitize_response(state, parsed)
         counters  = scene_io.apply_state(new_state)
 
         # Genera e salva il report delle metriche di spostamento (O -> R -> C).
@@ -885,6 +893,9 @@ class NL2SCENE3D_OT_apply_from_file(Operator):
             self.report({"ERROR"}, f"Impossibile leggere il file: {exc}")
             return {"CANCELLED"}
 
+        return _apply_llm_response(self, context, raw)
+
+
 class NL2SCENE3D_OT_install_pillow(Operator):
     """Installa Pillow nel Python interno di Blender usando pip --user."""
 
@@ -896,6 +907,7 @@ class NL2SCENE3D_OT_install_pillow(Operator):
         import subprocess
         import sys
         import os
+        import traceback
 
         self.report({"INFO"}, "Avvio installazione di Pillow...")
         

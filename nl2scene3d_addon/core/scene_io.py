@@ -454,14 +454,18 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
 # Confronto: originale (O) -> randomizzato (R) -> riordino corrente (C).
 # ---------------------------------------------------------------------------
 
-def capture_pose_snapshot(tag: str) -> int:
+def capture_pose_snapshot(tag: str, overwrite: bool = True) -> int:
     """
     Salva la posa in spazio mondo (location + rotation Euler XYZ) di ogni
     oggetto MESH come custom property nl2_{tag}_loc / nl2_{tag}_rot.
     Viene usata per calcolare le metriche di spostamento.
 
     Args:
-        tag: Etichetta dello snapshot (es. "m_orig", "m_rand").
+        tag:       Etichetta dello snapshot (es. "m_orig", "m_rand").
+        overwrite: Se False, non sovrascrive uno snapshot gia' presente per
+                   quel tag. Utile per "m_orig", che deve fotografare la scena
+                   pristina una sola volta (es. riaprendo un .blend gia'
+                   randomizzato non va ri-catturato sulla posa disordinata).
 
     Returns:
         Il numero di oggetti di cui e' stata salvata la posa.
@@ -475,6 +479,8 @@ def capture_pose_snapshot(tag: str) -> int:
     for obj in bpy.context.scene.objects:
         if obj.type in {"CAMERA", "LIGHT"}:
             continue
+        if not overwrite and kl in obj:
+            continue  # Snapshot gia' presente per questo tag: non sovrascrivere.
         m = obj.matrix_world
         obj[kl] = tuple(m.translation)
         obj[kr] = tuple(m.to_euler("XYZ"))

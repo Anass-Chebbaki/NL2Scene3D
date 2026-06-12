@@ -329,51 +329,21 @@ def build_prompt(state: SceneState) -> str:
 # 2) Estrazione robusta del JSON dalla risposta del modello
 # ---------------------------------------------------------------------------
 
-def extract_json(text) -> Optional[dict]:
+def _iter_balanced_objects(s: str):
     """
-    Estrae il primo oggetto JSON ben bilanciato da un testo potenzialmente
-    "sporco", che puo' contenere:
-    - testo libero prima e/o dopo il JSON,
-    - recinti con tripli backtick (```json ... ```).
+    Generatore che restituisce, nell'ordine in cui compaiono, tutte le
+    sottostringhe '{...}' con le graffe bilanciate trovate in `s`, ignorando
+    le graffe che si trovano dentro stringhe JSON.
 
-    L'algoritmo scorre il testo carattere per carattere tenendo traccia della
-    profondita' delle graffe e dello stato "dentro una stringa", per trovare
-    l'esatto punto di chiusura del primo oggetto JSON valido.
-
-    Args:
-        text: Stringa grezza dalla risposta del modello, oppure dict gia' parsato.
-
-    Returns:
-        Il primo oggetto JSON trovato come dict Python, oppure None se non
-        e' stato possibile estrarne uno valido.
+    Tollera testo libero e recinti ```` ```json ```` perche' i backtick non
+    sono graffe e quindi non interferiscono con lo scanner.
     """
-    if isinstance(text, dict):
-        return text
-    if not isinstance(text, str):
-        return None
-
-    s = text.strip()
-
-    # Rimuove i recinti di codice ```json ... ``` se presenti.
-    if "```" in s:
-        s = s.replace("```json", "```")
-        parts = s.split("```")
-        for part in parts:
-            if "{" in part:
-                s = part
-                break
-
-    start = s.find("{")
-    if start < 0:
-        return None
-
-    depth = 0
+    depth  = 0
     in_str = False
     escape = False
+    start  = -1
 
-    for i in range(start, len(s)):
-        ch = s[i]
-
+    for i, ch in enumerate(s):
         if in_str:
             if escape:
                 escape = False
@@ -386,17 +356,54 @@ def extract_json(text) -> Optional[dict]:
         if ch == '"':
             in_str = True
         elif ch == "{":
+            if depth == 0:
+                start = i
             depth += 1
         elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                blob = s[start:i + 1]
-                try:
-                    return json.loads(blob)
-                except (json.JSONDecodeError, ValueError):
-                    return None
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    yield s[start:i + 1]
+                    start = -1
 
-    return None
+
+def extract_json(text) -> Optional[dict]:
+    """
+    Estrae l'oggetto JSON utile da un testo potenzialmente "sporco", che puo'
+    contenere testo libero prima e/o dopo il JSON e recinti con tripli backtick.
+
+    A differenza di un semplice split sui recinti, lo scanner cerca TUTTI gli
+    oggetti '{...}' ben bilanciati e poi sceglie quello rilevante: se piu' di
+    uno e' valido (es. una graffa nel preambolo come "il {layout} richiesto")
+    viene preferito il primo che contiene la chiave "placements", altrimenti il
+    primo che si parsa correttamente.
+
+    Args:
+        text: Stringa grezza dalla risposta del modello, oppure dict gia' parsato.
+
+    Returns:
+        L'oggetto JSON come dict Python, oppure None se non e' stato possibile
+        estrarne uno valido.
+    """
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str):
+        return None
+
+    first_valid: Optional[dict] = None
+    for blob in _iter_balanced_objects(text):
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if "placements" in obj:
+            return obj  # match esatto sul payload atteso
+        if first_valid is None:
+            first_valid = obj
+
+    return first_valid
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +499,8 @@ def _resolve_collisions(
     margin = const.collision_margin
     it = 0
 
-    for it in range(1, max_iter + 1):
+    while it < max_iter:
+        it += 1
         moved = False
 
         # Mobili vs fissi: il mobile viene spostato interamente.
@@ -517,6 +525,62 @@ def _resolve_collisions(
             break
 
     return it
+
+
+def _propagate_to_descendants(
+    parent_name:    str,
+    old_parent_loc: list[float],
+    old_parent_rz:  float,
+    new_parent_loc: list[float],
+    new_parent_rz:  float,
+    by_name:        dict[str, SceneObject],
+    orig_by_name:   dict[str, SceneObject],
+) -> None:
+    """
+    Propaga ricorsivamente la trasformazione rigida del padre a TUTTI i suoi
+    discendenti (figli, nipoti, ...), non solo ai figli diretti.
+
+    Per ogni discendente:
+      - ripristina la posa originale (cosi' la trasformazione e' sempre
+        relativa al delta padre, mai cumulativa tra applicazioni successive);
+      - applica la trasformazione rigida XY rispetto al padre;
+      - ricorre usando la posa ORIGINALE del discendente come "old" e quella
+        appena calcolata come "new" per i suoi stessi figli.
+
+    La coordinata Z di ogni discendente resta sempre quella originale.
+    """
+    oparent = orig_by_name.get(parent_name)
+    if oparent is None:
+        return
+
+    for cname in oparent.children:
+        child  = by_name.get(cname)
+        ochild = orig_by_name.get(cname)
+        if child is None or ochild is None:
+            continue
+
+        # Ripristina la posa originale del figlio prima della trasformazione.
+        child.transform.location       = list(ochild.transform.location)
+        child.transform.rotation_euler = list(ochild.transform.rotation_euler)
+
+        apply_rigid_transform(
+            child,
+            old_parent_loc, old_parent_rz,
+            new_parent_loc, new_parent_rz,
+            original_z=ochild.transform.location[2],
+        )
+
+        # Ricorsione: la posa originale del figlio diventa il riferimento "old"
+        # per i nipoti, la sua nuova posa il riferimento "new".
+        _propagate_to_descendants(
+            cname,
+            list(ochild.transform.location),
+            ochild.transform.rotation_euler[2],
+            list(child.transform.location),
+            child.transform.rotation_euler[2],
+            by_name,
+            orig_by_name,
+        )
 
 
 def sanitize_response(
@@ -567,6 +631,11 @@ def sanitize_response(
     orig_by_name = {o.name: o for o in state.objects}
     rb = state.room_bounds
 
+    if rb is None:
+        raise ValueError(
+            "SceneState senza room_bounds: impossibile sanificare. Estrai prima la scena."
+        )
+
     movable_roots = [
         o for o in new_objs
         if o.is_movable and o.is_root and o.object_type not in _SKIP_TYPES
@@ -581,7 +650,9 @@ def sanitize_response(
     # --- Fase 1: applica la posa proposta (o quella originale) e clamp di gruppo ---
     for root in movable_roots:
         orig = orig_by_name[root.name]
-        orig_children = [orig_by_name[c] for c in orig.children if c in orig_by_name]
+        # Il clamp di gruppo deve tenere conto dell'INTERA gerarchia (figli,
+        # nipoti, ...), non solo dei figli diretti.
+        orig_descendants = _descendants(orig, orig_by_name)
         z = orig.transform.location[2]  # La Z originale viene sempre preservata.
 
         if root.name in placements:
@@ -603,7 +674,7 @@ def sanitize_response(
         root.transform.rotation_euler[2] = proposed_rz
 
         clamped = _clamp_parent_group_location(
-            orig, proposed_loc, proposed_rz, orig_children, rb, const.wall_margin
+            orig, proposed_loc, proposed_rz, orig_descendants, rb, const.wall_margin
         )
         root.transform.location[0] = clamped[0]
         root.transform.location[1] = clamped[1]
@@ -612,31 +683,19 @@ def sanitize_response(
     # --- Fase 2: risoluzione delle collisioni (MTV) ---
     iters = _resolve_collisions(movable_roots, fixed_obstacles, rb, const)
 
-    # --- Fase 3: i figli seguono il padre con trasformazione rigida ---
+    # --- Fase 3: l'intera gerarchia segue il padre con trasformazione rigida ---
+    # (figli, nipoti, ... non solo i figli diretti).
     for root in movable_roots:
         orig = orig_by_name[root.name]
-        old_loc = orig.transform.location
-        old_rz = orig.transform.rotation_euler[2]
-        new_loc = root.transform.location
-        new_rz = root.transform.rotation_euler[2]
-
-        for cname in orig.children:
-            child = by_name.get(cname)
-            ochild = orig_by_name.get(cname)
-            if child is None or ochild is None:
-                continue
-
-            # Ripristina la posa originale del figlio prima di applicare
-            # la trasformazione rigida relativa al nuovo padre.
-            child.transform.location = list(ochild.transform.location)
-            child.transform.rotation_euler = list(ochild.transform.rotation_euler)
-
-            apply_rigid_transform(
-                child,
-                old_loc, old_rz,
-                new_loc, new_rz,
-                original_z=ochild.transform.location[2],
-            )
+        _propagate_to_descendants(
+            root.name,
+            orig.transform.location,
+            orig.transform.rotation_euler[2],
+            root.transform.location,
+            root.transform.rotation_euler[2],
+            by_name,
+            orig_by_name,
+        )
 
     logger.info(
         "Sanificazione: %d/%d proposte applicate, collisioni risolte in %d iterazioni.",

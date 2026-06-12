@@ -23,13 +23,37 @@ from __future__ import annotations
 import logging
 import math
 import random
-from typing import Optional
 
 from .geometry import collision_score, group_aabb_xy
 from .models import RoomBounds, SceneObject, SceneState, Transform
 from .settings import CONST, Constants
 
 logger = logging.getLogger(__name__)
+
+
+def _gather_descendants(
+    root_name: str,
+    by_name:   dict[str, SceneObject],
+) -> list[SceneObject]:
+    """
+    Raccoglie ricorsivamente tutti i discendenti (figli, nipoti, ...) di un
+    oggetto root, escluso il root stesso. Funzione pura a livello di modulo
+    (niente closure su variabili di ciclo).
+    """
+    out: list[SceneObject] = []
+
+    def rec(name: str) -> None:
+        node = by_name.get(name)
+        if node is None:
+            return
+        for cname in node.children:
+            child = by_name.get(cname)
+            if child is not None:
+                out.append(child)
+                rec(cname)
+
+    rec(root_name)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -292,20 +316,8 @@ class SceneRandomizer:
             new_rz     = best_obj.transform.rotation_euler[2]
 
             # Raccoglie i figli originali per il clamp di gruppo.
-            orig_children: list[SceneObject] = []
             orig_by_name = {o.name: o for o in state.objects}
-
-            def gather_children(p_name: str):
-                """Raccoglie ricorsivamente tutti i discendenti del padre dato."""
-                p_obj = orig_by_name.get(p_name)
-                if p_obj:
-                    for c_name in p_obj.children:
-                        c_obj = orig_by_name.get(c_name)
-                        if c_obj:
-                            orig_children.append(c_obj)
-                            gather_children(c_name)
-
-            gather_children(root.name)
+            orig_children = _gather_descendants(root.name, orig_by_name)
 
             # Vincola il gruppo dentro i confini della stanza.
             clamped_loc = _clamp_parent_group_location(

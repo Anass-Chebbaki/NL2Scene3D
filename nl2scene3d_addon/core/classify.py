@@ -196,6 +196,31 @@ def compute_room_bounds(objects: list[SceneObject]) -> RoomBounds:
 # Parenting manuale
 # ---------------------------------------------------------------------------
 
+def _would_create_cycle(
+    child_name:  str,
+    parent_name: str,
+    parent_of:   dict[str, str],
+) -> bool:
+    """
+    True se rendere `parent_name` il padre di `child_name` chiuderebbe un ciclo,
+    data la gerarchia gia' costruita finora (`parent_of`: {figlio: padre}).
+
+    Risale la catena dei padri gia' accettati a partire da `parent_name`: se
+    incontra `child_name` (o un nodo gia' visitato) la relazione creerebbe un
+    anello. Lavorando sulla gerarchia PARZIALE, spezza solo l'arco che chiude
+    il ciclo e conserva il resto della catena (A->B->C viene mantenuto, solo
+    C->A viene scartato).
+    """
+    seen = {child_name}
+    cur: Optional[str] = parent_name
+    while cur:
+        if cur in seen:
+            return True
+        seen.add(cur)
+        cur = parent_of.get(cur)
+    return False
+
+
 def apply_manual_parents(
     objects:    list[SceneObject],
     parent_map: dict[str, str],
@@ -207,7 +232,9 @@ def apply_manual_parents(
     Ignora le coppie non valide:
         - padre assente nella scena;
         - auto-riferimento (oggetto padre di se stesso);
-        - catene circolari banali (padre che e' a sua volta figlio del figlio).
+        - catene circolari di qualsiasi lunghezza (A->B->C->A): viene scartato
+          solo l'arco che chiude l'anello, il resto della catena e' preservato,
+          cosi' nessun oggetto sparisce dalla pipeline.
 
     Resetta tutte le relazioni precedenti prima di applicare la nuova mappa.
     """
@@ -217,6 +244,9 @@ def apply_manual_parents(
     for o in objects:
         o.parent   = None
         o.children = []
+
+    # Gerarchia accettata finora, costruita in modo incrementale.
+    parent_of: dict[str, str] = {}
 
     for child_name, parent_name in (parent_map or {}).items():
         if not parent_name:
@@ -228,12 +258,18 @@ def apply_manual_parents(
         if child is None or parent is None or child_name == parent_name:
             continue
 
-        # Evita catene circolari: il padre non puo' essere figlio del figlio.
-        if parent.parent == child_name:
+        # Evita catene circolari di qualsiasi lunghezza, spezzando solo
+        # l'arco che chiuderebbe l'anello.
+        if _would_create_cycle(child_name, parent_name, parent_of):
+            logger.warning(
+                "Relazione padre-figlio ignorata: '%s' -> '%s' creerebbe un ciclo.",
+                child_name, parent_name,
+            )
             continue
 
         child.parent = parent_name
         parent.children.append(child_name)
+        parent_of[child_name] = parent_name
 
 
 # ---------------------------------------------------------------------------
