@@ -714,10 +714,13 @@ class NL2SCENE3D_OT_export_for_llm(Operator):
             txt = bpy.data.texts.get(_RESPONSE_TEXT) or bpy.data.texts.new(_RESPONSE_TEXT)
             txt.clear()
 
+            # Copia automaticamente negli appunti di sistema
+            context.window_manager.clipboard = prompt
+
             self.report(
                 {"INFO"},
-                f"Prompt pronto nel Text 'NL2_AI_Prompt' ({len(roots)} oggetti). "
-                f"Copialo nell'LLM, poi incolla la risposta nel Text '{_RESPONSE_TEXT}'.",
+                f"Prompt copiato negli APPUNTI e salvato in 'NL2_AI_Prompt' ({len(roots)} oggetti). "
+                f"Incollalo (Ctrl+V) direttamente nel tuo LLM!",
             )
             return {"FINISHED"}
 
@@ -836,6 +839,25 @@ class NL2SCENE3D_OT_apply_from_text(Operator):
         return _apply_llm_response(self, context, raw)
 
 
+class NL2SCENE3D_OT_apply_from_clipboard(Operator):
+    """Applica la risposta dell'LLM leggendola direttamente dagli appunti di sistema."""
+
+    bl_idname  = "nl2scene3d.apply_from_clipboard"
+    bl_label   = "Applica risposta (dagli appunti)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        raw = context.window_manager.clipboard
+        if not raw or not raw.strip():
+            self.report(
+                {"WARNING"},
+                "Gli appunti di sistema sono vuoti. Copia prima la risposta JSON dall'LLM.",
+            )
+            return {"CANCELLED"}
+
+        return _apply_llm_response(self, context, raw)
+
+
 class NL2SCENE3D_OT_apply_from_file(Operator):
     """Applica la risposta dell'LLM caricandola da un file (.json o .txt)."""
 
@@ -863,7 +885,54 @@ class NL2SCENE3D_OT_apply_from_file(Operator):
             self.report({"ERROR"}, f"Impossibile leggere il file: {exc}")
             return {"CANCELLED"}
 
-        return _apply_llm_response(self, context, raw)
+class NL2SCENE3D_OT_install_pillow(Operator):
+    """Installa Pillow nel Python interno di Blender usando pip --user."""
+
+    bl_idname  = "nl2scene3d.install_pillow"
+    bl_label   = "Installa Pillow automaticamente"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        import subprocess
+        import sys
+        import os
+
+        self.report({"INFO"}, "Avvio installazione di Pillow...")
+        
+        # Identifica il percorso corretto dell'eseguibile Python associato a Blender
+        python_exe = sys.executable
+        if "blender" in os.path.basename(python_exe).lower():
+            possible_paths = [
+                os.path.join(sys.prefix, "bin", "python.exe"),
+                os.path.join(sys.prefix, "python.exe"),
+                os.path.join(sys.prefix, "bin", "python3"),
+                os.path.join(sys.prefix, "bin", "python"),
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    python_exe = path
+                    break
+
+        try:
+            # Aggiorna pip per sicurezza ed installa Pillow in spazio utente (evita problemi di permessi)
+            subprocess.check_call([python_exe, "-m", "pip", "install", "--upgrade", "pip"])
+            subprocess.check_call([python_exe, "-m", "pip", "install", "Pillow", "--user"])
+            
+            # Forza il reload dei moduli per registrare la nuova importazione
+            import importlib
+            import site
+            user_site = site.getusersitepackages()
+            if user_site and user_site not in sys.path:
+                sys.path.append(user_site)
+            importlib.invalidate_caches()
+            from PIL import Image
+            
+            self.report({"INFO"}, "Pillow installato correttamente! Ora puoi generare i render etichettati.")
+            return {"FINISHED"}
+        except Exception as exc:
+            self.report({"ERROR"}, f"Installazione fallita: {exc}")
+            traceback.print_exc()
+            return {"CANCELLED"}
 
 
 # ---------------------------------------------------------------------------
@@ -883,7 +952,9 @@ _classes = (
     NL2SCENE3D_OT_render_labeled,
     NL2SCENE3D_OT_export_for_llm,
     NL2SCENE3D_OT_apply_from_text,
+    NL2SCENE3D_OT_apply_from_clipboard,
     NL2SCENE3D_OT_apply_from_file,
+    NL2SCENE3D_OT_install_pillow,
 )
 
 

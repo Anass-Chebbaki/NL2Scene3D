@@ -165,30 +165,46 @@ Scena Blender riorganizzata
 
 1. Clonare o scaricare il repository.
 
-2. Creare il file zip dell'add-on a partire dalla directory `nl2scene3d_addon/`:
+2. Creare il file zip dell'add-on. Puoi farlo automaticamente eseguendo lo script Python incluso nella root del progetto:
+   ```bash
+   python build_addon.py
+   ```
+   Questo genererà un file zip ottimizzato come `nl2scene3d_addon_v1.0.0.zip` escludendo cache e file inutili. In alternativa, puoi crearlo manualmente a partire dalla directory `nl2scene3d_addon/`:
    ```bash
    zip -r nl2scene3d_addon.zip nl2scene3d_addon/
    ```
    La directory `offline_testing/` non deve essere inclusa nello zip.
 
-3. In Blender, aprire **Modifica > Preferenze > Add-on > Installa**, selezionare il file zip e abilitare **NL2Scene3D** nella lista.
+3. In Blender:
+   - **Per Blender 4.2 o superiore**: Apri **Modifica > Preferenze > Get Extensions** (Ottieni estensioni), clicca sull'icona della freccia in alto a destra e seleziona **Install from Disk** (Installa da disco), quindi seleziona il file zip appena generato.
+   - **Per Blender 4.1 o inferiore**: Apri **Modifica > Preferenze > Add-on > Installa**, seleziona lo zip e abilita **NL2Scene3D** dalla lista.
 
 4. Il pannello dell'add-on compare nella **sidebar della 3D Viewport** (tasto N) sotto la tab **NL2Scene3D**.
 
 ### Installazione di Pillow
 
-Pillow non è incluso nella distribuzione standard di Blender. Per installarlo nel Python di Blender:
+Pillow non è incluso nella distribuzione standard di Blender, ma è richiesto per scrivere le etichette dei nomi e disegnare la scala/bussola sui render PNG.
+
+#### Metodo 1: Autoinstallazione ad un click (Consigliato)
+Se Pillow non è installato, all'avvio l'add-on mostra un avviso rosso nella Sidebar di Blender con il pulsante **"Installa Pillow"**:
+1. Clicca sul pulsante **Installa Pillow**.
+2. L'add-on individuerà l'eseguibile Python corrente di Blender ed eseguirà `pip install Pillow --user` in background.
+3. L'installazione avviene in spazio utente (senza richiedere diritti di amministratore) e la libreria viene caricata a runtime senza bisogno di riavviare Blender.
+
+#### Metodo 2: Installazione manuale da terminale
+Se preferisci farlo manualmente, apri il terminale del tuo sistema operativo ed esegui pip puntando al Python **interno** di Blender:
 
 ```bash
 # Sostituire il percorso con quello della propria installazione di Blender.
 # Su Linux / macOS:
-/percorso/a/blender/4.2/python/bin/python3 -m pip install Pillow
+/percorso/a/blender/5.1/python/bin/python3 -m pip install Pillow --user
 
 # Su Windows:
-"C:\Program Files\Blender Foundation\Blender 4.2\4.2\python\bin\python.exe" -m pip install Pillow
+"C:\Program Files\Blender Foundation\Blender 5.1\5.1\python\bin\python.exe" -m pip install Pillow --user
 ```
+*(Sostituisci `5.1` con la tua versione di Blender)*
 
-Verificare l'esito dell'installazione eseguendo `import PIL` nella console Python di Blender (**Scripting > Console**). Se Pillow non è disponibile, i render vengono comunque prodotti ma privi delle etichette e della barra di scala.
+Se Pillow non è disponibile (o l'installazione fallisce), i render vengono comunque prodotti ma salvati come immagini "pulite" senza etichette; le coordinate delle etichette vengono invece salvate in un file `.labels.json` accanto all'immagine.
 
 ---
 
@@ -281,16 +297,14 @@ I PNG sono salvati in `nl2_renders/` accanto al file `.blend`, o nella directory
 
 ### Step 3 — Esporta prompt per LLM
 
-Premere **Esporta prompt per LLM**. L'add-on:
+Premere **1. Esporta prompt (copia negli appunti)**. L'add-on:
 
 1. Chiama `scene_io.extract_scene_state()` per lo stato corrente.
-2. Chiama `reorganizer.build_request()` per costruire il payload JSON: la stanza (`room`), gli ostacoli fissi non strutturali (`fixed_objects`) e gli oggetti mobili root (`movable_objects`). Per ogni mobile root vengono inclusi il centro geometrico corrente (x, y), l'impronta XY dell'intero gruppo (padre + tutti i discendenti), la rotazione corrente e, opzionalmente, la lista dei figli come contesto read-only. I figli non compaiono in `movable_objects` e il modello non deve produrre posizioni per loro.
-3. Inserisce il payload nel `PROMPT_TEMPLATE` (scritto in inglese per massimizzare la compatibilità con i modelli) e scrive il risultato nel Text datablock `NL2_AI_Prompt`.
-4. Svuota il Text datablock `NL2_AI_Response` per prepararlo all'incolla.
+2. Chiama `reorganizer.build_request()` per costruire il payload JSON: la stanza (`room`), gli ostacoli fissi non strutturali (`fixed_objects`) e gli oggetti mobili root (`movable_objects`). Per ogni mobile root vengono inclusi il centro geometrico corrente (x, y), l'impronta XY dell'intero gruppo (padre + tutti i discendenti), la rotazione corrente e, opzionalmente, la lista dei figli come contesto read-only.
+3. Genera il prompt completo unendo le istruzioni con il payload JSON.
+4. **Copia il prompt generato direttamente negli appunti del tuo sistema operativo** (e per backup lo scrive anche nel Text datablock `NL2_AI_Prompt`).
 
-Il `PROMPT_TEMPLATE` descrive al modello: come leggere lo schema JSON, i principi di design (grouping funzionale, utilizzo delle pareti, accessibilità, coerenza spaziale, ordine visivo, efficienza dello spazio), i vincoli geometrici obbligatori e i vincoli di rotazione (solo 0/90/180/270°), la strategia di ottimizzazione da seguire prima di rispondere, e il formato di output richiesto (JSON puro, nessun markdown, nessun testo extra).
-
-Aprire `NL2_AI_Prompt` nel Text Editor di Blender, copiare l'intero contenuto e inviarlo al proprio LLM insieme ai render prodotti nel passo precedente.
+Ti basterà andare sul tuo LLM di riferimento e premere **Ctrl + V** per incollare il prompt pronto. Allega i render delle viste prodotti al punto 2 e invia il messaggio.
 
 ### Step 4 — Applica la risposta dell'LLM
 
@@ -305,12 +319,19 @@ Il modello deve rispondere con un JSON nella forma:
 }
 ```
 
-Per applicare la risposta, scegliere uno dei due metodi:
+Per applicare la risposta, puoi usare il metodo principale basato su appunti o uno dei metodi alternativi:
 
-- **Metodo incolla:** aprire il Text datablock `NL2_AI_Response` nel Text Editor di Blender, incollare il JSON del modello, poi premere **Applica risposta (dal testo incollato)**.
-- **Metodo file:** salvare la risposta come file `.json` o `.txt` e premere **Applica risposta (da file)** per caricarla via file browser.
+- **Metodo degli appunti (Consigliato - 1 Click):**
+  1. Seleziona e copia il JSON generato dall'LLM negli appunti del sistema.
+  2. In Blender, clicca su **`2. Applica risposta (dagli appunti)`**. L'add-on leggerà direttamente la risposta dagli appunti e organizzerà la scena.
 
-In entrambi i casi viene eseguita la stessa pipeline di sanitizzazione.
+- **Metodo da Text Editor (Alternativa):**
+  Incolla il JSON del modello nel Text datablock `NL2_AI_Response` in Blender, quindi clicca su **Da Text Editor**.
+
+- **Metodo da file (Alternativa):**
+  Salva la risposta come file `.json` o `.txt` e clicca su **Da file** per caricarla tramite il file browser di Blender.
+
+In tutti i casi viene eseguita la stessa pipeline di sanitizzazione e verifica delle collisioni e confini.
 
 ### Reset allo stato originale
 

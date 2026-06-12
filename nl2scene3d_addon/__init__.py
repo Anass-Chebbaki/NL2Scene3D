@@ -19,11 +19,23 @@ Nota sull'import-safety:
     dentro register() / unregister(). In questo modo i moduli puri (nl2scene3d.core.*)
     restano importabili da riga di comando per i test, senza Blender installato.
 """
+import sys
+import site
+
+# Assicura che la directory site-packages dell'utente sia inclusa in sys.path.
+# Questo permette a Blender di importare moduli installati via `--user` (come Pillow).
+try:
+    user_site = site.getusersitepackages()
+    if user_site and user_site not in sys.path:
+        sys.path.append(user_site)
+except Exception:
+    pass
+
 
 bl_info = {
     "name": "NL2Scene3D",
     "author": "NL2Scene3D Team",
-    "version": (0, 3, 0),
+    "version": (1, 0, 0),
     # Minimo conservativo: compatibile con Blender 4.2+ e 5.1.x.
     # Alzare se si usano API piu' recenti.
     "blender": (4, 2, 0),

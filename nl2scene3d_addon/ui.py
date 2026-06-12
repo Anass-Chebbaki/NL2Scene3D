@@ -180,6 +180,20 @@ class NL2SCENE3D_PT_main_panel(Panel):
             box.label(text="Add-on non abilitato correttamente", icon="ERROR")
             return
         box.label(text="Flusso LLM manuale (esporta / applica)", icon="SHADERFX")
+        
+        # Verifica se Pillow (PIL) è installato nel Python di Blender
+        try:
+            from PIL import Image
+            pillow_installed = True
+        except ImportError:
+            pillow_installed = False
+
+        if not pillow_installed:
+            pbox = layout.box()
+            pbox.alert = True
+            pbox.label(text="Pillow non installato!", icon="ERROR")
+            pbox.label(text="I render etichettati non funzioneranno.")
+            pbox.operator("nl2scene3d.install_pillow", text="Installa Pillow", icon="IMPORT")
 
         layout.separator()
         layout.operator(
@@ -249,7 +263,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
         # --- Sezione Step 2: riordina con AI (flusso manuale) ---
         layout.separator()
         col2 = layout.column(align=True)
-        col2.label(text="Step 2: Riordina con AI (manuale)")
+        col2.label(text="Step 2: Riordina con AI")
         col2.operator(
             "nl2scene3d.render_labeled",
             text="0. Render con etichette",
@@ -257,21 +271,29 @@ class NL2SCENE3D_PT_main_panel(Panel):
         )
         col2.operator(
             "nl2scene3d.export_for_llm",
-            text="1. Esporta prompt per LLM",
-            icon="EXPORT",
+            text="1. Esporta prompt (copia negli appunti)",
+            icon="COPYDOWN",
         )
-        col2.label(text="Allega i render + copia 'NL2_AI_Prompt' nel tuo LLM,", icon="INFO")
-        col2.label(text="incolla la risposta nel Text 'NL2_AI_Response', poi:")
+        
+        col2.separator()
+        col2.label(text="Incolla il prompt nell'LLM, copia il JSON di risposta, poi:")
+        col2.operator(
+            "nl2scene3d.apply_from_clipboard",
+            text="2. Applica risposta (dagli appunti)",
+            icon="PASTEDOWN",
+        )
 
+        col2.separator()
+        col2.label(text="Metodi alternativi di applicazione:")
         row3 = col2.row(align=True)
         row3.operator(
             "nl2scene3d.apply_from_text",
-            text="2. Applica (incollato)",
-            icon="PASTEDOWN",
+            text="Da Text Editor",
+            icon="TEXT",
         )
         row3.operator(
             "nl2scene3d.apply_from_file",
-            text="...da file",
+            text="Da file",
             icon="FILEBROWSER",
         )
 
