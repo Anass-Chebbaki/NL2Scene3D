@@ -926,8 +926,7 @@ class NL2SCENE3D_OT_install_pillow(Operator):
                     break
 
         try:
-            # Aggiorna pip per sicurezza ed installa Pillow in spazio utente (evita problemi di permessi)
-            subprocess.check_call([python_exe, "-m", "pip", "install", "--upgrade", "pip"])
+            # Installa Pillow in spazio utente.
             subprocess.check_call([python_exe, "-m", "pip", "install", "Pillow", "--user"])
             
             # Forza il reload dei moduli per registrare la nuova importazione

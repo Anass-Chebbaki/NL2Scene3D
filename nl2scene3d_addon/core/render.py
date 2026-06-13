@@ -300,7 +300,6 @@ def _draw_labels(
     """
     try:
         from PIL import Image, ImageDraw, ImageEnhance, ImageFile, ImageFont  # type: ignore
-        ImageFile.LOAD_TRUNCATED_IMAGES = True  # Tollera PNG non completamente scritti.
     except ImportError:
         if points:
             sidecar = os.path.splitext(image_path)[0] + ".labels.json"
@@ -309,80 +308,85 @@ def _draw_labels(
             logger.warning("Pillow non disponibile: etichette non disegnate, scritto %s", sidecar)
         return False
 
-    base = Image.open(image_path).convert("RGB")
-
-    # Correzione di luminosita'.
-    if brighten and abs(brighten - 1.0) > 1e-3:
-        base = ImageEnhance.Brightness(base).enhance(brighten)
-
-    # Correzione gamma tramite LUT a 256 valori.
-    if gamma and abs(gamma - 1.0) > 1e-3:
-        inv = 1.0 / gamma
-        lut = [min(255, int(round(255.0 * ((i / 255.0) ** inv)))) for i in range(256)]
-        base = base.point(lut * 3)
-
-    if not points:
-        base.save(image_path)
-        return True
-
+    # LOAD_TRUNCATED_IMAGES e' uno stato globale Pillow; viene
+    # ripristinato al valore originale per non influenzare altre operazioni.
+    _old_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-    except OSError:
-        font = ImageFont.load_default()
+        base = Image.open(image_path).convert("RGB")
 
-    W, H = base.size
-    measure = ImageDraw.Draw(base)
+        # Correzione di luminosita'.
+        if brighten and abs(brighten - 1.0) > 1e-3:
+            base = ImageEnhance.Brightness(base).enhance(brighten)
 
-    # Calcola le dimensioni di ogni etichetta per il layout.
-    boxes = []
-    for name, x, y in points:
-        tb = measure.textbbox((0, 0), name, font=font)
-        tw, th = tb[2] - tb[0], tb[3] - tb[1]
-        boxes.append({
-            "name": name,
-            "ax": float(x), "ay": float(y),
-            "w": tw + 10, "h": th + 8,
-            "tw": tw, "th": th,
-            "ox": tb[0], "oy": tb[1],
-        })
+        # Correzione gamma tramite LUT a 256 valori.
+        if gamma and abs(gamma - 1.0) > 1e-3:
+            inv = 1.0 / gamma
+            lut = [min(255, int(round(255.0 * ((i / 255.0) ** inv)))) for i in range(256)]
+            base = base.point(lut * 3)
 
-    ml, mr, mt, mb, Wp, Hp = _gutter_layout(boxes, W, H)
+        if not points:
+            base.save(image_path)
+            return True
 
-    # Canvas allargato con sfondo grigio scuro; la scena viene incollata al centro.
-    canvas = Image.new("RGB", (int(Wp), int(Hp)), (40, 40, 40))
-    canvas.paste(base, (int(ml), int(mt)))
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except OSError:
+            font = ImageFont.load_default()
 
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+        W, H = base.size
+        measure = ImageDraw.Draw(base)
 
-    for b in boxes:
-        # Posizione dell'ancora nel canvas allargato.
-        ax, ay = b["ax"] + ml, b["ay"] + mt
-        cx, cy = b["cx"], b["cy"]
+        # Calcola le dimensioni di ogni etichetta per il layout.
+        boxes = []
+        for name, x, y in points:
+            tb = measure.textbbox((0, 0), name, font=font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            boxes.append({
+                "name": name,
+                "ax": float(x), "ay": float(y),
+                "w": tw + 10, "h": th + 8,
+                "tw": tw, "th": th,
+                "ox": tb[0], "oy": tb[1],
+            })
 
-        # Punto di partenza della linea di richiamo: bordo del box rivolto verso la scena.
-        if b["border"] == "L":
-            sx, sy = cx + b["w"] / 2.0, cy
-        elif b["border"] == "R":
-            sx, sy = cx - b["w"] / 2.0, cy
-        elif b["border"] == "T":
-            sx, sy = cx, cy + b["h"] / 2.0
-        else:
-            sx, sy = cx, cy - b["h"] / 2.0
+        ml, mr, mt, mb, Wp, Hp = _gutter_layout(boxes, W, H)
 
-        # Linea di richiamo e punto di ancoraggio.
-        draw.line((sx, sy, ax, ay), fill=(255, 255, 255, 230), width=1)
-        draw.ellipse((ax - 2, ay - 2, ax + 2, ay + 2), fill=(255, 255, 255, 255))
+        # Canvas allargato con sfondo grigio scuro; la scena viene incollata al centro.
+        canvas = Image.new("RGB", (int(Wp), int(Hp)), (40, 40, 40))
+        canvas.paste(base, (int(ml), int(mt)))
 
-        # Riquadro dell'etichetta: sfondo nero opaco, testo bianco.
-        x0, y0 = cx - b["w"] / 2.0, cy - b["h"] / 2.0
-        draw.rectangle((x0, y0, x0 + b["w"], y0 + b["h"]), fill=(0, 0, 0, 255))
-        tx = cx - b["tw"] / 2.0 - b["ox"]
-        ty = cy - b["th"] / 2.0 - b["oy"]
-        draw.text((tx, ty), b["name"], font=font, fill=(255, 255, 255, 255))
+        overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-    Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB").save(image_path)
-    return True
+        for b in boxes:
+            # Posizione dell'ancora nel canvas allargato.
+            ax, ay = b["ax"] + ml, b["ay"] + mt
+            cx, cy = b["cx"], b["cy"]
+
+            # Punto di partenza della linea di richiamo.
+            if b["border"] == "L":
+                sx, sy = cx + b["w"] / 2.0, cy
+            elif b["border"] == "R":
+                sx, sy = cx - b["w"] / 2.0, cy
+            elif b["border"] == "T":
+                sx, sy = cx, cy + b["h"] / 2.0
+            else:
+                sx, sy = cx, cy - b["h"] / 2.0
+
+            draw.line((sx, sy, ax, ay), fill=(255, 255, 255, 230), width=1)
+            draw.ellipse((ax - 2, ay - 2, ax + 2, ay + 2), fill=(255, 255, 255, 255))
+
+            x0, y0 = cx - b["w"] / 2.0, cy - b["h"] / 2.0
+            draw.rectangle((x0, y0, x0 + b["w"], y0 + b["h"]), fill=(0, 0, 0, 255))
+            tx = cx - b["tw"] / 2.0 - b["ox"]
+            ty = cy - b["th"] / 2.0 - b["oy"]
+            draw.text((tx, ty), b["name"], font=font, fill=(255, 255, 255, 255))
+
+        Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB").save(image_path)
+        return True
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = _old_truncated
 
 
 # ---------------------------------------------------------------------------
@@ -407,56 +411,57 @@ def _draw_overlay(image_path: str, axes_dirs, meters_per_pixel: float = None) ->
     """
     try:
         from PIL import Image, ImageDraw, ImageFile, ImageFont  # type: ignore
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
     except ImportError:
         return
 
-    img = Image.open(image_path).convert("RGBA")
-    W, H = img.size
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
+    # Ripristina LOAD_TRUNCATED_IMAGES dopo l'uso.
+    _old_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 15)
-        font_axis = ImageFont.truetype("DejaVuSans.ttf", 24)
-    except OSError:
-        font = ImageFont.load_default()
-        font_axis = font
+        img = Image.open(image_path).convert("RGBA")
+        W, H = img.size
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-    # Bussola degli assi: posizionata in alto a destra.
-    if axes_dirs:
-        (xdx, xdy), (ydx, ydy) = axes_dirs
-        ax, ay, L = W - 92, 92, 56
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 15)
+            font_axis = ImageFont.truetype("DejaVuSans.ttf", 24)
+        except OSError:
+            font = ImageFont.load_default()
+            font_axis = font
 
-        draw.line((ax, ay, ax + xdx * L, ay + xdy * L), fill=(235, 70, 70, 255), width=5)
-        draw.text(
-            (ax + xdx * (L + 14) - 7, ay + xdy * (L + 14) - 12),
-            "X", font=font_axis, fill=(235, 70, 70, 255),
-        )
-        draw.line((ax, ay, ax + ydx * L, ay + ydy * L), fill=(70, 200, 70, 255), width=5)
-        draw.text(
-            (ax + ydx * (L + 14) - 7, ay + ydy * (L + 14) - 12),
-            "Y", font=font_axis, fill=(70, 200, 70, 255),
-        )
-        draw.ellipse((ax - 5, ay - 5, ax + 5, ay + 5), fill=(255, 255, 255, 255))
+        # Bussola degli assi: posizionata in alto a destra.
+        if axes_dirs:
+            (xdx, xdy), (ydx, ydy) = axes_dirs
+            ax, ay, L = W - 92, 92, 56
 
-    # Barra di scala: solo per le viste ortografiche (scala costante).
-    if meters_per_pixel and meters_per_pixel > 0:
-        bar_m = _nice_length(140 * meters_per_pixel)
-        bar_px = int(round(bar_m / meters_per_pixel))
-        x0, y0 = 30, H - 36
+            draw.line((ax, ay, ax + xdx * L, ay + xdy * L), fill=(235, 70, 70, 255), width=5)
+            draw.text(
+                (ax + xdx * (L + 14) - 7, ay + xdy * (L + 14) - 12),
+                "X", font=font_axis, fill=(235, 70, 70, 255),
+            )
+            draw.line((ax, ay, ax + ydx * L, ay + ydy * L), fill=(70, 200, 70, 255), width=5)
+            draw.text(
+                (ax + ydx * (L + 14) - 7, ay + ydy * (L + 14) - 12),
+                "Y", font=font_axis, fill=(70, 200, 70, 255),
+            )
+            draw.ellipse((ax - 5, ay - 5, ax + 5, ay + 5), fill=(255, 255, 255, 255))
 
-        # Sfondo semi-trasparente per leggibilita'.
-        draw.rectangle((x0 - 7, y0 - 22, x0 + bar_px + 7, y0 + 10), fill=(0, 0, 0, 150))
+        # Barra di scala: solo per le viste ortografiche (scala costante).
+        if meters_per_pixel and meters_per_pixel > 0:
+            bar_m = _nice_length(140 * meters_per_pixel)
+            bar_px = int(round(bar_m / meters_per_pixel))
+            x0, y0 = 30, H - 36
 
-        # Linea orizzontale con terminatori verticali.
-        draw.line((x0, y0, x0 + bar_px, y0), fill=(255, 255, 255, 255), width=3)
-        draw.line((x0, y0 - 6, x0, y0 + 6), fill=(255, 255, 255, 255), width=3)
-        draw.line((x0 + bar_px, y0 - 6, x0 + bar_px, y0 + 6), fill=(255, 255, 255, 255), width=3)
+            draw.rectangle((x0 - 7, y0 - 22, x0 + bar_px + 7, y0 + 10), fill=(0, 0, 0, 150))
+            draw.line((x0, y0, x0 + bar_px, y0), fill=(255, 255, 255, 255), width=3)
+            draw.line((x0, y0 - 6, x0, y0 + 6), fill=(255, 255, 255, 255), width=3)
+            draw.line((x0 + bar_px, y0 - 6, x0 + bar_px, y0 + 6), fill=(255, 255, 255, 255), width=3)
+            draw.text((x0, y0 - 20), f"{bar_m:g} m", font=font, fill=(255, 255, 255, 255))
 
-        draw.text((x0, y0 - 20), f"{bar_m:g} m", font=font, fill=(255, 255, 255, 255))
-
-    Image.alpha_composite(img, overlay).convert("RGB").save(image_path)
+        Image.alpha_composite(img, overlay).convert("RGB").save(image_path)
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = _old_truncated
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +624,9 @@ def _render_to(path: str) -> None:
     indicato. Tenta prima il render OpenGL (Workbench) con illuminazione
     studio; se non disponibile, ricade sul render standard del motore attivo.
 
+    Le impostazioni di shading viewport vengono salvate e ripristinate dopo il render,
+    in modo che l'utente non si trovi la viewport in modalita' STUDIO/TEXTURE dopo ogni render.
+
     Args:
         path: Percorso di output del file PNG.
     """
@@ -627,9 +635,16 @@ def _render_to(path: str) -> None:
     scene = bpy.context.scene
     scene.render.filepath = path
 
+    # Salva le impostazioni di shading originali.
+    shading_backup = {}
     try:
         shading = scene.display.shading
-        shading.light = "STUDIO"
+        shading_backup["light"]      = shading.light
+        shading_backup["color_type"] = shading.color_type
+        if hasattr(shading, "studiolight_intensity"):
+            shading_backup["studiolight_intensity"] = shading.studiolight_intensity
+
+        shading.light      = "STUDIO"
         shading.color_type = "TEXTURE"
         if hasattr(shading, "studiolight_intensity"):
             shading.studiolight_intensity = 1.4
@@ -637,9 +652,19 @@ def _render_to(path: str) -> None:
         pass
 
     try:
-        bpy.ops.render.opengl(write_still=True, view_context=False)
-    except RuntimeError:
-        bpy.ops.render.render(write_still=True)
+        try:
+            bpy.ops.render.opengl(write_still=True, view_context=False)
+        except RuntimeError:
+            bpy.ops.render.render(write_still=True)
+    finally:
+        # Ripristina le impostazioni di shading originali.
+        try:
+            shading = scene.display.shading
+            for k, v in shading_backup.items():
+                if hasattr(shading, k):
+                    setattr(shading, k, v)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -832,10 +857,12 @@ def render_labeled_views(
     created: list[str] = []
     temp_objs: list = []
 
-    def _shoot(cam, suffix: str) -> None:
+    def _shoot(cam, suffix: str) -> str:
         """
-        Imposta la camera, esegue il render, applica etichette e overlay,
-        e aggiunge il percorso del file alla lista dei risultati.
+        Imposta la camera, esegue il render, applica etichette e overlay.
+
+        Restituisce il path invece di modificare una closure,
+        rendendo la funzione piu' predicibile e thread-safe.
         """
         scene.camera = cam
         path = os.path.join(out_dir, f"{_safe(scene.name)}_{suffix}.png")
@@ -854,14 +881,14 @@ def render_labeled_views(
 
         axes = _axes_screen_dirs(scene, cam, width, height, center)
         _draw_overlay(path, axes, mpp)
-        created.append(path)
+        return path
 
     try:
         # 1) Vista prospettica.
         if auto_perspective:
             pcam = _make_corner_camera(scene, auto_lens, aabb=frame_aabb)
             temp_objs.append(pcam)
-            _shoot(pcam, "cam")
+            created.append(_shoot(pcam, "cam"))
         elif use_existing_camera:
             pcam = scene.camera or next(
                 (o for o in scene.objects if o.type == "CAMERA"), None
@@ -877,7 +904,7 @@ def render_labeled_views(
                     lens_bk = cdata.lens
                     cdata.lens = float(lens_override)
                 try:
-                    _shoot(pcam, "cam")
+                    created.append(_shoot(pcam, "cam"))
                 finally:
                     if lens_bk is not None:
                         cdata.lens = lens_bk
@@ -886,13 +913,13 @@ def render_labeled_views(
         if add_top_down:
             tcam = _make_top_down_camera(scene, aabb=frame_aabb)
             temp_objs.append(tcam)
-            _shoot(tcam, "top")
+            created.append(_shoot(tcam, "top"))
 
         # 3) Vista isometrica (opzionale).
         if add_iso:
             icam = _make_iso_camera(scene, aabb=frame_aabb)
             temp_objs.append(icam)
-            _shoot(icam, "iso")
+            created.append(_shoot(icam, "iso"))
 
         logger.info("Render con etichette: %d file in %s", len(created), out_dir)
         return created

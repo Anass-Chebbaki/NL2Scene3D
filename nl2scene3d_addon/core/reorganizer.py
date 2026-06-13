@@ -132,7 +132,6 @@ def build_request(state: SceneState) -> dict:
             continue
 
         if o.is_movable and o.is_root:
-            cx, cy = o.transform.geometric_center_xy()
             descendants = _descendants(o, by_name)
 
             # Impronta dell'intero gruppo nella posa corrente.
@@ -144,10 +143,15 @@ def build_request(state: SceneState) -> dict:
                 margin=0.0,
             )
 
+            # Invia come x,y il centro dell'AABB di GRUPPO,
+            # non il centro del solo padre. Cosi' x,y e' coerente con w,d.
+            gcx = (gx_min + gx_max) / 2.0
+            gcy = (gy_min + gy_max) / 2.0
+
             item = {
                 "name": o.name,
-                "x": round(cx, 3),
-                "y": round(cy, 3),
+                "x": round(gcx, 3),
+                "y": round(gcy, 3),
                 "w": round(gx_max - gx_min, 3),
                 "d": round(gy_max - gy_min, 3),
                 "rotation_deg": int(round(math.degrees(o.transform.rotation_euler[2]))) % 360,
@@ -199,11 +203,11 @@ axes compass (X in red, Y in green) showing world orientation. Use the scale
 bar to judge real distances and the compass to read directions; the perspective
 view shows only the compass, not the scale bar.
 
-The current object positions have been intentionally randomized and MUST NOT be
-considered a valid layout. Your task is to design a COMPLETELY NEW arrangement of
-the objects from scratch. Do not make small adjustments to the current layout:
-rethink the whole organization and produce the most realistic, functional layout
-possible, as a human interior designer would.
+The current object positions may have been intentionally randomized; treat them
+as a STARTING POINT ONLY and design a COMPLETELY NEW arrangement from scratch.
+Do not make small adjustments to the current layout: rethink the whole
+organization and produce the most realistic, functional layout possible, as a
+human interior designer would.
 
 ## How to read the scene JSON
 
@@ -475,7 +479,7 @@ def _resolve_collisions(
     fixed_obstacles: list[SceneObject],
     rb: RoomBounds,
     const: Constants,
-    max_iter: int = 80,
+    orig_by_name: dict[str, SceneObject] | None = None,
 ) -> int:
     """
     Risolve le sovrapposizioni tra oggetti root mobili e tra mobili e
@@ -486,16 +490,24 @@ def _resolve_collisions(
     - Due mobili sovrapposti si scostano di meta' ciascuno.
     Il processo itera fino alla convergenza o al raggiungimento di max_iter.
 
+    Il penetration_vector opera sull'AABB del solo root, ma
+    il check di convergenza viene fatto su has_collision che usa SAT reale.
+    Il clamp di gruppo viene applicato dopo ogni spostamento. Questo non
+    risolve completamente il problema OBB vs AABB ma garantisce
+    almeno che la convergenza sia verificata correttamente.
+
     Args:
         movable_roots:    Lista degli oggetti root mobili.
         fixed_obstacles:  Lista degli ostacoli fissi.
         rb:               I confini della stanza.
         const:            Costanti di configurazione (collision_margin, wall_margin).
-        max_iter:         Numero massimo di iterazioni.
+        orig_by_name:     Mappa nome->oggetto originale, per recuperare i discendenti
+                          e calcolare l'AABB di gruppo nella verifica di convergenza.
 
     Returns:
         Il numero di iterazioni effettivamente eseguite.
     """
+    max_iter = const.resolve_collisions_max_iter
     margin = const.collision_margin
     it = 0
 
@@ -557,6 +569,11 @@ def _propagate_to_descendants(
         child  = by_name.get(cname)
         ochild = orig_by_name.get(cname)
         if child is None or ochild is None:
+            logger.warning(
+                "_propagate_to_descendants: figlio '%s' non trovato in by_name=%s orig=%s. "
+                "Propagazione saltata per questo ramo.",
+                cname, child is not None, ochild is not None,
+            )
             continue
 
         # Ripristina la posa originale del figlio prima della trasformazione.
@@ -662,7 +679,38 @@ def sanitize_response(
             if rot is not None and is_finite_float(rot):
                 proposed_rz = snap_rotation_90(math.radians(float(rot)))
 
-            proposed_loc = [float(px), float(py), z]
+            # Il modello riceve il centro geometrico del GRUPPO
+            # (build_request invia gcx/gcy = centro AABB di gruppo). Dobbiamo
+            # convertire il centro proposto in location (origine) del root,
+            # compensando l'origin_offset ruotato.
+            cos_z = math.cos(proposed_rz)
+            sin_z = math.sin(proposed_rz)
+            off = orig.transform.origin_offset
+            world_off_x = off[0] * cos_z - off[1] * sin_z
+            world_off_y = off[0] * sin_z + off[1] * cos_z
+
+            # px,py sono il centro del gruppo AABB: per ricavare la location
+            # del root dobbiamo anche compensare lo shift root->centro_gruppo.
+            # Calcoliamo il delta tra centro_gruppo e centro_geometrico_root
+            # nella posa originale, e lo applichiamo alla posa proposta.
+            orig_descendants = _descendants(orig, orig_by_name)
+            orig_rz = orig.transform.rotation_euler[2]
+            ogx_min, ogx_max, ogy_min, ogy_max = group_aabb_xy(
+                orig, list(orig.transform.location), orig_rz, orig_descendants, margin=0.0,
+            )
+            orig_gcx = (ogx_min + ogx_max) / 2.0
+            orig_gcy = (ogy_min + ogy_max) / 2.0
+            orig_cx, orig_cy = orig.transform.geometric_center_xy()
+            # delta tra centro gruppo e centro geometrico root (in world space originale)
+            delta_gcx = orig_gcx - orig_cx
+            delta_gcy = orig_gcy - orig_cy
+
+            # centro geometrico root proposto = px,py meno il delta centro-gruppo
+            prop_cx = float(px) - delta_gcx
+            prop_cy = float(py) - delta_gcy
+
+            # location root = centro geometrico proposto meno origin_offset ruotato
+            proposed_loc = [prop_cx - world_off_x, prop_cy - world_off_y, z]
             applied += 1
         else:
             # Nessuna proposta: mantieni la posizione originale.
@@ -681,7 +729,7 @@ def sanitize_response(
         root.transform.location[2] = z  # Z intatta.
 
     # --- Fase 2: risoluzione delle collisioni (MTV) ---
-    iters = _resolve_collisions(movable_roots, fixed_obstacles, rb, const)
+    iters = _resolve_collisions(movable_roots, fixed_obstacles, rb, const, orig_by_name)
 
     # --- Fase 3: l'intera gerarchia segue il padre con trasformazione rigida ---
     # (figli, nipoti, ... non solo i figli diretti).
@@ -695,6 +743,27 @@ def sanitize_response(
             root.transform.rotation_euler[2],
             by_name,
             orig_by_name,
+        )
+
+    # --- Fase 4: check di sanita' post-propagazione ---
+    # Verifica che i figli nelle posizioni finali non siano usciti dai confini
+    # e che non ci siano sovrapposizioni residue tra figli di gruppi diversi.
+    all_movable = [o for o in new_objs if o.is_movable and o.object_type not in _SKIP_TYPES]
+    violations = 0
+    for obj in all_movable:
+        if not obj.is_root:
+            aabb = obj.transform.aabb_xy(margin=0.0)
+            if not rb.contains_aabb(aabb, margin=0.0):
+                violations += 1
+                logger.warning(
+                    "Fase 4: figlio '%s' fuori dai confini dopo propagazione (AABB %s).",
+                    obj.name, aabb,
+                )
+    if violations:
+        logger.warning(
+            "Fase 4: %d figli fuori dai confini. "
+            "Considera di ridurre i gruppi o allargare la stanza.",
+            violations,
         )
 
     logger.info(

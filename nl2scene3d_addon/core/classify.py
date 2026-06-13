@@ -314,16 +314,20 @@ def suggest_grouping(objects: list[SceneObject]) -> dict[str, str]:
             cand_vol  = _volume(cand)
             cand_area = _footprint(cand)
 
-            bigger_footprint = cand_area >= c_area * 1.05
-            bigger_volume    = cand_vol  >= c_vol  * 1.20
+            bigger_footprint = cand_area >= c_area * CONST.grouping_footprint_ratio
+            bigger_volume    = cand_vol  >= c_vol  * CONST.grouping_volume_ratio
 
             p_z_min, p_z_max = cand.transform.z_range()
 
-            # Condizioni di prossimita' verticale.
-            on_top    = -0.08 <= (c_z_min - p_z_max) <= 0.20
+            # on_top accetta solo oggetti che poggiano SOPRA il candidato
+            # (c_z_min >= p_z_max - piccola tolleranza), non oggetti che penetrano
+            # dentro di lui. La soglia inferiore era -0.08 (penetrazione ammessa)
+            # che causava falsi positivi (es. sedie "figlio" del pavimento).
+            # Ora: lo 0 esatto e' il limite (CONST.grouping_on_top_lo = 0.0).
+            on_top    = CONST.grouping_on_top_lo <= (c_z_min - p_z_max) <= CONST.grouping_on_top_hi
             is_inside = (c_z_min >= p_z_min - 0.05) and (c_z_max <= p_z_max + 0.05)
             z_overlap = max(0.0, min(c_z_max, p_z_max) - max(c_z_min, p_z_min))
-            close_z   = c_h > 0 and (z_overlap / c_h) >= 0.30
+            close_z   = c_h > 0 and (z_overlap / c_h) >= CONST.grouping_z_overlap_frac
 
             matched = False
             score   = 0.0

@@ -22,9 +22,9 @@ Add-on per Blender che riorganizza scene 3D esistenti tramite un modello linguis
   - [Ispezione e classificazione (dry-run)](#ispezione-e-classificazione-dry-run)
   - [Override manuali](#override-manuali)
   - [Step 1 — Randomize Layout](#step-1--randomize-layout)
-  - [Step 2 — Render con etichette](#step-2--render-con-etichette)
-  - [Step 3 — Esporta prompt per LLM](#step-3--esporta-prompt-per-llm)
-  - [Step 4 — Applica la risposta dell'LLM](#step-4--applica-la-risposta-dellllm)
+  - [Step 2a — Render con etichette](#step-2a--render-con-etichette)
+  - [Step 2b — Esporta prompt per LLM](#step-2b--esporta-prompt-per-llm)
+  - [Step 2c — Applica la risposta dell'LLM](#step-2c--applica-la-risposta-dellllm)
   - [Reset allo stato originale](#reset-allo-stato-originale)
   - [Metriche di spostamento](#metriche-di-spostamento)
 - [Classificazione automatica degli oggetti](#classificazione-automatica-degli-oggetti)
@@ -275,7 +275,7 @@ Premere **Randomize Layout**. L'add-on:
 5. Chiama `scene_io.apply_state()` per scrivere le nuove pose in Blender.
 6. Salva uno snapshot `m_rand` per le metriche.
 
-### Step 2 — Render con etichette
+### Step 2a — Render con etichette
 
 Premere **Render con etichette**. La pipeline produce:
 
@@ -295,18 +295,18 @@ Il post-processing (via Pillow) applica correzione di luminosità (default ×1.5
 
 I PNG sono salvati in `nl2_renders/` accanto al file `.blend`, o nella directory temporanea di sistema se il file non è stato ancora salvato.
 
-### Step 3 — Esporta prompt per LLM
+### Step 2b — Esporta prompt per LLM
 
 Premere **1. Esporta prompt (copia negli appunti)**. L'add-on:
 
 1. Chiama `scene_io.extract_scene_state()` per lo stato corrente.
-2. Chiama `reorganizer.build_request()` per costruire il payload JSON: la stanza (`room`), gli ostacoli fissi non strutturali (`fixed_objects`) e gli oggetti mobili root (`movable_objects`). Per ogni mobile root vengono inclusi il centro geometrico corrente (x, y), l'impronta XY dell'intero gruppo (padre + tutti i discendenti), la rotazione corrente e, opzionalmente, la lista dei figli come contesto read-only.
+2. Chiama `reorganizer.build_request()` per costruire il payload JSON: la stanza (`room`), gli ostacoli fissi non strutturali (`fixed_objects`) e gli oggetti mobili root (`movable_objects`). Per ogni mobile root vengono inclusi il centro geometrico del gruppo (gcx, gcy), l'impronta XY dell'intero gruppo (padre + tutti i discendenti), la rotazione corrente e, opzionalmente, la lista dei figli come contesto read-only.
 3. Genera il prompt completo unendo le istruzioni con il payload JSON.
 4. **Copia il prompt generato direttamente negli appunti del tuo sistema operativo** (e per backup lo scrive anche nel Text datablock `NL2_AI_Prompt`).
 
 Ti basterà andare sul tuo LLM di riferimento e premere **Ctrl + V** per incollare il prompt pronto. Allega i render delle viste prodotti al punto 2 e invia il messaggio.
 
-### Step 4 — Applica la risposta dell'LLM
+### Step 2c — Applica la risposta dell'LLM
 
 Il modello deve rispondere con un JSON nella forma:
 
@@ -411,7 +411,7 @@ Il `collision_score()` è una somma pesata: penalità fissa di 100 + proporzione
 
 `render_labeled_views()` salva e ripristina tutte le impostazioni di render di Blender (risoluzione, filepath, formato, camera) ed elimina le camera temporanee create al termine, anche in caso di eccezione.
 
-Le camera temporanee vengono create e collegate alla collezione della scena, poi rimosse al termine insieme ai loro datablock camera. La risoluzione è sempre quadrata (`render_edge_px × render_edge_px`, default 768×768).
+Le camera temporanee vengono create e collegate alla collezione della scena, poi rimosse al termine insieme ai loro datablock camera. La risoluzione è sempre quadrata (`render_edge_px × render_edge_px`, default 1024×1024).
 
 Il calcolo delle direzioni schermo degli assi X/Y per la bussola usa `world_to_camera_view()` di Blender: proietta il centro della scena e un punto spostato di 0.5 m lungo X e uno lungo Y, calcola le coordinate pixel corrispondenti e normalizza la differenza.
 
@@ -425,7 +425,7 @@ Il gutter layout calcola prima il bordo più vicino per ogni etichetta (usando l
 
 - `room`: i quattro confini della stanza (x_min, x_max, y_min, y_max) in metri, arrotondati a 3 decimali.
 - `fixed_objects`: gli oggetti fissi non strutturali (fissi per override utente o perché non-MESH), ognuno con nome, centro geometrico e impronta XY. Gli strutturali (muri, pavimento, ecc.) sono esclusi perché già impliciti nei confini della stanza.
-- `movable_objects`: i root mobili, ognuno con nome, centro geometrico corrente, impronta XY dell'intero gruppo (padre + tutti i discendenti), rotazione corrente in gradi interi (% 360) e lista `contains` dei figli con le loro impronte.
+- `movable_objects`: i root mobili, ognuno con nome, centro geometrico del gruppo (gcx, gcy), impronta XY dell'intero gruppo (padre + tutti i discendenti), rotazione corrente in gradi interi (% 360) e lista `contains` dei figli con le loro impronte.
 
 L'impronta di ogni gruppo è calcolata da `group_aabb_xy()` nella posa corrente, quindi tiene conto della rotazione e di tutti i figli nella loro posizione relativa attuale. Il modello riceve l'impronta del gruppo come un unico blocco rigido di dimensioni `w × d`; non deve conoscere la struttura interna del gruppo.
 
@@ -472,7 +472,7 @@ Tutte le costanti operative sono definite in `nl2scene3d_addon/core/settings.py`
 | `jitter_ratio` | 0.80 | Ampiezza del disordine come frazione della dimensione della stanza; 1.0 = oggetti posizionati ovunque nella stanza, 0.0 = nessuno spostamento |
 | `max_placement_attempts` | 200 | Budget di tentativi per ogni oggetto prima di usare il fallback (posizione con score più basso trovata) |
 | `max_movable_objects` | 50 | Oggetti oltre questo limite vengono forzati a fisso; protegge da scene con centinaia di oggetti decorativi |
-| `render_edge_px` | 768 | Lato in pixel dei render quadrati prodotti e allegati al prompt |
+| `render_edge_px` | 1024 | Lato in pixel dei render quadrati prodotti e allegati al prompt |
 
 Il seed del randomizer è esposto in **Modifica > Preferenze > Add-on > NL2Scene3D**. Seed 0 (default) produce un risultato diverso a ogni click; qualsiasi intero positivo produce un layout riproducibile, utile per confrontare le risposte di modelli diversi sulla stessa scena disordinata.
 

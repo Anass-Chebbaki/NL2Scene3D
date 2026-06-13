@@ -30,6 +30,7 @@ Invarianza di Z:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional
 
 from .classify import (
@@ -53,9 +54,13 @@ _HOME_ROT = "nl2_home_rot"  # Rotation Euler locale originale.
 
 def capture_home_state() -> int:
     """
-    Salva la posa corrente (location e rotation_euler locali) di ogni oggetto
-    come "stato originale", memorizzandola in custom property che persistono
-    nel file .blend.
+    Salva la posa corrente in SPAZIO MONDO (location e rotation_euler) di ogni
+    oggetto come "stato originale", memorizzandola in custom property che
+    persistono nel file .blend.
+
+    Usa matrix_world (come capture_pose_snapshot) per garantire
+    coerenza con apply_state che legge e scrive coordinate world. In questo modo
+    il reset funziona correttamente anche per oggetti con parent nativo Blender.
 
     Non sovrascrive uno snapshot gia' esistente: il primo Randomize fotografa
     la scena pristina e le esecuzioni successive non alterano l'originale.
@@ -69,8 +74,10 @@ def capture_home_state() -> int:
     for obj in bpy.context.scene.objects:
         if _HOME_LOC in obj:
             continue  # Snapshot gia' presente: non sovrascrivere.
-        obj[_HOME_LOC] = tuple(obj.location)
-        obj[_HOME_ROT] = tuple(obj.rotation_euler)
+        # Usa matrix_world (world space) per coerenza con apply_state.
+        m = obj.matrix_world
+        obj[_HOME_LOC] = tuple(m.translation)
+        obj[_HOME_ROT] = tuple(m.to_euler("XYZ"))
         n += 1
 
     return n
@@ -92,10 +99,14 @@ def reset_home_state() -> int:
     Ripristina la location e la rotation_euler di ogni oggetto allo snapshot
     "originale" memorizzato nelle custom property.
 
+    Poiche' capture_home_state ora salva coordinate world, il ripristino
+    avviene via matrix_world per coerenza (stessa strategia di apply_state).
+
     Returns:
         Il numero di oggetti ripristinati.
     """
-    import bpy  # noqa: PLC0415
+    import bpy        # noqa: PLC0415
+    import mathutils  # noqa: PLC0415
 
     n = 0
     for obj in bpy.context.scene.objects:
@@ -103,12 +114,14 @@ def reset_home_state() -> int:
             continue
 
         loc = obj[_HOME_LOC]
-        obj.location = (loc[0], loc[1], loc[2])
+        rot_t = obj.get(_HOME_ROT, (0.0, 0.0, 0.0))
 
-        rot = obj.get(_HOME_ROT)
-        if rot is not None:
-            obj.rotation_mode = "XYZ"
-            obj.rotation_euler = (rot[0], rot[1], rot[2])
+        obj.rotation_mode = "XYZ"
+        loc_m = mathutils.Matrix.Translation((loc[0], loc[1], loc[2]))
+        rot_m = mathutils.Euler((rot_t[0], rot_t[1], rot_t[2]), "XYZ").to_matrix().to_4x4()
+        scl   = obj.matrix_world.to_scale()
+        scl_m = mathutils.Matrix.Diagonal((scl.x, scl.y, scl.z, 1.0))
+        obj.matrix_world = loc_m @ rot_m @ scl_m
 
         n += 1
 
@@ -180,9 +193,12 @@ def extract_scene_state(
             name, obj_type, dimensions, overrides.get(name), const
         )
 
-        # Rispetta il limite massimo di oggetti mobili.
         if is_movable and movable_count >= const.max_movable_objects:
             is_movable = False
+            logger.warning(
+                "Oggetto '%s' demotato a FISSO: raggiunto il limite di %d oggetti mobili.",
+                name, const.max_movable_objects,
+            )
 
         # Assicura una modalita' di rotazione Euler compatibile con XYZ.
         if b_obj.rotation_mode not in ("XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"):
@@ -296,11 +312,17 @@ def format_inspection(state: SceneState) -> str:
         lines.append(f"{o.name:<26}{o.category:<18}{stato:<9}{o.parent or '-'}")
 
     # Avviso: oggetti mobili con nomi che suggeriscono elementi strutturali.
+    # Usa token matching (come classify.py) invece di substring
+    # generica, per evitare falsi positivi (es. 'bedroom' non e' 'room').
+    import re as _re
+    def _tok(t: str) -> set:
+        return {x for x in _re.split(r"[^a-z]+", t.lower()) if x}
+
     struct_kw = (
         "door", "window", "wall", "ceiling",
         "porta", "finestra", "muro", "parete", "soffitto",
     )
-    suspicious = [o.name for o in movable if any(k in o.name.lower() for k in struct_kw)]
+    suspicious = [o.name for o in movable if any(k in _tok(o.name) for k in struct_kw)]
     if suspicious:
         lines.append("")
         lines.append("ATTENZIONE: oggetti MOBILI con nome 'strutturale' (controlla):")
@@ -430,16 +452,15 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
     for scene_obj, b_obj in to_process:
         if process_object(scene_obj, b_obj):
             counters["updated"] += 1
-            try:
-                bpy.context.view_layer.update()
-            except Exception:
-                pass
         else:
             counters["skipped"] += 1
-            try:
-                bpy.context.view_layer.update()
-            except Exception:
-                pass
+
+    # view_layer.update() chiamata UNA SOLA VOLTA dopo il loop, non per ogni oggetto.
+    # Questo riduce da O(n) a O(1) le chiamate e puo' migliorare significativamente le performance su scene grandi.
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
 
     logger.info(
         "Applicazione completa: %d aggiornati, %d non trovati, %d invariati.",
@@ -634,7 +655,7 @@ def format_metrics_report(orig: dict, rand: dict, cur: dict) -> str:
         lines.append(
             f"{nm[:28]:28} {_fmt(d_or, 8, 3)} {_fmt(d_rc, 8, 3)} {_fmt(yaw, 9, 1)}"
         )
-        if (r and c) and d_rc == d_rc:  # Esclude NaN.
+        if (r and c) and math.isfinite(d_rc):  # Usa math.isfinite invece di x==x
             tot_rc += d_rc
             if d_rc > 1e-4:
                 moved += 1

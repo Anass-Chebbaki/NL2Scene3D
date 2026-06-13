@@ -28,6 +28,15 @@ from bpy.props import (  # type: ignore
 )
 from bpy.types import AddonPreferences, Panel, PropertyGroup, UIList  # type: ignore
 
+# Pillow detection a livello modulo, non in ogni frame del draw().
+# Blender chiama draw() per ogni aggiornamento UI; un import-attempt per frame
+# e' inutile e leggermente costoso. Il flag viene calcolato una sola volta.
+try:
+    from PIL import Image as _PIL_Image  # noqa: F401
+    _PILLOW_AVAILABLE = True
+except ImportError:
+    _PILLOW_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Preferenze dell'add-on
@@ -181,14 +190,8 @@ class NL2SCENE3D_PT_main_panel(Panel):
             return
         box.label(text="Flusso LLM manuale (esporta / applica)", icon="SHADERFX")
         
-        # Verifica se Pillow (PIL) è installato nel Python di Blender
-        try:
-            from PIL import Image
-            pillow_installed = True
-        except ImportError:
-            pillow_installed = False
-
-        if not pillow_installed:
+        # Usa il flag a livello modulo invece di fare l'import nel draw().
+        if not _PILLOW_AVAILABLE:
             pbox = layout.box()
             pbox.alert = True
             pbox.label(text="Pillow non installato!", icon="ERROR")
@@ -261,25 +264,33 @@ class NL2SCENE3D_PT_main_panel(Panel):
             col1.label(text="Nessun originale (premi Randomize una volta).", icon="INFO")
 
         # --- Sezione Step 2: riordina con AI (flusso manuale) ---
+        # Numerazione chiarita con suffissi a/b/c per evitare confusione tra lo Step 2 principale e i suoi sotto-step numerati 0/1/2.
         layout.separator()
         col2 = layout.column(align=True)
         col2.label(text="Step 2: Riordina con AI")
         col2.operator(
             "nl2scene3d.render_labeled",
-            text="0. Render con etichette",
+            text="2a. Render con etichette (opzionale)",
             icon="RENDER_STILL",
         )
+
+        # Avvisa se si esporta senza aver prima randomizzato.
+        if not scene.nl2_has_home:
+            row_warn = col2.row()
+            row_warn.alert = True
+            row_warn.label(text="Suggerito: esegui prima Randomize (Step 1)", icon="ERROR")
+
         col2.operator(
             "nl2scene3d.export_for_llm",
-            text="1. Esporta prompt (copia negli appunti)",
+            text="2b. Esporta prompt (copia negli appunti)",
             icon="COPYDOWN",
         )
-        
+
         col2.separator()
         col2.label(text="Incolla il prompt nell'LLM, copia il JSON di risposta, poi:")
         col2.operator(
             "nl2scene3d.apply_from_clipboard",
-            text="2. Applica risposta (dagli appunti)",
+            text="2c. Applica risposta (dagli appunti)",
             icon="PASTEDOWN",
         )
 

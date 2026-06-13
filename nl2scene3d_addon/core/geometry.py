@@ -36,10 +36,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from .models import RoomBounds, SceneObject
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +77,12 @@ def is_finite_float(val: Any) -> bool:
 
 
 def snap_rotation_90(rz: float) -> float:
-    """Approssima una rotazione Z al multiplo di 90 gradi piu' vicino (0, 90, 180, 270 gradi)."""
-    multiples = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
-    return min(multiples, key=lambda m: abs(m - (rz % (2 * math.pi))))
+    """
+    Approssima una rotazione Z al multiplo di 90 gradi piu' vicino (0, 90, 180, 270 gradi).
+    """
+    quarter = math.pi / 2
+    n = round(rz / quarter)
+    return (n * quarter) % (2 * math.pi)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,7 @@ def wall_collision(
     Porte, finestre e mesh "room" sono escluse da questo check perche' non
     sono ostacoli fisici da evitare.
     """
+    from .settings import CONST  # import locale per evitare dipendenze circolari
     cand_poly      = candidate.transform.obb_corners_xy(margin=wall_margin)
     c_z_min, c_z_max = candidate.transform.z_range()
 
@@ -161,7 +162,7 @@ def wall_collision(
         # Ottimizzazione: check rapido di sovrapposizione Z prima del SAT.
         w_z_min, w_z_max = wall.transform.z_range()
         z_overlap = max(0.0, min(c_z_max, w_z_max) - max(c_z_min, w_z_min))
-        if z_overlap <= 0.01:
+        if z_overlap <= CONST.wall_collision_z_threshold:
             continue
 
         wall_poly = wall.transform.obb_corners_xy(margin=0.0)
@@ -192,6 +193,7 @@ def furniture_collision(
     La soglia Z e' 0.01 m per intercettare anche oggetti quasi complanari
     (es. tappeto sotto una sedia, oggetti sul bordo di un tavolo).
     """
+    from .settings import CONST  # import locale per evitare dipendenze circolari
     cand_poly             = candidate.transform.obb_corners_xy(margin=margin)
     cand_z_min, cand_z_max = candidate.transform.z_range()
 
@@ -201,7 +203,7 @@ def furniture_collision(
 
         o_z_min, o_z_max = other.transform.z_range()
         z_overlap = max(0.0, min(cand_z_max, o_z_max) - max(cand_z_min, o_z_min))
-        if z_overlap < 0.01:
+        if z_overlap < CONST.furniture_collision_z_threshold:
             continue
 
         other_poly = other.transform.obb_corners_xy(margin=margin)
@@ -210,6 +212,70 @@ def furniture_collision(
             return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Helper condiviso: penalita' per aperture (porte/finestre)
+# ---------------------------------------------------------------------------
+
+def _opening_penalty(
+    candidate: "SceneObject",
+    obj: "SceneObject",
+    is_door: bool,
+    is_window: bool,
+    const,
+) -> float:
+    """
+    Calcola la penalita' per l'invasione della zona di clearance di un'apertura.
+
+    Funzione condivisa tra check_openings_clearance e collision_score per
+    evitare duplicazione della logica.
+
+    La zona di clearance si estende SOLO davanti all'apertura:
+    in coordinate locali Y, il rettangolo va da 0 a +clearance_depth, non
+    simmetricamente sui due lati.
+
+    Returns:
+        Penalita' (>0) se c'e' invasione, 0.0 altrimenti.
+    """
+    clearance_depth = const.door_clearance_depth if is_door else const.window_clearance_depth
+
+    cx, cy         = obj.transform.geometric_center_xy()
+    rz             = obj.transform.rotation_euler[2]
+    cos_z, sin_z   = math.cos(rz), math.sin(rz)
+    dim            = obj.transform.dimensions
+
+    # La clearance si estende SOLO davanti all'apertura (lato +Y locale),
+    # non su entrambi i lati. Cosi' si evita di bloccare il posizionamento sul
+    # lato interno del muro nelle stanze piccole.
+    w = dim[0] / 2.0             # semi-larghezza strutturale
+    h_front = clearance_depth    # profondita' davanti
+    h_back  = dim[1] / 2.0       # meta' della profondita' struttura (solo la struttura)
+
+    # Il rettangolo in coord locali: [-w, w] x [-h_back, h_front]
+    local_corners = [(-w, -h_back), (w, -h_back), (w, h_front), (-w, h_front)]
+    clearance_poly = [
+        (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
+        for lx, ly in local_corners
+    ]
+
+    cand_poly = candidate.transform.obb_corners_xy(margin=const.post_llm_check_margin)
+
+    if not sat_overlap(clearance_poly, cand_poly):
+        return 0.0
+
+    c_z_min, c_z_max = candidate.transform.z_range()
+    o_z_min, o_z_max = obj.transform.z_range()
+    z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
+
+    if is_door:
+        if z_overlap > 0.05:
+            return const.door_penalty
+    elif is_window:
+        if c_z_max > o_z_min + 0.10 and z_overlap > 0.05:
+            return const.window_penalty
+
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +291,12 @@ def check_openings_clearance(
 
     Restituisce True se c'e' invasione della clearance zone.
 
-    Profondita' della zona di rispetto:
-        - Porta:    0.90 m (passaggio + raggio di apertura)
-        - Finestra: 0.50 m (luce + accesso)
+    Profondita' della zona di rispetto (solo davanti):
+        - Porta:    CONST.door_clearance_depth   (default 0.90 m)
+        - Finestra: CONST.window_clearance_depth (default 0.50 m)
     """
+    from .settings import CONST  # import locale per evitare dipendenze circolari
+
     for obj in structural_objects:
         is_door    = _name_has_kw(_DOOR_KWS, obj.name)
         is_window  = _name_has_kw(_WINDOW_KWS, obj.name)
@@ -236,46 +304,13 @@ def check_openings_clearance(
         if not (is_door or is_window):
             continue
 
-        clearance_depth = 0.90 if is_door else 0.50
-
-        cx, cy         = obj.transform.geometric_center_xy()
-        rz             = obj.transform.rotation_euler[2]
-        cos_z, sin_z   = math.cos(rz), math.sin(rz)
-        dim            = obj.transform.dimensions
-
-        # Estende la dimensione Y locale per includere la clearance su entrambi i lati.
-        w = dim[0] / 2.0                      # semi-larghezza strutturale
-        h = dim[1] / 2.0 + clearance_depth    # semi-profondita' estesa
-
-        local_corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
-        clearance_poly = [
-            (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
-            for lx, ly in local_corners
-        ]
-
-        cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
-
-        if sat_overlap(clearance_poly, cand_poly):
-            c_z_min, c_z_max = candidate.transform.z_range()
-            o_z_min, o_z_max = obj.transform.z_range()
-            z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
-
-            if is_door:
-                # Per le porte basta qualsiasi sovrapposizione Z significativa.
-                if z_overlap > 0.05:
-                    logger.debug(
-                        "Collisione porta: '%s' blocca il passaggio di '%s'.",
-                        candidate.name, obj.name,
-                    )
-                    return True
-            elif is_window:
-                # Per le finestre blocca solo se l'oggetto supera il davanzale.
-                if c_z_max > o_z_min + 0.10 and z_overlap > 0.05:
-                    logger.debug(
-                        "Collisione finestra: '%s' copre la luce di '%s'.",
-                        candidate.name, obj.name,
-                    )
-                    return True
+        penalty = _opening_penalty(candidate, obj, is_door, is_window, CONST)
+        if penalty > 0.0:
+            logger.debug(
+                "Invasione clearance %s: '%s' blocca '%s'.",
+                "porta" if is_door else "finestra", candidate.name, obj.name,
+            )
+            return True
 
     return False
 
@@ -369,6 +404,8 @@ def collision_score(
     Se room_bounds e' fornito, viene aggiunta una penalita' proporzionale
     all'overflow fuori dai confini della stanza.
     """
+    from .settings import CONST  # import locale per evitare dipendenze circolari
+
     # Ritorna 0.0 immediatamente se il SAT esatto non rileva collisioni,
     # evitando falsi positivi dovuti all'approssimazione AABB su oggetti ruotati.
     if not has_collision(
@@ -403,7 +440,7 @@ def collision_score(
         o_aabb             = obj.transform.aabb_xy(margin=0.0)
         o_z_min, o_z_max   = obj.transform.z_range()
         z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
-        if z_overlap < 0.02:
+        if z_overlap < CONST.post_llm_check_margin:
             continue
 
         if obj.category == "structural" and check_walls:
@@ -411,27 +448,9 @@ def collision_score(
                 is_door   = _name_has_kw(_DOOR_KWS, obj.name)
                 is_window = _name_has_kw(_WINDOW_KWS, obj.name)
 
-                clearance_depth = 0.90 if is_door else 0.50
-                cx, cy          = obj.transform.geometric_center_xy()
-                rz              = obj.transform.rotation_euler[2]
-                cos_z, sin_z    = math.cos(rz), math.sin(rz)
-                dim             = obj.transform.dimensions
-                w               = dim[0] / 2.0
-                h               = dim[1] / 2.0 + clearance_depth
-
-                local_corners  = [(-w, -h), (w, -h), (w, h), (-w, h)]
-                clearance_poly = [
-                    (cx + lx * cos_z - ly * sin_z, cy + lx * sin_z + ly * cos_z)
-                    for lx, ly in local_corners
-                ]
-                cand_poly = candidate.transform.obb_corners_xy(margin=0.02)
-
-                if sat_overlap(clearance_poly, cand_poly):
-                    real_z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
-                    if is_door and real_z_overlap > 0.05:
-                        total += 50.0   # penalita' pesante per le porte
-                    elif is_window and c_z_max > o_z_min + 0.10 and real_z_overlap > 0.05:
-                        total += 25.0   # penalita' piu' leggera per le finestre
+                penalty = _opening_penalty(candidate, obj, is_door, is_window, CONST)
+                if penalty > 0.0:
+                    total += penalty
                 continue
 
             ratio  = aabb_overlap_ratio(c_aabb_wall, o_aabb)
@@ -460,7 +479,12 @@ def penetration_vector(
 
     Usato nel solver post-LLM per spostare gli oggetti sovrapposti in modo
     intelligente invece di usare jitter casuale.
+
+    Nota: questo MTV e' calcolato su AABB, mentre has_collision usa
+    SAT su OBB. Per oggetti ruotati la correzione puo' essere imprecisa; il
+    solver itera fino a convergenza per mitigare il problema.
     """
+    from .settings import CONST  # import locale per evitare dipendenze circolari
     c_cx, c_cy = candidate.transform.geometric_center_xy()
     o_cx, o_cy = other.transform.geometric_center_xy()
 
@@ -475,10 +499,10 @@ def penetration_vector(
 
     # Spinge lungo l'asse con la penetrazione minore (MTV standard).
     if x_overlap < y_overlap:
-        dx = x_overlap + 0.01  # +1 cm di buffer aggiuntivo
+        dx = x_overlap + CONST.mtv_buffer
         return (dx if c_cx > o_cx else -dx), 0.0
     else:
-        dy = y_overlap + 0.01
+        dy = y_overlap + CONST.mtv_buffer
         return 0.0, (dy if c_cy > o_cy else -dy)
 
 
