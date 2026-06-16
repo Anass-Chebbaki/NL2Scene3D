@@ -22,15 +22,6 @@ Nota sull'import-safety:
 import sys
 import site
 
-# Assicura che la directory site-packages dell'utente sia inclusa in sys.path.
-# Questo permette a Blender di importare moduli installati via `--user` (come Pillow).
-try:
-    user_site = site.getusersitepackages()
-    if user_site and user_site not in sys.path:
-        sys.path.append(user_site)
-except Exception:
-    pass
-
 
 bl_info = {
     "name": "NL2Scene3D",
@@ -47,6 +38,16 @@ bl_info = {
 
 def register():
     """Registra gli operatori e il pannello UI dell'add-on."""
+    # Aggiunge il site-packages utente in sys.path (se non gia' presente) solo al
+    # momento della registrazione, in modo da non inquinare il path globale di
+    # Blender al solo import del modulo. Altri add-on non vengono influenzati.
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and user_site not in sys.path:
+            sys.path.append(user_site)
+    except Exception:
+        pass
+
     from . import operators, ui
     operators.register()
     ui.register()

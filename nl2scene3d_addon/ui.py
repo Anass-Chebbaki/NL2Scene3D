@@ -198,6 +198,49 @@ class NL2SCENE3D_PT_main_panel(Panel):
             pbox.label(text="I render etichettati non funzioneranno.")
             pbox.operator("nl2scene3d.install_pillow", text="Installa Pillow", icon="IMPORT")
 
+        # Avviso limite oggetti mobili
+        try:
+            from .core.settings import CONST, STRUCTURAL_PATTERNS, NON_MESH_TYPES
+            import re
+            
+            overrides = None
+            if getattr(scene, "nl2_overrides_enabled", False):
+                overrides = {e.name: e.fixed for e in getattr(scene, "nl2_overrides", [])}
+
+            def _tok(t: str) -> set:
+                return {x for x in re.split(r"[^a-z]+", t.lower()) if x}
+
+            movable_count = 0
+            for o in scene.objects:
+                if o.type in NON_MESH_TYPES:
+                    continue
+                name = o.name
+                if overrides is not None and name in overrides:
+                    if not overrides[name]:
+                        movable_count += 1
+                else:
+                    toks = _tok(name)
+                    is_struct = any(k in toks for k in STRUCTURAL_PATTERNS)
+                    if not is_struct:
+                        movable_count += 1
+
+            if movable_count >= CONST.max_movable_objects:
+                limit_box = layout.box()
+                limit_box.alert = True
+                limit_box.label(
+                    text=f"Limite arredi mobili raggiunto! ({movable_count}/{CONST.max_movable_objects})",
+                    icon="ERROR",
+                )
+                limit_box.label(text="Gli arredi in eccesso saranno trattati come fissi.")
+            elif movable_count >= CONST.max_movable_objects - 10:
+                limit_box = layout.box()
+                limit_box.label(
+                    text=f"Attenzione: {movable_count} oggetti mobili (limite: {CONST.max_movable_objects})",
+                    icon="WARNING",
+                )
+        except Exception:
+            pass
+
         layout.separator()
         layout.operator(
             "nl2scene3d.inspect",
@@ -251,6 +294,36 @@ class NL2SCENE3D_PT_main_panel(Panel):
                     icon="INFO",
                 )
 
+        # --- Sezione Confini Stanza ---
+        layout.separator()
+        box_room = layout.box()
+        box_room.label(text="Confini Stanza (Room Bounds)", icon="BBOX")
+        
+        helper_name = "NL2_RoomBounds_Helper"
+        helper = bpy.data.objects.get(helper_name)
+        
+        row_room = box_room.row(align=True)
+        if not helper:
+            row_room.operator("nl2scene3d.create_bounds_helper", text="Definisci confini manuali", icon="ADD")
+        else:
+            row_room.operator("nl2scene3d.create_bounds_helper", text="Seleziona Helper", icon="RESTRICT_SELECT_OFF")
+            row_room.operator("nl2scene3d.remove_bounds_helper", text="", icon="TRASH")
+            
+            # Mostra i confini letti dall'helper
+            try:
+                import mathutils
+                corners = [helper.matrix_world @ mathutils.Vector(c) for c in helper.bound_box]
+                x_min, x_max = min(c.x for c in corners), max(c.x for c in corners)
+                y_min, y_max = min(c.y for c in corners), max(c.y for c in corners)
+                z_floor, z_ceiling = min(c.z for c in corners), max(c.z for c in corners)
+                
+                col_bounds = box_room.column(align=True)
+                col_bounds.label(text=f"X: {x_min:.2f}m a {x_max:.2f}m (L: {x_max-x_min:.2f}m)")
+                col_bounds.label(text=f"Y: {y_min:.2f}m a {y_max:.2f}m (P: {y_max-y_min:.2f}m)")
+                col_bounds.label(text=f"Z: {z_floor:.2f}m a {z_ceiling:.2f}m (A: {z_ceiling-z_floor:.2f}m)")
+            except Exception:
+                pass
+
         # --- Sezione Step 1: disordina e reset ---
         layout.separator()
         col1 = layout.column(align=True)
@@ -273,6 +346,8 @@ class NL2SCENE3D_PT_main_panel(Panel):
             text="2a. Render con etichette (opzionale)",
             icon="RENDER_STILL",
         )
+
+        col2.prop(scene, "nl2_custom_instructions")
 
         # Avvisa se si esporta senza aver prima randomizzato.
         if not scene.nl2_has_home:
@@ -345,6 +420,12 @@ def register():
         default=False,
     )
 
+    bpy.types.Scene.nl2_custom_instructions = StringProperty(
+        name="Istruzioni LLM",
+        description="Istruzioni o linee guida personalizzate per l'LLM (es. 'Metti la sedia davanti alla scrivania')",
+        default="",
+    )
+
 
 def unregister():
     """Rimuove le proprieta' di scena e deregistra le classi UI."""
@@ -353,6 +434,7 @@ def unregister():
         "nl2_overrides_index",
         "nl2_overrides_enabled",
         "nl2_has_home",
+        "nl2_custom_instructions",
     ):
         if hasattr(bpy.types.Scene, attr):
             delattr(bpy.types.Scene, attr)

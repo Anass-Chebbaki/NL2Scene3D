@@ -38,7 +38,7 @@ from .classify import (
     compute_room_bounds,
     resolve_classification,
 )
-from .models import SceneObject, SceneState, Transform
+from .models import RoomBounds, SceneObject, SceneState, Transform
 from .settings import CONST, Constants
 
 logger = logging.getLogger(__name__)
@@ -241,7 +241,20 @@ def extract_scene_state(
 
     logger.info("Estratti %d oggetti (%d mobili).", len(objects), movable_count)
 
-    room_bounds = compute_room_bounds(objects)
+    helper = bpy.data.objects.get("NL2_RoomBounds_Helper")
+    if helper:
+        corners = [helper.matrix_world @ mathutils.Vector(c) for c in helper.bound_box]
+        room_bounds = RoomBounds(
+            x_min=min(c.x for c in corners),
+            x_max=max(c.x for c in corners),
+            y_min=min(c.y for c in corners),
+            y_max=max(c.y for c in corners),
+            z_floor=min(c.z for c in corners),
+            z_ceiling=max(c.z for c in corners),
+        )
+        logger.info("Confini stanza letti da helper manuale NL2_RoomBounds_Helper.")
+    else:
+        room_bounds = compute_room_bounds(objects)
 
     # Costruisce la mappa padre-figlio dai soli override che specificano un padre.
     parent_map = {
@@ -455,16 +468,36 @@ def apply_state(state: SceneState, tolerance: float = 0.001) -> dict[str, int]:
         else:
             counters["skipped"] += 1
 
-    # view_layer.update() chiamata UNA SOLA VOLTA dopo il loop, non per ogni oggetto.
-    # Questo riduce da O(n) a O(1) le chiamate e puo' migliorare significativamente le performance su scene grandi.
+    # view_layer.update() chiamata UNA SOLA VOLTA dopo il loop principale.
     try:
         bpy.context.view_layer.update()
     except Exception:
         pass
 
+    # Ri-processa i figli NL2 che hanno anche parent nativi in Blender.
+    # Questo e' necessario perche' Blender ricalcola la matrix_world dei parent
+    # durante view_layer.update(), e quindi la ri-applicazione assicura la corretta
+    # posa finale in spazio mondo per i figli.
+    reprocessed_count = 0
+    for scene_obj, b_obj in to_process:
+        # scene_obj.parent non e' vuoto E b_obj.parent non e' None (parent nativo Blender)
+        if scene_obj.parent and b_obj.parent is not None:
+            if process_object(scene_obj, b_obj):
+                reprocessed_count += 1
+
+    if reprocessed_count > 0:
+        logger.info(
+            "Ri-processati %d figli con parent nativi dopo update.",
+            reprocessed_count,
+        )
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
+
     logger.info(
-        "Applicazione completa: %d aggiornati, %d non trovati, %d invariati.",
-        counters["updated"], counters["not_found"], counters["skipped"],
+        "Applicazione completa: %d aggiornati (inclusi %d ri-processati), %d non trovati, %d invariati.",
+        counters["updated"], reprocessed_count, counters["not_found"], counters["skipped"],
     )
     return counters
 

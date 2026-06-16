@@ -310,7 +310,7 @@ Output exactly one placement for every entry in `movable_objects`, and never for
 objects listed under `contains` or in `fixed_objects`."""
 
 
-def build_prompt(state: SceneState) -> str:
+def build_prompt(state: SceneState, custom_instructions: str = "") -> str:
     """
     Assembla il prompt completo da inviare al modello linguistico.
 
@@ -321,12 +321,16 @@ def build_prompt(state: SceneState) -> str:
 
     Args:
         state: Lo stato corrente della scena.
+        custom_instructions: Istruzioni personalizzate extra fornite dall'utente.
 
     Returns:
         Stringa contenente il prompt completo.
     """
     payload = json.dumps(build_request(state), ensure_ascii=False, indent=2)
-    return f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
+    prompt = f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
+    if custom_instructions.strip():
+        prompt += f"\n## Custom User Guidelines:\n{custom_instructions.strip()}\n"
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +375,17 @@ def _iter_balanced_objects(s: str):
                     start = -1
 
 
+def _contains_key_recursive(obj, key: str) -> bool:
+    """Ritorna True se la chiave e' presente a qualsiasi livello di annidamento in obj."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return True
+        return any(_contains_key_recursive(v, key) for v in obj.values())
+    elif isinstance(obj, list):
+        return any(_contains_key_recursive(item, key) for item in obj)
+    return False
+
+
 def extract_json(text) -> Optional[dict]:
     """
     Estrae l'oggetto JSON utile da un testo potenzialmente "sporco", che puo'
@@ -379,8 +394,8 @@ def extract_json(text) -> Optional[dict]:
     A differenza di un semplice split sui recinti, lo scanner cerca TUTTI gli
     oggetti '{...}' ben bilanciati e poi sceglie quello rilevante: se piu' di
     uno e' valido (es. una graffa nel preambolo come "il {layout} richiesto")
-    viene preferito il primo che contiene la chiave "placements", altrimenti il
-    primo che si parsa correttamente.
+    viene preferito il primo che contiene la chiave "placements" (anche annidata),
+    altrimenti il primo che si parsa correttamente.
 
     Args:
         text: Stringa grezza dalla risposta del modello, oppure dict gia' parsato.
@@ -402,8 +417,8 @@ def extract_json(text) -> Optional[dict]:
             continue
         if not isinstance(obj, dict):
             continue
-        if "placements" in obj:
-            return obj  # match esatto sul payload atteso
+        if _contains_key_recursive(obj, "placements"):
+            return obj  # match esatto sul payload atteso (anche se annidato)
         if first_valid is None:
             first_valid = obj
 
@@ -490,6 +505,13 @@ def _resolve_collisions(
     - Due mobili sovrapposti si scostano di meta' ciascuno.
     Il processo itera fino alla convergenza o al raggiungimento di max_iter.
 
+    Rilevamento oscillazioni:
+    Se la stessa coppia di oggetti produce vettori MTV opposti in due iterazioni
+    consecutive (ping-pong), significa che non e' possibile separare i due
+    oggetti nella configurazione corrente (es. stanza troppo piccola). In quel
+    caso il solver esce anticipatamente con un warning invece di inutili 80
+    iterazioni.
+
     Il penetration_vector opera sull'AABB del solo root, ma
     il check di convergenza viene fatto su has_collision che usa SAT reale.
     Il clamp di gruppo viene applicato dopo ogni spostamento. Questo non
@@ -510,6 +532,12 @@ def _resolve_collisions(
     max_iter = const.resolve_collisions_max_iter
     margin = const.collision_margin
     it = 0
+
+    # Memorizza il vettore MTV dell'iterazione precedente per ogni coppia.
+    # Chiave: (nome_a, nome_b) con nome_a < nome_b per canonicita'.
+    prev_vectors: dict[tuple[str, str], tuple[float, float]] = {}
+    oscillations = 0
+    max_oscillations = 3  # quante oscillazioni accettiamo prima di uscire
 
     while it < max_iter:
         it += 1
@@ -532,6 +560,25 @@ def _resolve_collisions(
                     _shift(a,  dx / 2.0,  dy / 2.0, rb, const.wall_margin)
                     _shift(b, -dx / 2.0, -dy / 2.0, rb, const.wall_margin)
                     moved = True
+
+                    # Rilevamento oscillazione: confronta con il vettore dell'iter. prec.
+                    key = (a.name, b.name) if a.name < b.name else (b.name, a.name)
+                    prev = prev_vectors.get(key)
+                    if prev is not None:
+                        # Oscillazione se la direzione si e' invertita su entrambi gli assi.
+                        if (prev[0] * dx < 0 or prev[1] * dy < 0) and (
+                            abs(dx) > 1e-6 or abs(dy) > 1e-6
+                        ):
+                            oscillations += 1
+                            if oscillations >= max_oscillations:
+                                logger.warning(
+                                    "_resolve_collisions: rilevata oscillazione MTV dopo %d iter. "
+                                    "Impossibile separare '%s' e '%s' (stanza troppo piccola?). "
+                                    "Il solver si arresta.",
+                                    it, a.name, b.name,
+                                )
+                                return it
+                    prev_vectors[key] = (dx, dy)
 
         if not moved:
             break
@@ -690,9 +737,12 @@ def sanitize_response(
             world_off_y = off[0] * sin_z + off[1] * cos_z
 
             # px,py sono il centro del gruppo AABB: per ricavare la location
-            # del root dobbiamo anche compensare lo shift root->centro_gruppo.
-            # Calcoliamo il delta tra centro_gruppo e centro_geometrico_root
-            # nella posa originale, e lo applichiamo alla posa proposta.
+            # del root dobbiamo compensare lo shift root->centro_gruppo.
+            # Il delta gruppo->centro_geometrico_root e' calcolato
+            # in coordinate LOCALI (indipendente dalla rotazione) e poi ruotato
+            # con la rotazione PROPOSTA, non con quella originale.
+            # In questo modo la conversione e' corretta anche quando l'LLM
+            # propone una rotazione diversa da quella originale.
             orig_descendants = _descendants(orig, orig_by_name)
             orig_rz = orig.transform.rotation_euler[2]
             ogx_min, ogx_max, ogy_min, ogy_max = group_aabb_xy(
@@ -701,11 +751,33 @@ def sanitize_response(
             orig_gcx = (ogx_min + ogx_max) / 2.0
             orig_gcy = (ogy_min + ogy_max) / 2.0
             orig_cx, orig_cy = orig.transform.geometric_center_xy()
-            # delta tra centro gruppo e centro geometrico root (in world space originale)
-            delta_gcx = orig_gcx - orig_cx
-            delta_gcy = orig_gcy - orig_cy
 
-            # centro geometrico root proposto = px,py meno il delta centro-gruppo
+            # Offset in world space originale (root-origin -> geometric-center-of-group)
+            delta_world_x = orig_gcx - orig_cx
+            delta_world_y = orig_gcy - orig_cy
+
+            # Ruota il delta dal sistema di riferimento originale al proposto.
+            # Se la rotazione non cambia il termine e' identico al comportamento
+            # precedente; se cambia, il delta viene correttamente trasformato.
+            orig_cos = math.cos(orig_rz)
+            orig_sin = math.sin(orig_rz)
+            prop_cos = math.cos(proposed_rz)
+            prop_sin = math.sin(proposed_rz)
+
+            # Delta in spazio locale del root (indipendente dalla rotazione)
+            if abs(orig_cos) > 1e-9 or abs(orig_sin) > 1e-9:
+                # Rotazione inversa: world -> local (con rotazione originale)
+                local_delta_x = delta_world_x * orig_cos + delta_world_y * orig_sin
+                local_delta_y = -delta_world_x * orig_sin + delta_world_y * orig_cos
+            else:
+                local_delta_x = delta_world_x
+                local_delta_y = delta_world_y
+
+            # Riproietta in world space con la rotazione proposta
+            delta_gcx = local_delta_x * prop_cos - local_delta_y * prop_sin
+            delta_gcy = local_delta_x * prop_sin + local_delta_y * prop_cos
+
+            # Centro geometrico root proposto = px,py meno il delta centro-gruppo
             prop_cx = float(px) - delta_gcx
             prop_cy = float(py) - delta_gcy
 

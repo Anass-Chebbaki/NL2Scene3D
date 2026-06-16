@@ -22,6 +22,7 @@ from bpy.types import Operator      # type: ignore
 from .core import render, reorganizer, scene_io
 from .core.classify import default_classification, suggest_grouping
 from .core.randomizer import SceneRandomizer
+from .core.models import RoomBounds
 
 
 # ---------------------------------------------------------------------------
@@ -714,8 +715,9 @@ class NL2SCENE3D_OT_export_for_llm(Operator):
                 self.report({"WARNING"}, "Nessun oggetto mobile da riorganizzare.")
                 return {"CANCELLED"}
 
-            # Genera il prompt con le istruzioni fisse e i dati della scena.
-            prompt = reorganizer.build_prompt(state)
+            # Genera il prompt con le istruzioni fisse, i dati della scena e linee guida personalizzate.
+            custom_inst = getattr(context.scene, "nl2_custom_instructions", "")
+            prompt = reorganizer.build_prompt(state, custom_instructions=custom_inst)
             _write_text("NL2_AI_Prompt", prompt)
 
             # Prepara (vuoto) il Text in cui l'utente incollerà la risposta.
@@ -904,46 +906,161 @@ class NL2SCENE3D_OT_install_pillow(Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, context):
+        import importlib
         import subprocess
         import sys
         import os
         import traceback
 
         self.report({"INFO"}, "Avvio installazione di Pillow...")
-        
-        # Identifica il percorso corretto dell'eseguibile Python associato a Blender
+
+        # Rilevamento robusto dell'eseguibile Python di Blender
+        #
+        # In Blender, sys.executable punta normalmente al Python embedded
+        # (es. .../blender/4.x/python/bin/python3.xx). In alcune build/distro
+        # punta invece al binario di Blender. La strategia e':
+        #   1. Usa sys.executable come prima scelta.
+        #   2. Verifica che sia un interprete Python valido (--version).
+        #   3. Se non lo e', cerca nel prefisso Python candidati multipiattaforma.
+        #      La lista include percorsi macOS (.app bundle), Linux e Windows.
         python_exe = sys.executable
-        if "blender" in os.path.basename(python_exe).lower():
-            possible_paths = [
-                os.path.join(sys.prefix, "bin", "python.exe"),
-                os.path.join(sys.prefix, "python.exe"),
-                os.path.join(sys.prefix, "bin", "python3"),
-                os.path.join(sys.prefix, "bin", "python"),
+
+        def _is_python(path: str) -> bool:
+            """True se il binario risponde correttamente a `python --version`."""
+            try:
+                out = subprocess.check_output(
+                    [path, "--version"], stderr=subprocess.STDOUT, timeout=5
+                )
+                return out.lower().startswith(b"python")
+            except Exception:
+                return False
+
+        if not _is_python(python_exe):
+            # sys.executable non e' un interprete Python (e' il launcher di Blender).
+            # Cerca il Python embedded nel prefisso del runtime corrente.
+            candidates = [
+                os.path.join(sys.prefix, "bin", "python.exe"),           # Windows
+                os.path.join(sys.prefix, "python.exe"),                  # Windows (alt)
+                os.path.join(sys.prefix, "bin", "python3"),              # Linux/macOS
+                os.path.join(sys.prefix, "bin", "python"),               # Linux/macOS (alt)
+                # macOS .app bundle: il Python e' annidato piu' in profondita'.
+                os.path.join(sys.prefix, "..", "bin", "python3"),
+                os.path.join(sys.prefix, "..", "..", "bin", "python3"),
             ]
-            for path in possible_paths:
-                if os.path.exists(path):
+            found = False
+            for path in candidates:
+                path = os.path.normpath(path)
+                if os.path.isfile(path) and _is_python(path):
                     python_exe = path
+                    found = True
                     break
+            if not found:
+                self.report(
+                    {"ERROR"},
+                    "Impossibile trovare l'interprete Python di Blender. "
+                    "Installa Pillow manualmente con: "
+                    f"`{sys.executable} -m pip install Pillow --user`",
+                )
+                return {"CANCELLED"}
 
         try:
             # Installa Pillow in spazio utente.
             subprocess.check_call([python_exe, "-m", "pip", "install", "Pillow", "--user"])
-            
-            # Forza il reload dei moduli per registrare la nuova importazione
-            import importlib
+
+            # Assicura che il site-packages utente sia in sys.path per il reload.
             import site
             user_site = site.getusersitepackages()
             if user_site and user_site not in sys.path:
                 sys.path.append(user_site)
             importlib.invalidate_caches()
-            from PIL import Image
-            
+            from PIL import Image  # noqa: F401
+
             self.report({"INFO"}, "Pillow installato correttamente! Ora puoi generare i render etichettati.")
             return {"FINISHED"}
         except Exception as exc:
             self.report({"ERROR"}, f"Installazione fallita: {exc}")
             traceback.print_exc()
             return {"CANCELLED"}
+
+
+class NL2SCENE3D_OT_create_bounds_helper(Operator):
+    """Crea o seleziona un cubo di riferimento wireframe per definire manualmente i confini della stanza."""
+
+    bl_idname  = "nl2scene3d.create_bounds_helper"
+    bl_label   = "Crea Helper Confini"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        import mathutils
+        scene = context.scene
+        helper_name = "NL2_RoomBounds_Helper"
+        
+        # Se esiste gia', lo selezioniamo
+        helper = bpy.data.objects.get(helper_name)
+        if helper:
+            # Assicura che sia visibile e selezionato
+            helper.hide_viewport = False
+            helper.hide_select = False
+            for o in context.selected_objects:
+                o.select_set(False)
+            helper.select_set(True)
+            context.view_layer.objects.active = helper
+            self.report({"INFO"}, "Helper confini esistente selezionato.")
+            return {"FINISHED"}
+
+        # Altrimenti lo creiamo basandoci sui confini correnti
+        # Estrarre lo stato attuale senza overrides manuali per avere una stima
+        try:
+            state = scene_io.extract_scene_state()
+            bounds = state.room_bounds
+        except Exception:
+            bounds = RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0, z_floor=0.0, z_ceiling=3.0)
+
+        # Crea mesh cubo
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        helper = context.active_object
+        helper.name = helper_name
+        helper.display_type = "WIRE"
+        helper.show_in_front = True
+        
+        # Disabilita il render
+        helper.hide_render = True
+
+        # Imposta dimensioni e posizione in base ai confini
+        w = bounds.x_max - bounds.x_min
+        d = bounds.y_max - bounds.y_min
+        h = bounds.z_ceiling - bounds.z_floor
+
+        helper.location = [
+            (bounds.x_min + bounds.x_max) / 2.0,
+            (bounds.y_min + bounds.y_max) / 2.0,
+            (bounds.z_floor + bounds.z_ceiling) / 2.0
+        ]
+        helper.scale = [w, d, h]
+        
+        # Applica scala per facilitare l'editing
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+        self.report({"INFO"}, "Helper confini creato. Modificalo per cambiare i confini della stanza.")
+        return {"FINISHED"}
+
+
+class NL2SCENE3D_OT_remove_bounds_helper(Operator):
+    """Rimuove il cubo di riferimento dei confini."""
+
+    bl_idname  = "nl2scene3d.remove_bounds_helper"
+    bl_label   = "Rimuovi Helper Confini"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        helper_name = "NL2_RoomBounds_Helper"
+        helper = bpy.data.objects.get(helper_name)
+        if helper:
+            bpy.data.objects.remove(helper, do_unlink=True)
+            self.report({"INFO"}, "Helper confini rimosso.")
+        else:
+            self.report({"WARNING"}, "Nessun helper confini trovato.")
+        return {"FINISHED"}
 
 
 # ---------------------------------------------------------------------------
@@ -966,6 +1083,8 @@ _classes = (
     NL2SCENE3D_OT_apply_from_clipboard,
     NL2SCENE3D_OT_apply_from_file,
     NL2SCENE3D_OT_install_pillow,
+    NL2SCENE3D_OT_create_bounds_helper,
+    NL2SCENE3D_OT_remove_bounds_helper,
 )
 
 
