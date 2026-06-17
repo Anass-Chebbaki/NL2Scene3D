@@ -6,6 +6,7 @@ Sono disponibili due flussi di lavoro, intercambiabili e che condividono la stes
 
 - **Flusso manuale (human-in-the-loop)**. L'add-on copia il prompt negli appunti e produce i render etichettati; l'utente li sottopone all'LLM di propria scelta (API, interfaccia web, strumenti locali) e incolla la risposta nell'add-on.
 - **Flusso automatico via API**. L'add-on contatta direttamente un provider LLM (Google Gemini, Anthropic o OpenAI), allega i render e applica la risposta, il tutto con un solo click. Richiede una API key configurata nelle preferenze.
+
 ---
 
 ## Indice
@@ -27,7 +28,7 @@ Sono disponibili due flussi di lavoro, intercambiabili e che condividono la stes
   - [Override manuali](#override-manuali)
   - [Step 1 — Randomize Layout](#step-1--randomize-layout)
   - [Step 2a — Render con etichette](#step-2a--render-con-etichette)
-  - [Istruzioni personalizzate per l'LLM](#istruzioni-personalizzate-per-llm)
+  - [Istruzioni personalizzate per l'LLM](#istruzioni-personalizzate-per-lllm)
   - [Riordino automatico via API](#riordino-automatico-via-api)
   - [Step 2b — Esporta prompt per LLM](#step-2b--esporta-prompt-per-llm)
   - [Step 2c — Applica la risposta dell'LLM](#step-2c--applica-la-risposta-dellllm)
@@ -157,7 +158,9 @@ SceneState (pipeline_step="reorganized")
      v
 Scena Blender riorganizzata
 ```
-Il diagramma illustra il flusso manuale. Nel flusso automatico i tre passaggi centrali (copia del prompt → LLM → incolla della risposta) sono sostituiti da un'unica chiamata interna a llm_providers.call_llm(); il resto della pipeline è identico.
+
+Il diagramma illustra il flusso manuale. Nel flusso automatico i tre passaggi centrali (copia del prompt → LLM → incolla della risposta) sono sostituiti da un'unica chiamata interna a `llm_providers.call_llm()`; il resto della pipeline è identico.
+
 ---
 
 ## Requisiti
@@ -169,6 +172,7 @@ Il diagramma illustra il flusso manuale. Nel flusso automatico i tre passaggi ce
 | Pillow | qualsiasi versione recente | **Opzionale.** Necessario per il disegno delle etichette sui render e la barra di scala. Se assente, le coordinate delle etichette vengono scritte in un file `.labels.json` accanto all'immagine e la funzione `_draw_labels()` restituisce `False` |
 
 Il flusso automatico via API non richiede alcuna dipendenza aggiuntiva: `llm_providers.py` usa solo `urllib/ssl` (già inclusi in Blender), quindi le chiamate HTTPS funzionano out-of-the-box, senza installare requests o gli SDK ufficiali dei provider. È invece necessaria una API key valida per il provider scelto (Gemini, Anthropic o OpenAI), configurata nelle preferenze dell'add-on o esposta come variabile d'ambiente. Il flusso manuale non richiede né API key né connessione di rete.
+
 ---
 
 ## Installazione
@@ -287,7 +291,7 @@ Premere **Randomize Layout**. L'add-on:
 
 ### Step 2a — Render con etichette
 
-Premere **Render con etichette**. La pipeline produce:
+Premere **2a. Render con etichette (opzionale)**. La pipeline produce:
 
 - Una **vista prospettica d'angolo** con camera posizionata automaticamente in alto e di lato per inquadrare l'intera scena (distanza calcolata dal raggio della scena e dall'angolo di campo della focale scelta, default 24 mm). In alternativa si può usare la camera esistente nella scena.
 - Una **vista ortografica dall'alto** (pianta), con scala ortografica pari alla dimensione maggiore dell'AABB degli oggetti etichettati × 1.10.
@@ -324,12 +328,12 @@ Sequenza:
   6. Salva la risposta grezza nel Text datablock di risposta e la applica con `sanitize_response()`.
 
 
-I provider supportati sono **Google Gemini**, **Anthropic** e **OpenAI**; modello e parametri della chiamata si impostano nelle preferenze (vedi **Configurazione**). Quando il provider lo consente, la richiesta forza l'output in JSON, con extract_json() come rete di sicurezza a valle; gli errori temporanei (limiti di rate, sovraccarico, blip di rete) vengono ritentati automaticamente.
+I provider supportati sono **Google Gemini**, **Anthropic** e **OpenAI**; modello e parametri della chiamata si impostano nelle preferenze (vedi [Configurazione](#configurazione)). Quando il provider lo consente, la richiesta forza l'output in JSON, con `extract_json()` come rete di sicurezza a valle; gli errori temporanei (limiti di rate, sovraccarico, blip di rete) vengono ritentati automaticamente.
 
 
 ### Step 2b — Esporta prompt per LLM
 
-Premere **1. Esporta prompt (copia negli appunti)**. L'add-on:
+Premere **2b. Esporta prompt (copia negli appunti)**. L'add-on:
 
 1. Chiama `scene_io.extract_scene_state()` per lo stato corrente.
 2. Chiama `reorganizer.build_request()` per costruire il payload JSON: la stanza (`room`), gli ostacoli fissi non strutturali (`fixed_objects`) e gli oggetti mobili root (`movable_objects`). Per ogni mobile root vengono inclusi il centro geometrico del gruppo (gcx, gcy), l'impronta XY dell'intero gruppo (padre + tutti i discendenti), la rotazione corrente e, opzionalmente, la lista dei figli come contesto read-only.
@@ -355,7 +359,7 @@ Per applicare la risposta, puoi usare il metodo principale basato su appunti o u
 
 - **Metodo degli appunti (Consigliato - 1 Click):**
   1. Seleziona e copia il JSON generato dall'LLM negli appunti del sistema.
-  2. In Blender, clicca su **`2. Applica risposta (dagli appunti)`**. L'add-on leggerà direttamente la risposta dagli appunti e organizzerà la scena.
+  2. In Blender, clicca su **`2c. Applica risposta (dagli appunti)`**. L'add-on leggerà direttamente la risposta dagli appunti e organizzerà la scena.
 
 - **Metodo da Text Editor (Alternativa):**
   Incolla il JSON del modello nel Text datablock `NL2_AI_Response` in Blender, quindi clicca su **Da Text Editor**.
@@ -461,7 +465,7 @@ Il gutter layout calcola prima il bordo più vicino per ogni etichetta (usando l
 
 L'impronta di ogni gruppo è calcolata da `group_aabb_xy()` nella posa corrente, quindi tiene conto della rotazione e di tutti i figli nella loro posizione relativa attuale. Il modello riceve l'impronta del gruppo come un unico blocco rigido di dimensioni `w × d`; non deve conoscere la struttura interna del gruppo.
 
-`build_prompt(state, custom_instructions="")` assembla il prompt finale: il template generico `PROMPT_TEMPLATE`, seguito dal payload JSON prodotto da `build_request()` in un blocco ````json`, e — solo se l'utente ha compilato il campo Istruzioni LLM — da una sezione `## Custom User Guidelines` con il testo libero fornito. La stessa funzione è usata identica dal flusso manuale e da quello automatico via API.
+`build_prompt(state, custom_instructions="")` assembla il prompt finale: il template generico `PROMPT_TEMPLATE`, seguito dal payload JSON prodotto da `build_request()` in un blocco  ```json ```, e — solo se l'utente ha compilato il campo Istruzioni LLM — da una sezione `## Custom User Guidelines` con il testo libero fornito. La stessa funzione è usata identica dal flusso manuale e da quello automatico via API.
 
 ---
 
@@ -525,6 +529,7 @@ Le impostazioni del flusso automatico vivono nelle preferenze dell'add-on (**Mod
 | `llm_auto_render` | Attivo | Se attivo, genera e allega render etichettati freschi prima della chiamata |
 
 Come fallback alle chiavi inserite nelle preferenze, l'add-on legge le variabili d'ambiente `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` e `OPENAI_API_KEY`. La chiave non viene mai trasmessa se non al provider selezionato.
+
 ---
 
 ## Testing offline
