@@ -1208,7 +1208,7 @@ class NL2SCENE3D_OT_create_bounds_helper(Operator):
             return {"FINISHED"}
 
         # Altrimenti lo creiamo basandoci sui confini correnti
-        # Estrarre lo stato attuale senza overrides manuali per avere una stima
+        # Estrae lo stato attuale senza overrides manuali per avere una stima
         try:
             state = scene_io.extract_scene_state()
             bounds = state.room_bounds
