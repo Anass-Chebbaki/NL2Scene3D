@@ -1,7 +1,11 @@
 # NL2Scene3D
 
-Add-on per Blender che riorganizza scene 3D esistenti tramite un modello linguistico di grandi dimensioni (LLM). Il flusso di lavoro è volutamente manuale e human-in-the-loop: l'add-on genera un prompt strutturato e una descrizione JSON della scena, l'utente li sottopone al proprio LLM insieme ai render etichettati, e l'add-on applica la risposta del modello garantendo il rispetto di tutti i vincoli geometrici — indipendentemente dalla qualità dell'output del modello.
+Add-on per Blender che riorganizza scene 3D esistenti tramite un modello linguistico di grandi dimensioni (LLM). L'add-on genera un prompt strutturato e una descrizione JSON della scena, ottiene dal modello una lista di posizioni e rotazioni, e la applica garantendo il rispetto di tutti i vincoli geometrici — indipendentemente dalla qualità dell'output del modello.
 
+Sono disponibili due flussi di lavoro, intercambiabili e che condividono la stessa pipeline di sanitizzazione:
+
+- **Flusso manuale (human-in-the-loop)**. L'add-on copia il prompt negli appunti e produce i render etichettati; l'utente li sottopone all'LLM di propria scelta (API, interfaccia web, strumenti locali) e incolla la risposta nell'add-on.
+- **Flusso automatico via API**. L'add-on contatta direttamente un provider LLM (Google Gemini, Anthropic o OpenAI), allega i render e applica la risposta, il tutto con un solo click. Richiede una API key configurata nelle preferenze.
 ---
 
 ## Indice
@@ -23,6 +27,8 @@ Add-on per Blender che riorganizza scene 3D esistenti tramite un modello linguis
   - [Override manuali](#override-manuali)
   - [Step 1 — Randomize Layout](#step-1--randomize-layout)
   - [Step 2a — Render con etichette](#step-2a--render-con-etichette)
+  - [Istruzioni personalizzate per l'LLM](#istruzioni-personalizzate-per-llm)
+  - [Riordino automatico via API](#riordino-automatico-via-api)
   - [Step 2b — Esporta prompt per LLM](#step-2b--esporta-prompt-per-llm)
   - [Step 2c — Applica la risposta dell'LLM](#step-2c--applica-la-risposta-dellllm)
   - [Reset allo stato originale](#reset-allo-stato-originale)
@@ -48,7 +54,7 @@ NL2Scene3D affronta il problema della riorganizzazione automatica di layout di a
 
 Il modello non accede direttamente alla scena e non conosce la geometria 3D: riceve esclusivamente un payload JSON con le impronte XY degli oggetti, i confini della stanza e le relazioni di gruppo, più i render etichettati come riferimento visivo. La risposta del modello — una lista di posizioni XY e rotazioni — viene poi validata e applicata da un layer di sanitizzazione deterministica che garantisce la correttezza geometrica indipendentemente da cosa il modello abbia proposto.
 
-Il progetto non incorpora chiamate di rete: l'utente interagisce con l'LLM di propria scelta (API, interfaccia web, strumenti locali) e incolla o carica la risposta nell'add-on.
+L'add-on offre due modalità per interagire con il modello. Nel flusso manuale non viene effettuata alcuna chiamata di rete: l'utente porta autonomamente prompt e immagini all'LLM di propria scelta e incolla o carica la risposta nell'add-on. Nel flusso automatico l'add-on contatta direttamente il provider (Gemini, Anthropic o OpenAI) tramite il modulo `llm_providers.py`, che è l'unico punto del progetto ad effettuare chiamate di rete ed è tenuto deliberatamente fuori da `core/`. In entrambi i casi il package `core/` resta puro e offline: non importa `bpy` e non apre connessioni.
 
 ---
 
@@ -58,9 +64,9 @@ Il progetto non incorpora chiamate di rete: l'utente interagisce con l'LLM di pr
 
 **Correttezza geometrica garantita dal codice, non dal modello.** Il modello propone posizioni; il sanitizzatore le corregge. Il risultato finale è sempre geometricamente valido: nessun oggetto fuori dai muri, nessuna sovrapposizione tra mobili, nessun oggetto che blocca porte o finestre. Se il modello produce un layout impossibile, il sistema lo corregge; se produce un layout eccellente, lo applica senza modifiche.
 
-**Flusso human-in-the-loop.** L'utente mantiene il controllo completo: sceglie quale LLM usare, controlla il prompt prima di inviarlo, verifica il risultato dopo l'applicazione e può annullare con un click.
+**Flusso human-in-the-loop.** L'utente mantiene il controllo completo: sceglie quale LLM usare, può ispezionare il prompt prima di inviarlo, verifica il risultato dopo l'applicazione e può annullare con un click.
 
-**Separazione netta tra logica e interfaccia Blender.** Tutto il codice geometrico, di collision detection, di randomizzazione e di reorganizzazione vive in `core/`, un package Python puro senza dipendenze da `bpy`. Gli operatori Blender in `operators.py` sono deliberatamente sottili: orchestrano il core e gestiscono la UI, senza contenere logica geometrica diretta. Questa separazione rende il core testabile da riga di comando senza Blender installato.
+**Separazione netta tra logica e interfaccia Blender.** Tutto il codice geometrico, di collision detection, di randomizzazione e di reorganizzazione vive in `core/`, un package Python puro senza dipendenze da `bpy`. Gli operatori Blender in `operators.py` sono deliberatamente sottili: orchestrano il core e gestiscono la UI, senza contenere logica geometrica diretta. Le chiamate di rete verso i provider LLM sono a loro volta isolate in un modulo dedicato (`llm_providers.py`), separato dal core. Tutti questi livelli sono esercitabili senza Blender installato.
 
 **Nessuna categoria semantica hard-coded per i mobili.** L'add-on non mantiene liste di parole chiave per "letto", "sedia", "tavolo" e simili: sarebbero fragili e non generalizzerebbero tra scene diverse. La classificazione automatica distingue solo tre categorie: `technical` (camera e luci), `structural` (elementi identificati per nome: muri, pavimento, soffitto, porte, finestre) e `object` (tutto il resto). La distinzione fisso/mobile per gli oggetti è decisa dall'utente tramite il pannello override.
 
@@ -75,6 +81,7 @@ nl2scene3d_addon/
 ├── __init__.py          Entry point dell'add-on Blender (register / unregister)
 ├── operators.py         Operatori Blender — orchestrazione pura, nessuna logica geometrica
 ├── ui.py                Pannello sidebar, UIList override, preferenze add-on
+├── llm_providers.py     Client di rete per i provider LLM (Gemini/Anthropic/OpenAI) 
 └── core/                Package Python puro — nessuna dipendenza da bpy
     ├── __init__.py      Documentazione del package
     ├── models.py        Dataclass: Transform, SceneObject, RoomBounds, SceneState
@@ -95,7 +102,9 @@ offline_testing/
 
 `operators.py` contiene tutti gli operatori Blender. Ogni operatore segue lo stesso schema: chiama `scene_io.extract_scene_state()` per ottenere un `SceneState` dalla scena corrente, invoca il modulo core appropriato, poi chiama `scene_io.apply_state()` per riscrivere le pose in Blender. Gli operatori gestiscono la progress bar, il cursore di attesa, il reporting degli errori e la scrittura nei Text datablock; non eseguono mai calcoli geometrici direttamente.
 
-`ui.py` registra le classi UI di Blender: `NL2SCENE3D_AddonPreferences` (seed del randomizer), `NL2_ObjectOverride` (PropertyGroup per ogni voce della lista override), `NL2SCENE3D_UL_overrides` (UIList con toggle etichetta/fisso/padre/keep_scale) e `NL2SCENE3D_PT_main_panel` (il pannello principale nella sidebar della 3D View). Il modulo viene importato solo all'interno di `register()` per garantire che i moduli puri del core restino importabili senza Blender.
+`ui.py` registra le classi UI di Blender: `NL2SCENE3D_AddonPreferences` (seed del randomizer più tutte le preferenze per la chiamata API automatica: provider, API key per provider, modello, temperature, timeout, numero di retry e toggle auto-render), `NL2_ObjectOverride` (PropertyGroup per ogni voce della lista override), `NL2SCENE3D_UL_overrides` (UIList con toggle etichetta/fisso/padre/keep_scale) e `NL2SCENE3D_PT_main_panel` (il pannello principale nella sidebar della 3D View). Il modulo viene importato solo all'interno di `register()` per garantire che i moduli puri del core restino importabili senza Blender.
+
+`llm_providers.py` è l'unico modulo dell'add-on che effettua chiamate di rete, ed è tenuto fuori da `core/` per non violarne la purezza. Usa solo la libreria standard (`urllib`, `ssl`, `base64`, `json`), quindi non richiede dipendenze esterne nel Python di Blender e resta importabile senza Blender. Espone `call_llm()` come dispatcher unico verso `call_gemini()`, `call_anthropic()` e `call_openai()`, più l'helper `_http_post_json()` che gestisce i retry con backoff esponenziale sugli errori transitori (HTTP 429/500/502/503/504 e blip di rete), rispettando l'header `Retry-After`. Il modulo prende un prompt e una lista di immagini e restituisce il testo grezzo della risposta, che viene poi passato a `reorganizer.extract_json()` esattamente come nel flusso copia-incolla. La logica geometrica resta interamente in `core/`.
 
 ### Core puro Python
 
@@ -148,7 +157,7 @@ SceneState (pipeline_step="reorganized")
      v
 Scena Blender riorganizzata
 ```
-
+Il diagramma illustra il flusso manuale. Nel flusso automatico i tre passaggi centrali (copia del prompt → LLM → incolla della risposta) sono sostituiti da un'unica chiamata interna a llm_providers.call_llm(); il resto della pipeline è identico.
 ---
 
 ## Requisiti
@@ -159,6 +168,7 @@ Scena Blender riorganizzata
 | Python | 3.10 o superiore | Incluso nella distribuzione di Blender |
 | Pillow | qualsiasi versione recente | **Opzionale.** Necessario per il disegno delle etichette sui render e la barra di scala. Se assente, le coordinate delle etichette vengono scritte in un file `.labels.json` accanto all'immagine e la funzione `_draw_labels()` restituisce `False` |
 
+Il flusso automatico via API non richiede alcuna dipendenza aggiuntiva: `llm_providers.py` usa solo `urllib/ssl` (già inclusi in Blender), quindi le chiamate HTTPS funzionano out-of-the-box, senza installare requests o gli SDK ufficiali dei provider. È invece necessaria una API key valida per il provider scelto (Gemini, Anthropic o OpenAI), configurata nelle preferenze dell'add-on o esposta come variabile d'ambiente. Il flusso manuale non richiede né API key né connessione di rete.
 ---
 
 ## Installazione
@@ -283,6 +293,8 @@ Premere **Render con etichette**. La pipeline produce:
 - Una **vista ortografica dall'alto** (pianta), con scala ortografica pari alla dimensione maggiore dell'AABB degli oggetti etichettati × 1.10.
 - Opzionalmente, una **vista isometrica** (ortografica obliqua a 45°).
 
+Le opzioni di rendering (vista dall'alto, vista isometrica, auto-inquadratura, lente prospettica e luminosità) sono proprietà dell'operatore. Si configurano nel pannello **Modifica l'ultima operazione** (`Adjust Last Operation`, in basso a sinistra nel viewport, richiamabile con `F9`) che appare subito dopo aver premuto il pulsante. La vista isometrica è disattivata di default e va abilitata da questa sezione. Nel flusso automatico tramite API, la vista isometrica non viene generata.
+
 L'inquadratura è sempre calcolata sull'AABB degli oggetti etichettati, non dell'intera scena, in modo che mesh lontani e non etichettati non espandano inutilmente il campo visivo.
 
 Il render è eseguito via OpenGL/Workbench con illuminazione Studio e fattore di intensità aumentato (1.4), in modo che la scena sia sempre visibile anche con materiali scuri. Se OpenGL non è disponibile, si usa il renderer attivo come fallback.
@@ -294,6 +306,26 @@ Il post-processing (via Pillow) applica correzione di luminosità (default ×1.5
 - **Barra di scala metrica**, posizionata in basso a sinistra, solo nelle viste ortografiche dove un pixel corrisponde sempre alla stessa distanza in metri. La lunghezza della barra è arrotondata al valore "tondo" più vicino della serie 1-2-5 (come nelle scale cartografiche).
 
 I PNG sono salvati in `nl2_renders/` accanto al file `.blend`, o nella directory temporanea di sistema se il file non è stato ancora salvato.
+
+### Istruzioni personalizzate per l'LLM
+
+Il campo Istruzioni LLM nel pannello (proprietà di scena `nl2_custom_instructions`) permette di aggiungere linee guida testuali libere al prompt, ad esempio "Metti la sedia davanti alla scrivania" o "Lascia libero l'angolo vicino alla finestra". Se compilato, il testo viene accodato al prompt sotto una sezione **## Custom User Guidelines** da `build_prompt()`. Le istruzioni vengono applicate a entrambi i flussi — sia all'esportazione manuale del prompt sia alla chiamata API automatica — perché entrambi passano per lo stesso `build_prompt(state, custom_instructions=...)`. Il campo è opzionale: se vuoto, il prompt resta quello generico.
+
+### Riordino automatico via API
+
+Il pulsante **Riordina automaticamente (API)** esegue l'intero ciclo con un solo click, senza copia-incolla: l'add-on renderizza le viste etichettate, contatta il provider LLM configurato nelle preferenze, allega le immagini, riceve la risposta e la applica con la stessa pipeline di sanitizzazione del flusso manuale. È implementato dall'operatore `NL2SCENE3D_OT_reorganize_with_api`. 
+Sequenza:
+
+  1. Se non esiste ancora, salva lo stato originale (`capture_home_state()`).
+  2. Chiama `scene_io.extract_scene_state()` e verifica che esistano oggetti mobili root.
+  3. Costruisce il prompt con `reorganizer.build_prompt()`, includendo le eventuali Istruzioni LLM, e lo scrive nel Text datablock `NL2_AI_Prompt`.
+  4. Se il toggle **Renderizza prima della chiamata** è attivo (default), produce render etichettati freschi e li allega; ogni immagine è etichettata in modo che il modello sappia quale vista sta guardando (top-down, prospettica d'angolo, isometrica). Se il render fallisce, la chiamata prosegue comunque con il solo JSON.
+  5. Invia la richiesta tramite `llm_providers.call_llm()`. Nella UI la chiamata gira in un thread di background con loop modale, così Blender non si congela durante l'attesa; richiamato da script, l'operatore lavora invece in modo sincrono (bloccante).
+  6. Salva la risposta grezza nel Text datablock di risposta e la applica con `sanitize_response()`.
+
+
+I provider supportati sono **Google Gemini**, **Anthropic** e **OpenAI**; modello e parametri della chiamata si impostano nelle preferenze (vedi **Configurazione**). Quando il provider lo consente, la richiesta forza l'output in JSON, con extract_json() come rete di sicurezza a valle; gli errori temporanei (limiti di rate, sovraccarico, blip di rete) vengono ritentati automaticamente.
+
 
 ### Step 2b — Esporta prompt per LLM
 
@@ -429,6 +461,8 @@ Il gutter layout calcola prima il bordo più vicino per ogni etichetta (usando l
 
 L'impronta di ogni gruppo è calcolata da `group_aabb_xy()` nella posa corrente, quindi tiene conto della rotazione e di tutti i figli nella loro posizione relativa attuale. Il modello riceve l'impronta del gruppo come un unico blocco rigido di dimensioni `w × d`; non deve conoscere la struttura interna del gruppo.
 
+`build_prompt(state, custom_instructions="")` assembla il prompt finale: il template generico `PROMPT_TEMPLATE`, seguito dal payload JSON prodotto da `build_request()` in un blocco ````json`, e — solo se l'utente ha compilato il campo Istruzioni LLM — da una sezione `## Custom User Guidelines` con il testo libero fornito. La stessa funzione è usata identica dal flusso manuale e da quello automatico via API.
+
 ---
 
 ## Sanitizzazione della risposta LLM
@@ -476,6 +510,21 @@ Tutte le costanti operative sono definite in `nl2scene3d_addon/core/settings.py`
 
 Il seed del randomizer è esposto in **Modifica > Preferenze > Add-on > NL2Scene3D**. Seed 0 (default) produce un risultato diverso a ogni click; qualsiasi intero positivo produce un layout riproducibile, utile per confrontare le risposte di modelli diversi sulla stessa scena disordinata.
 
+**Preferenze per la chiamata API automatica**
+
+Le impostazioni del flusso automatico vivono nelle preferenze dell'add-on (**Modifica > Preferenze > Add-on > NL2Scene3D**), nel riquadro Chiamata API automatica. Sono usate solo dall'operatore **Riordina automaticamente (API)**; il flusso manuale le ignora.
+
+| Preferenza | Default | Descrizione |
+|---|---|---|
+| `llm_provider` | Google Gemini | Provider da contattare: Gemini, Anthropic o OpenAI |
+| `gemini_api_key` / `anthropic_api_key` / `openai_api_key` | | Chiave API del provider, salvata come PASSWORD. Viene mostrato solo il campo del provider selezionato. Se vuota, si usa la variabile d'ambiente corrispondente |
+| `llm_model` | | Identificatore del modello. Vuoto = default del provider (`gemini-3.5-flash`, `claude-haiku-4-5`, `gpt-5.1-mini`) |
+| `llm_temperature` | 0.7 | Creatività del modello (0 = deterministico; range 0–2) |
+| `llm_timeout` | 120s | Tempo massimo di attesa della risposta (range 10–600 s) |
+| `llm_max_retries` | 4 | Tentativi automatici extra su errori transitori 429/5xx/rete, con backoff esponenziale (range 0–10) |
+| `llm_auto_render` | Attivo | Se attivo, genera e allega render etichettati freschi prima della chiamata |
+
+Come fallback alle chiavi inserite nelle preferenze, l'add-on legge le variabili d'ambiente `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` e `OPENAI_API_KEY`. La chiave non viene mai trasmessa se non al provider selezionato.
 ---
 
 ## Testing offline
@@ -500,6 +549,8 @@ from nl2scene3d_addon.core.randomizer import SceneRandomizer
 # chiamare sanitize_response() e verificare le pose risultanti senza Blender.
 ```
 
+Anche `llm_providers.py` è importabile e testabile da riga di comando senza Blender (non dipende da `bpy`): si può invocare `call_llm()` con un prompt e immagini reali per verificare l'integrazione con un provider, indipendentemente dall'add-on.
+
 ---
 
 ## Struttura del progetto
@@ -510,6 +561,7 @@ from nl2scene3d_addon.core.randomizer import SceneRandomizer
 │   ├── __init__.py
 │   ├── operators.py
 │   ├── ui.py
+│   ├── llm_providers.py
 │   └── core/
 │       ├── __init__.py
 │       ├── classify.py
