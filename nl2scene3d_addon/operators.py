@@ -9,7 +9,7 @@ Struttura:
     - Funzioni helper private (_get_prefs, _write_text, _build_overrides, ...)
     - Operatori override (sync, autodetect, suggest_groups, labels, clear)
     - Operatori principali (reset_home, inspect, scale_to_real, randomize,
-      render_labeled, export_for_llm, apply_from_text, apply_from_file)
+      render_labeled, export_for_llm, apply_from_clipboard, apply_from_text, apply_from_file, reorganize_with_api, install_pillow)
     - Funzioni register / unregister
 """
 

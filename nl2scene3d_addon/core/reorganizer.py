@@ -25,8 +25,8 @@ indipendentemente dalla riga di comando:
        - aggiorna i figli con una trasformazione rigida rispetto al padre.
        Restituisce un nuovo SceneState con pipeline_step="reorganized".
 
-La chiamata effettiva al modello e l'I/O di rete vivono negli operatori, non
-qui: in questo modo la logica rimane completamente verificabile.
+La chiamata effettiva al modello e l'I/O di rete vivono in llm_providers.py (invocato dagli operatori), 
+non qui: in questo modo la logica rimane completamente verificabile."
 """
 
 from __future__ import annotations

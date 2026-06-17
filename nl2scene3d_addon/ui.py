@@ -3,7 +3,7 @@
 Interfaccia utente Blender dell'add-on NL2Scene3D.
 
 Contiene:
-    - NL2SCENE3D_AddonPreferences: preferenze dell'add-on (seed del randomizer).
+    - NL2SCENE3D_AddonPreferences: preferenze dell'add-on (seed del randomizer e impostazioni della chiamata API automatica).
     - NL2_ObjectOverride:          PropertyGroup per ogni voce della lista override.
     - NL2SCENE3D_UL_overrides:     UIList che mostra etichetta / padre / fisso.
     - NL2SCENE3D_PT_main_panel:    Pannello principale nella sidebar della 3D View.
@@ -434,7 +434,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
             col1.label(text="Nessun originale (premi Randomize una volta).", icon="INFO")
 
         # --- Sezione Step 2: riordina con AI (flusso manuale) ---
-        # Numerazione chiarita con suffissi a/b/c per evitare confusione tra lo Step 2 principale e i suoi sotto-step numerati 0/1/2.
+        # Numerazione chiarita con suffissi a/b/c per evitare confusione tra lo Step 2 principale e i suoi sotto-step numerati 2a/2b/2c.
         layout.separator()
         col2 = layout.column(align=True)
         col2.label(text="Step 2: Riordina con AI")

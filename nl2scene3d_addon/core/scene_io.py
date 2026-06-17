@@ -649,7 +649,7 @@ def format_metrics_report(orig: dict, rand: dict, cur: dict) -> str:
         C = corrente (dopo la riorganizzazione dell'LLM).
 
     Le colonne mostrano:
-        O->R d:   distanza di spostamento XY dal originale al randomizzato.
+        O->R d:   distanza di spostamento XY dall'originale al randomizzato.
         R->C d:   distanza di spostamento XY dal randomizzato al corrente.
         R->C rot: variazione di rotazione attorno a Z (gradi).
 

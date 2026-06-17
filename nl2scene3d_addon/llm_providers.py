@@ -1,6 +1,6 @@
 # nl2scene3d/llm_providers.py
 """
-Client di rete per i provider LLM (Gemini, e in prospettiva Anthropic/OpenAI).
+Client di rete per i provider LLM (Gemini, Anthropic, OpenAI).
 
 Questo modulo e' l'UNICO punto dell'add-on che effettua chiamate di rete.
 E' volutamente tenuto FUORI da `core/` per non violare la garanzia di
@@ -348,9 +348,9 @@ def call_gemini(
     return LLMResult(text=text, provider=GEMINI, model=model, raw=data)
 
 
-# ---------------------------------------------------------------------------
-# Provider: Anthropic  (Messages API)  -- pronto per il roadmap multi-provider
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------
+# Provider: Anthropic  (Messages API)  
+# -----------------------------------------------------------
 
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 
@@ -404,7 +404,7 @@ def call_anthropic(
 
 
 # ---------------------------------------------------------------------------
-# Provider: OpenAI  (Chat Completions)  -- pronto per il roadmap multi-provider
+# Provider: OpenAI  (Chat Completions)  
 # ---------------------------------------------------------------------------
 
 OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"

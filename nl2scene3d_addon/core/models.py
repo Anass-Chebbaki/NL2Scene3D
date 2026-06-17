@@ -8,8 +8,8 @@ Principi di progetto:
     - Gli helper geometrici di base (AABB, OBB, z_range) vivono accanto al dato
       a cui si riferiscono.
 
-Questo modulo rappresenta il contratto dati di tutto l'add-on: SceneLoader,
-randomizer, reorganizer e applicator producono e consumano queste classi.
+Questo modulo rappresenta il contratto dati di tutto l'add-on: scene_io, 
+randomizer e reorganizer producono e consumano queste classi.
 I nomi dei campi e i metodi pubblici vanno mantenuti stabili.
 """
 

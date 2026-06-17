@@ -2,16 +2,18 @@
 """
 NL2Scene3D - Blender Add-on.
 
-Riordina scene 3D preesistenti con un LLM, in modalita' manuale (human-in-the-loop):
+Riordina scene 3D preesistenti con un LLM, in due modalità:
 
     Step 1 - Randomize:
         Disordina la scena in modo plausibile.
 
-    Step 2 - Esporta / Applica:
-        L'add-on esporta prompt + JSON della scena. L'utente li usa nel proprio
-        LLM (es. Gemini in AI Studio), allegando a mano i render; poi incolla o
-        carica la risposta JSON e l'add-on la applica rispettando i vincoli
-        geometrici (muri, collisioni, Z intatta, figli al seguito del padre).
+    Step 2 - Riordina con l'LLM, in uno dei due modi:
+        - Manuale: l'add-on esporta prompt + JSON, l'utente li usa nel proprio
+          LLM allegando a mano i render, poi incolla/carica la risposta.
+        - Automatico: l'add-on chiama direttamente il provider (Gemini/
+          Anthropic/OpenAI), allega i render e applica la risposta da solo.
+      In entrambi i casi i vincoli geometrici (muri, collisioni, Z intatta,
+      figli al seguito del padre) sono sempre rispettati.
 
 Nota sull'import-safety:
     Questo file NON importa bpy a livello di modulo e NON importa i sottomoduli
@@ -31,7 +33,7 @@ bl_info = {
     # Alzare se si usano API piu' recenti.
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > NL2Scene3D",
-    "description": "Reorganize 3D scenes via an external LLM (manual paste/load workflow)",
+    "description": "Reorganize 3D scenes via an external LLM (manual paste/load or direct API call)",
     "category": "3D View",
 }
 
