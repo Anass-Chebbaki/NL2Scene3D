@@ -56,7 +56,7 @@ def _name_has_kw(keywords, text: str) -> bool:
 
     Il match e' su token interi (separati da _, -, spazi, numeri), non come
     sottostringa generica. Cosi' un muro chiamato 'bedroom_wall_north' non
-    viene scambiato per un'apertura solo perche' contiene la lettere 'room',
+    viene scambiato per un'apertura solo perche' contiene le lettere 'room',
     e 'doorknob' non viene confuso con 'door'.
     """
     toks = {t for t in re.split(r"[^a-z]+", text.lower()) if t}
@@ -78,7 +78,27 @@ def is_finite_float(val: Any) -> bool:
 
 def snap_rotation_90(rz: float) -> float:
     """
-    Approssima una rotazione Z al multiplo di 90 gradi piu' vicino (0, 90, 180, 270 gradi).
+    Approssima una rotazione Z al multiplo di 90 gradi piu' vicino (0, 90, 180, 270).
+
+    Restituisce sempre un valore nell'intervallo [0, 2*pi) grazie all'operatore
+    modulo Python, che per numeri float restituisce sempre un risultato positivo.
+
+    Nota sul comportamento con valori negativi:
+        Angoli negativi sono matematicamente equivalenti al loro corrispondente
+        positivo, ma il risultato e' normalizzato a [0, 2*pi):
+            math.radians(-90)  → -pi/2  → snap → 3*pi/2  (= 270°) 
+            math.radians(-180) → -pi    → snap → pi      (= 180°) 
+            math.radians(-270) → -3pi/2 → snap → pi/2    (= 90°)   
+        Se l'LLM passa rotation_deg=-90, il valore normalizzato sara' 270°, che
+        e' geometricamente identico. Il comportamento e' intenzionale e corretto,
+        ma puo' sorprendere in debug: usare math.degrees(result) per verificare.
+
+    Args:
+        rz: Angolo di rotazione Z in radianti (puo' essere negativo o > 2*pi).
+
+    Returns:
+        Angolo normalizzato in radianti, nell'intervallo [0, 2*pi), al multiplo
+        di pi/2 piu' vicino.
     """
     quarter = math.pi / 2
     n = round(rz / quarter)
@@ -269,10 +289,10 @@ def _opening_penalty(
     z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
 
     if is_door:
-        if z_overlap > 0.05:
+        if z_overlap > 0.001:
             return const.door_penalty
     elif is_window:
-        if c_z_max > o_z_min + 0.10 and z_overlap > 0.05:
+        if c_z_max > o_z_min + 0.10 and z_overlap > 0.001:
             return const.window_penalty
 
     return 0.0
@@ -439,20 +459,22 @@ def collision_score(
 
         o_aabb             = obj.transform.aabb_xy(margin=0.0)
         o_z_min, o_z_max   = obj.transform.z_range()
+
+        # Le aperture strutturali (porte/finestre) devono essere valutate per la clearance
+        # prima di scartarle con il z_overlap generico (es. per finestre alte o porte).
+        if obj.category == "structural" and check_walls and _name_has_kw(_OPENING_KWS, obj.name):
+            is_door   = _name_has_kw(_DOOR_KWS, obj.name)
+            is_window = _name_has_kw(_WINDOW_KWS, obj.name)
+            penalty = _opening_penalty(candidate, obj, is_door, is_window, CONST)
+            if penalty > 0.0:
+                total += penalty
+            continue
+
         z_overlap = max(0.0, min(c_z_max, o_z_max) - max(c_z_min, o_z_min))
         if z_overlap < CONST.post_llm_check_margin:
             continue
 
         if obj.category == "structural" and check_walls:
-            if _name_has_kw(_OPENING_KWS, obj.name):
-                is_door   = _name_has_kw(_DOOR_KWS, obj.name)
-                is_window = _name_has_kw(_WINDOW_KWS, obj.name)
-
-                penalty = _opening_penalty(candidate, obj, is_door, is_window, CONST)
-                if penalty > 0.0:
-                    total += penalty
-                continue
-
             ratio  = aabb_overlap_ratio(c_aabb_wall, o_aabb)
             total += ratio * 2.0  # i muri pesano il doppio dei mobili
         else:

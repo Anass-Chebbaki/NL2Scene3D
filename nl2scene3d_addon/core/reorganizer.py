@@ -25,8 +25,8 @@ indipendentemente dalla riga di comando:
        - aggiorna i figli con una trasformazione rigida rispetto al padre.
        Restituisce un nuovo SceneState con pipeline_step="reorganized".
 
-La chiamata effettiva al modello e l'I/O di rete vivono negli operatori, non
-qui: in questo modo la logica rimane completamente verificabile.
+La chiamata effettiva al modello e l'I/O di rete vivono in llm_providers.py (invocato dagli operatori), 
+non qui: in questo modo la logica rimane completamente verificabile.
 """
 
 from __future__ import annotations
@@ -184,58 +184,74 @@ def build_request(state: SceneState) -> dict:
 # Il testo e' in inglese per massimizzare la compatibilita' con i modelli.
 PROMPT_TEMPLATE = """# Interior Design Layout Optimization Task
 
-You are a professional interior designer working on indoor scenes of ANY type:
-bedrooms, living rooms, kitchens, bathrooms, offices, dining rooms, retail or
-commercial spaces, and any other indoor environment made of furniture and props.
-Do not assume a specific room type in advance: infer it from the data and images.
+You are a professional interior designer reorganizing an EXISTING indoor scene of
+ANY type (bedroom, living room, kitchen, office, retail space, etc.). Do not
+assume a room type in advance: infer it from the data and the images.
 
-You are provided with:
+You receive:
 - A JSON description of the scene (schema below).
-- One or more rendered images of the room: a top-down (floor plan) view and one
-  or more angled views (perspective and/or isometric).
+- Rendered images of the room. Each image is introduced by a short text tag
+  immediately before it (for example "TOP-DOWN floor plan" or "ANGLED perspective
+  view"), so you always know which view you are looking at.
 
-Every image has each object's name printed on top of it. Those names are exactly
-the `name` values used in the JSON below: use the labels to match what you see in
-the images to the objects in the data.
-Each ortho image (top-down and isometric) also shows a scale bar (a labeled
-segment, e.g. "0.5 m" or "1 m") indicating real-world size, and a small X/Y
-axes compass (X in red, Y in green) showing world orientation. Use the scale
-bar to judge real distances and the compass to read directions; the perspective
-view shows only the compass, not the scale bar.
+## How the images are labelled
 
-The current object positions may have been intentionally randomized; treat them
-as a STARTING POINT ONLY and design a COMPLETELY NEW arrangement from scratch.
-Do not make small adjustments to the current layout: rethink the whole
-organization and produce the most realistic, functional layout possible, as a
-human interior designer would.
+Object names are NOT printed on the objects. Each name appears in a small label in
+the MARGIN of the image, connected to its object by a thin leader line ending in a
+dot on the object. To identify an object, follow its leader line from the margin
+label to the dot. The label text is exactly the `name` used in the JSON below.
+
+The orthographic views (top-down and isometric) include a labelled scale bar (e.g.
+"0.5 m" or "1 m") for real-world distance, and an X/Y axes compass (X red, Y green)
+for world orientation. The perspective view shows only the compass. In the
+TOP-DOWN view, image-up is +Y and image-right is +X, matching the compass; the
+`x`, `y` you output use this same world frame, in meters.
+
+## Architectural features (read them from the images)
+
+The walls, the door and the window are part of the room shell. They are NOT listed
+in the JSON, so you must locate them by looking at the images. Treat them as fixed
+constraints you cannot move:
+- Find the doorway and keep the floor in front of it clear, so the door can open
+  and people can enter and move through the room.
+- Find the window and keep its function intact: do not block it with tall
+  furniture; arrange nearby pieces the way the room's function suggests.
+If `fixed_objects` lists door hardware (e.g. a doorknob), that pins the doorway
+location precisely; otherwise rely on the images.
 
 ## How to read the scene JSON
 
-Interpret every field exactly as defined here.
-
-- `room`: the rectangular floor boundary, in meters (`x_min, x_max, y_min, y_max`).
+- `room`: the rectangular floor boundary in meters (`x_min, x_max, y_min, y_max`).
   Every object must stay fully inside it.
 - `fixed_objects`: obstacles you must NOT move and must NOT overlap. They never
-  appear in your output. Treat them as hard, immovable constraints. They may
-  include fixtures that mark an entrance (for example door hardware): keep the
-  area in front of such a fixture clear so the doorway stays usable. If
-  `fixed_objects` is empty, no fixed obstacle is defined and you only need to
-  respect the `room` boundary.
-- `movable_objects`: the ONLY objects you reposition. For each one you output a
-  new `x`, `y`, and `rotation_deg`.
-  - `x`, `y`: the object CENTER, in meters (current/randomized value, to replace).
-  - `w`, `d`: the footprint of the WHOLE GROUP, i.e. the object PLUS everything in
-    its `contains`. Treat each group as a single rigid block of size `w` x `d`.
-  - `rotation_deg`: current rotation; your new value must be 0, 90, 180 or 270.
-  - `contains` (optional): child objects rigidly attached to this object (for
-    example a desk's chair, monitor and keyboard, or a bed's nightstand and lamp).
-    They move together with their parent. DO NOT output placements for them:
-    placing the parent already places them.
+  appear in your output. If empty, only the `room` boundary and the architectural
+  features above constrain you.
+- `movable_objects`: the ONLY objects you reposition. For each one you output a new
+  `x`, `y` and `rotation_deg`.
+  - `x`, `y`: the object CENTER in meters (current/randomized value, to replace).
+  - `w`, `d`: the footprint of the WHOLE GROUP (the object plus everything in its
+    `contains`). Treat each group as one rigid block of size `w` x `d`.
+  - `rotation_deg`: see the Rotation section below.
+  - `contains` (optional): child objects rigidly attached to this object (a desk's
+    monitor and chair, a bed's nightstand and lamp). They move WITH the parent.
+    DO NOT output placements for them: placing the parent already places them.
 
-What you MAY change: only `x`, `y` and `rotation_deg` of each `movable_objects`
-entry. What you MUST preserve: all object names, all `w`/`d` dimensions, any
-height, and the parent-child grouping. Do not add, remove, rename, resize, merge
-or split objects.
+You MAY change only `x`, `y` and `rotation_deg` of each `movable_objects` entry.
+You MUST preserve all names, all `w`/`d` dimensions, any height, and the
+parent-child grouping. Do not add, remove, rename, resize, merge or split objects.
+
+## Rotation
+
+`rotation_deg` is the object's absolute rotation about the vertical axis in the
+world frame. The value already in the JSON matches the orientation you see in the
+images, so use the images to understand which way each object currently faces,
+then choose a new value among 0, 90, 180 or 270 (no other value is valid). The
+footprint `w` x `d` rotates with the object.
+
+Use rotation to make objects FACE correctly for the room's function: seating
+should face its work surface or focal point; a screen should face where a person
+sits; a piece with a clear back (a bed's headboard, a desk's modesty panel, a
+shelf) should sit with that back against a wall.
 
 ## Goal
 
@@ -244,73 +260,46 @@ plausible for a real-world environment.
 
 ## Design Principles
 
-First infer the room's function from object names, dimensions and the images,
-then apply the conventions appropriate to THAT function.
+First infer the room's function from object names, dimensions and the images, then
+apply the conventions of THAT function.
 
-### Functional grouping
-Identify the likely purpose of each object and organize the space into coherent
-functional areas. Objects that belong together should sit near one another.
-
-### Furniture placement
-Place furniture where the room's function dictates. Many rooms anchor large
-pieces along the walls and keep the center clear; but some layouts have
-intentionally central elements (a dining or conference table, a kitchen island,
-a retail display). Decide based on the inferred room type, not by default.
-
-### Accessibility
-Keep natural circulation paths. People should move comfortably between areas
-without obstacles blocking doorways or passages.
-
-### Spatial coherence
-Position objects so their relationships make sense. Related objects should feel
-intentionally associated, not scattered.
-
-### Visual order
-Prefer clean alignments and structured arrangements. Avoid arbitrary orientations
-or placements that create visual clutter.
-
-### Space usage
-Use the available floor area efficiently. Avoid both overcrowding and large,
-purposeless empty zones.
+- Functional grouping: keep objects that work together near one another, and keep
+  their `contains` relationships intact.
+- Furniture placement: anchor large pieces along walls and keep circulation space
+  clear, unless the room type calls for a central element (dining or conference
+  table, kitchen island, retail display). Decide from the inferred type.
+- Accessibility: preserve natural circulation paths; never block the doorway or
+  the passages between areas.
+- Spatial coherence and visual order: prefer clean alignments and intentional
+  relationships over scattered or arbitrarily rotated placements.
+- Space usage: use the floor efficiently, avoiding both overcrowding and large
+  purposeless empty zones.
 
 ## Geometric Constraints (Mandatory)
 
-- Every object must remain completely inside the `room` boundaries.
-- No movable object may overlap another movable object.
-- No movable object may overlap any fixed object.
-- Respect the `w`, `d` group footprint; do not modify dimensions.
-- `x`, `y` are object centers, in meters.
-- Do not invent height (`z`) values; height is out of scope.
+- Every object stays completely inside the `room` boundaries.
+- No movable object overlaps another movable object or any fixed object.
+- Keep the doorway approach and the window clear, as described above.
+- Respect each `w`, `d` footprint; do not modify dimensions or invent height (`z`).
+- `x`, `y` are object centers in meters; `rotation_deg` is 0, 90, 180 or 270.
 
-## Rotation Constraints
+## Before you answer
 
-`rotation_deg` may only be 0, 90, 180 or 270. Any other value is invalid.
+(1) infer the room type from the JSON and images; (2) locate the door, the window
+and the fixed obstacles; (3) identify the primary furniture and the focal areas;
+(4) consider several layouts and compare them on function, accessibility, realism
+and space efficiency; (5) pick the best; (6) verify every constraint holds.
 
-## Optimization Strategy
+## Output
 
-Before answering: (1) infer the room type from JSON and images; (2) identify the
-primary furniture and the focal areas; (3) consider several plausible layouts;
-(4) compare them on functionality, accessibility, realism and space efficiency;
-(5) pick the best; (6) verify every geometric and rotation constraint holds.
+Return ONLY the JSON object shown here, with no surrounding text, explanation or
+markdown. Output exactly one placement for every entry in `movable_objects`, and
+none for objects under `contains` or in `fixed_objects`:
 
-## Output Requirements
-
-Return ONLY a raw JSON object. No explanations, no comments, no markdown, no code
-fences, no extra text. Use exactly this structure:
-
-```json
-{
-  "placements": [
-    { "name": "<object_name>", "x": <float>, "y": <float>, "rotation_deg": <int> }
-  ]
-}
-```
-
-Output exactly one placement for every entry in `movable_objects`, and never for
-objects listed under `contains` or in `fixed_objects`."""
+{ "placements": [ { "name": "<object_name>", "x": <float>, "y": <float>, "rotation_deg": <int> } ] }"""
 
 
-def build_prompt(state: SceneState) -> str:
+def build_prompt(state: SceneState, custom_instructions: str = "") -> str:
     """
     Assembla il prompt completo da inviare al modello linguistico.
 
@@ -321,12 +310,16 @@ def build_prompt(state: SceneState) -> str:
 
     Args:
         state: Lo stato corrente della scena.
+        custom_instructions: Istruzioni personalizzate extra fornite dall'utente.
 
     Returns:
         Stringa contenente il prompt completo.
     """
     payload = json.dumps(build_request(state), ensure_ascii=False, indent=2)
-    return f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
+    prompt = f"{PROMPT_TEMPLATE}\n\n## JSON Scene data:\n```json\n{payload}\n```\n"
+    if custom_instructions.strip():
+        prompt += f"\n## Custom User Guidelines:\n{custom_instructions.strip()}\n"
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +364,17 @@ def _iter_balanced_objects(s: str):
                     start = -1
 
 
+def _contains_key_recursive(obj, key: str) -> bool:
+    """Ritorna True se la chiave e' presente a qualsiasi livello di annidamento in obj."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return True
+        return any(_contains_key_recursive(v, key) for v in obj.values())
+    elif isinstance(obj, list):
+        return any(_contains_key_recursive(item, key) for item in obj)
+    return False
+
+
 def extract_json(text) -> Optional[dict]:
     """
     Estrae l'oggetto JSON utile da un testo potenzialmente "sporco", che puo'
@@ -379,8 +383,8 @@ def extract_json(text) -> Optional[dict]:
     A differenza di un semplice split sui recinti, lo scanner cerca TUTTI gli
     oggetti '{...}' ben bilanciati e poi sceglie quello rilevante: se piu' di
     uno e' valido (es. una graffa nel preambolo come "il {layout} richiesto")
-    viene preferito il primo che contiene la chiave "placements", altrimenti il
-    primo che si parsa correttamente.
+    viene preferito il primo che contiene la chiave "placements" (anche annidata),
+    altrimenti il primo che si parsa correttamente.
 
     Args:
         text: Stringa grezza dalla risposta del modello, oppure dict gia' parsato.
@@ -402,8 +406,8 @@ def extract_json(text) -> Optional[dict]:
             continue
         if not isinstance(obj, dict):
             continue
-        if "placements" in obj:
-            return obj  # match esatto sul payload atteso
+        if _contains_key_recursive(obj, "placements"):
+            return obj  # match esatto sul payload atteso (anche se annidato)
         if first_valid is None:
             first_valid = obj
 
@@ -490,6 +494,13 @@ def _resolve_collisions(
     - Due mobili sovrapposti si scostano di meta' ciascuno.
     Il processo itera fino alla convergenza o al raggiungimento di max_iter.
 
+    Rilevamento oscillazioni:
+    Se la stessa coppia di oggetti produce vettori MTV opposti in due iterazioni
+    consecutive (ping-pong), significa che non e' possibile separare i due
+    oggetti nella configurazione corrente (es. stanza troppo piccola). In quel
+    caso il solver esce anticipatamente con un warning invece di inutili 80
+    iterazioni.
+
     Il penetration_vector opera sull'AABB del solo root, ma
     il check di convergenza viene fatto su has_collision che usa SAT reale.
     Il clamp di gruppo viene applicato dopo ogni spostamento. Questo non
@@ -510,6 +521,12 @@ def _resolve_collisions(
     max_iter = const.resolve_collisions_max_iter
     margin = const.collision_margin
     it = 0
+
+    # Memorizza il vettore MTV dell'iterazione precedente per ogni coppia.
+    # Chiave: (nome_a, nome_b) con nome_a < nome_b per canonicita'.
+    prev_vectors: dict[tuple[str, str], tuple[float, float]] = {}
+    oscillations = 0
+    max_oscillations = 3  # quante oscillazioni accettiamo prima di uscire
 
     while it < max_iter:
         it += 1
@@ -532,6 +549,25 @@ def _resolve_collisions(
                     _shift(a,  dx / 2.0,  dy / 2.0, rb, const.wall_margin)
                     _shift(b, -dx / 2.0, -dy / 2.0, rb, const.wall_margin)
                     moved = True
+
+                    # Rilevamento oscillazione: confronta con il vettore dell'iter. prec.
+                    key = (a.name, b.name) if a.name < b.name else (b.name, a.name)
+                    prev = prev_vectors.get(key)
+                    if prev is not None:
+                        # Oscillazione se la direzione si e' invertita su entrambi gli assi.
+                        if (prev[0] * dx < 0 or prev[1] * dy < 0) and (
+                            abs(dx) > 1e-6 or abs(dy) > 1e-6
+                        ):
+                            oscillations += 1
+                            if oscillations >= max_oscillations:
+                                logger.warning(
+                                    "_resolve_collisions: rilevata oscillazione MTV dopo %d iter. "
+                                    "Impossibile separare '%s' e '%s' (stanza troppo piccola?). "
+                                    "Il solver si arresta.",
+                                    it, a.name, b.name,
+                                )
+                                return it
+                    prev_vectors[key] = (dx, dy)
 
         if not moved:
             break
@@ -690,9 +726,12 @@ def sanitize_response(
             world_off_y = off[0] * sin_z + off[1] * cos_z
 
             # px,py sono il centro del gruppo AABB: per ricavare la location
-            # del root dobbiamo anche compensare lo shift root->centro_gruppo.
-            # Calcoliamo il delta tra centro_gruppo e centro_geometrico_root
-            # nella posa originale, e lo applichiamo alla posa proposta.
+            # del root dobbiamo compensare lo shift root->centro_gruppo.
+            # Il delta gruppo->centro_geometrico_root e' calcolato
+            # in coordinate LOCALI (indipendente dalla rotazione) e poi ruotato
+            # con la rotazione PROPOSTA, non con quella originale.
+            # In questo modo la conversione e' corretta anche quando l'LLM
+            # propone una rotazione diversa da quella originale.
             orig_descendants = _descendants(orig, orig_by_name)
             orig_rz = orig.transform.rotation_euler[2]
             ogx_min, ogx_max, ogy_min, ogy_max = group_aabb_xy(
@@ -701,11 +740,33 @@ def sanitize_response(
             orig_gcx = (ogx_min + ogx_max) / 2.0
             orig_gcy = (ogy_min + ogy_max) / 2.0
             orig_cx, orig_cy = orig.transform.geometric_center_xy()
-            # delta tra centro gruppo e centro geometrico root (in world space originale)
-            delta_gcx = orig_gcx - orig_cx
-            delta_gcy = orig_gcy - orig_cy
 
-            # centro geometrico root proposto = px,py meno il delta centro-gruppo
+            # Offset in world space originale (root-origin -> geometric-center-of-group)
+            delta_world_x = orig_gcx - orig_cx
+            delta_world_y = orig_gcy - orig_cy
+
+            # Ruota il delta dal sistema di riferimento originale al proposto.
+            # Se la rotazione non cambia il termine e' identico al comportamento
+            # precedente; se cambia, il delta viene correttamente trasformato.
+            orig_cos = math.cos(orig_rz)
+            orig_sin = math.sin(orig_rz)
+            prop_cos = math.cos(proposed_rz)
+            prop_sin = math.sin(proposed_rz)
+
+            # Delta in spazio locale del root (indipendente dalla rotazione)
+            if abs(orig_cos) > 1e-9 or abs(orig_sin) > 1e-9:
+                # Rotazione inversa: world -> local (con rotazione originale)
+                local_delta_x = delta_world_x * orig_cos + delta_world_y * orig_sin
+                local_delta_y = -delta_world_x * orig_sin + delta_world_y * orig_cos
+            else:
+                local_delta_x = delta_world_x
+                local_delta_y = delta_world_y
+
+            # Riproietta in world space con la rotazione proposta
+            delta_gcx = local_delta_x * prop_cos - local_delta_y * prop_sin
+            delta_gcy = local_delta_x * prop_sin + local_delta_y * prop_cos
+
+            # Centro geometrico root proposto = px,py meno il delta centro-gruppo
             prop_cx = float(px) - delta_gcx
             prop_cy = float(py) - delta_gcy
 

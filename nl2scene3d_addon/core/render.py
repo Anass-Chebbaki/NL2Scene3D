@@ -154,7 +154,7 @@ def _declutter(boxes: list, width: int, height: int, pad: int = 5, iterations: i
                 if abs(dx) < 1e-6 and abs(dy) < 1e-6:
                     dy = 1.0
 
-                # Overlap sulle due assi.
+                # Overlap sui due assi.
                 ox = (a["w"] + b["w"]) / 2.0 + pad - abs(dx)
                 oy = (a["h"] + b["h"]) / 2.0 + pad - abs(dy)
 
@@ -671,6 +671,42 @@ def _render_to(path: str) -> None:
 # Creazione delle camera temporanee
 # ---------------------------------------------------------------------------
 
+def _cleanup_temp_camera(name: str) -> None:
+    """
+    Rimuove preventivamente camera e dati-camera orfani con il nome indicato.
+
+    Chiamata prima di creare una camera temporanea per evitare l'accumulo di
+    oggetti del tipo 'NL2_TopDown.001', 'NL2_TopDown.002', ecc. che si
+    formano quando un render precedente e' stato interrotto da un'eccezione
+    prima del blocco `finally` che rimuove le camera temporanee.
+
+    Args:
+        name: Nome esatto della camera (es. 'NL2_TopDown').
+    """
+    import bpy  # noqa: PLC0415
+
+    obj = bpy.data.objects.get(name)
+    if obj is not None:
+        data = obj.data
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+        if data is not None:
+            try:
+                bpy.data.cameras.remove(data)
+            except Exception:
+                pass
+    else:
+        # L'oggetto potrebbe non esistere ma il datablock camera si'.
+        cam_data = bpy.data.cameras.get(name)
+        if cam_data is not None:
+            try:
+                bpy.data.cameras.remove(cam_data)
+            except Exception:
+                pass
+
+
 def _make_top_down_camera(scene, aabb=None):
     """
     Crea una camera ortografica dall'alto (pianta), inquadrata sull'AABB
@@ -687,6 +723,7 @@ def _make_top_down_camera(scene, aabb=None):
 
     mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
 
+    _cleanup_temp_camera("NL2_TopDown")  # rimuove eventuali orfani dal render precedente
     cam_data = bpy.data.cameras.new("NL2_TopDown")
     cam_data.type = "ORTHO"
     cam_data.ortho_scale = max(maxs.x - mins.x, maxs.y - mins.y, 1.0) * 1.10
@@ -719,6 +756,7 @@ def _make_corner_camera(scene, lens_mm: float = 24.0, aabb=None):
     mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
     radius = max((maxs - mins).length / 2.0, 0.5)
 
+    _cleanup_temp_camera("NL2_Corner")  # rimuove eventuali orfani dal render precedente
     cam_data = bpy.data.cameras.new("NL2_Corner")
     cam_data.type = "PERSP"
     cam_data.lens = float(lens_mm)
@@ -757,6 +795,7 @@ def _make_iso_camera(scene, aabb=None):
     mins, maxs, center = aabb if aabb is not None else _scene_aabb(scene)
     diag = max((maxs - mins).length, 1.0)
 
+    _cleanup_temp_camera("NL2_Iso")  # rimuove eventuali orfani dal render precedente
     cam_data = bpy.data.cameras.new("NL2_Iso")
     cam_data.type = "ORTHO"
     cam_data.ortho_scale = diag * 1.05

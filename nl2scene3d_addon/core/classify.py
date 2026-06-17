@@ -135,7 +135,7 @@ def compute_room_bounds(objects: list[SceneObject]) -> RoomBounds:
     Strategia:
         1. Se esistono oggetti strutturali (riconosciuti per nome), li usa come
            riferimento (caso tipico: una mesh-stanza, oppure muri + pavimento).
-        2. Se non ci sono strutturali riconosciuti, ripiegpa sulla geometria:
+        2. Se non ci sono strutturali riconosciuti, ripiega sulla geometria:
            usa l'oggetto con l'impronta XY piu' grande come approssimazione
            della stanza.
         3. Ultimo fallback: AABB unione di tutti gli oggetti.

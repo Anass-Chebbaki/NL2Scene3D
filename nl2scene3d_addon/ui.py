@@ -3,7 +3,7 @@
 Interfaccia utente Blender dell'add-on NL2Scene3D.
 
 Contiene:
-    - NL2SCENE3D_AddonPreferences: preferenze dell'add-on (seed del randomizer).
+    - NL2SCENE3D_AddonPreferences: preferenze dell'add-on (seed del randomizer e impostazioni della chiamata API automatica).
     - NL2_ObjectOverride:          PropertyGroup per ogni voce della lista override.
     - NL2SCENE3D_UL_overrides:     UIList che mostra etichetta / padre / fisso.
     - NL2SCENE3D_PT_main_panel:    Pannello principale nella sidebar della 3D View.
@@ -23,10 +23,14 @@ import bpy  # type: ignore
 from bpy.props import (  # type: ignore
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
+    FloatProperty,
     IntProperty,
     StringProperty,
 )
 from bpy.types import AddonPreferences, Panel, PropertyGroup, UIList  # type: ignore
+
+from . import llm_providers
 
 # Pillow detection a livello modulo, non in ogni frame del draw().
 # Blender chiama draw() per ogni aggiornamento UI; un import-attempt per frame
@@ -58,12 +62,105 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
         min=0,
     )
 
+    # --- Chiamata API automatica (opzionale) ---
+    llm_provider: EnumProperty(  # type: ignore
+        name="Provider",
+        description="Servizio LLM da contattare per la riorganizzazione automatica",
+        items=[
+            (llm_providers.GEMINI,    "Google Gemini", "API Gemini (generateContent)"),
+            (llm_providers.ANTHROPIC, "Anthropic",     "API Claude (Messages)"),
+            (llm_providers.OPENAI,    "OpenAI",        "API GPT (Chat Completions)"),
+        ],
+        default=llm_providers.GEMINI,
+    )
+
+    gemini_api_key: StringProperty(  # type: ignore
+        name="Gemini API key",
+        description="Chiave API di Google AI Studio. Vuoto = usa la variabile d'ambiente GEMINI_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+    anthropic_api_key: StringProperty(  # type: ignore
+        name="Anthropic API key",
+        description="Chiave API Anthropic. Vuoto = usa la variabile d'ambiente ANTHROPIC_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+    openai_api_key: StringProperty(  # type: ignore
+        name="OpenAI API key",
+        description="Chiave API OpenAI. Vuoto = usa la variabile d'ambiente OPENAI_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+
+    llm_model: StringProperty(  # type: ignore
+        name="Modello",
+        description="Identificatore del modello. Vuoto = default del provider (es. gemini-3.5-flash)",
+        default="",
+    )
+
+    llm_temperature: FloatProperty(  # type: ignore
+        name="Temperature",
+        description="Creativita' del modello (0 = deterministico, valori alti = piu' vario)",
+        default=0.7, min=0.0, max=2.0,
+    )
+
+    llm_timeout: FloatProperty(  # type: ignore
+        name="Timeout (s)",
+        description="Tempo massimo di attesa della risposta dell'LLM",
+        default=120.0, min=10.0, max=600.0,
+    )
+
+    llm_max_retries: IntProperty(  # type: ignore
+        name="Tentativi su errori temporanei",
+        description=(
+            "Quante volte riprovare in automatico se il provider risponde con "
+            "sovraccarico/limite (HTTP 429/503/5xx) o errori di rete. "
+            "0 = nessun tentativo extra. L'attesa tra i tentativi cresce in modo esponenziale"
+        ),
+        default=4, min=0, max=10,
+    )
+
+    llm_auto_render: BoolProperty(  # type: ignore
+        name="Renderizza prima della chiamata",
+        description=(
+            "Se attivo, l'operatore automatico genera render etichettati freschi "
+            "e li allega alla richiesta (consigliato per risultati migliori)"
+        ),
+        default=True,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "seed")
         layout.label(
             text="Flusso manuale: esporta il prompt, usalo nel tuo LLM, incolla qui la risposta.",
             icon="INFO",
+        )
+
+        box = layout.box()
+        box.label(text="Chiamata API automatica (opzionale)", icon="URL")
+        box.prop(self, "llm_provider")
+
+        # Mostra solo il campo chiave del provider selezionato.
+        key_field = {
+            llm_providers.GEMINI:    "gemini_api_key",
+            llm_providers.ANTHROPIC: "anthropic_api_key",
+            llm_providers.OPENAI:    "openai_api_key",
+        }[self.llm_provider]
+        box.prop(self, key_field)
+
+        row = box.row(align=True)
+        row.prop(self, "llm_model",
+                 text=f"Modello ({llm_providers.DEFAULT_MODELS[self.llm_provider]})")
+        row2 = box.row(align=True)
+        row2.prop(self, "llm_temperature")
+        row2.prop(self, "llm_timeout")
+        box.prop(self, "llm_max_retries")
+        box.prop(self, "llm_auto_render")
+        box.label(
+            text="La chiave resta locale nelle preferenze; nessun dato lascia il PC se non verso il provider.",
+            icon="LOCKED",
         )
 
 
@@ -198,6 +295,49 @@ class NL2SCENE3D_PT_main_panel(Panel):
             pbox.label(text="I render etichettati non funzioneranno.")
             pbox.operator("nl2scene3d.install_pillow", text="Installa Pillow", icon="IMPORT")
 
+        # Avviso limite oggetti mobili
+        try:
+            from .core.settings import CONST, STRUCTURAL_PATTERNS, NON_MESH_TYPES
+            import re
+            
+            overrides = None
+            if getattr(scene, "nl2_overrides_enabled", False):
+                overrides = {e.name: e.fixed for e in getattr(scene, "nl2_overrides", [])}
+
+            def _tok(t: str) -> set:
+                return {x for x in re.split(r"[^a-z]+", t.lower()) if x}
+
+            movable_count = 0
+            for o in scene.objects:
+                if o.type in NON_MESH_TYPES:
+                    continue
+                name = o.name
+                if overrides is not None and name in overrides:
+                    if not overrides[name]:
+                        movable_count += 1
+                else:
+                    toks = _tok(name)
+                    is_struct = any(k in toks for k in STRUCTURAL_PATTERNS)
+                    if not is_struct:
+                        movable_count += 1
+
+            if movable_count >= CONST.max_movable_objects:
+                limit_box = layout.box()
+                limit_box.alert = True
+                limit_box.label(
+                    text=f"Limite arredi mobili raggiunto! ({movable_count}/{CONST.max_movable_objects})",
+                    icon="ERROR",
+                )
+                limit_box.label(text="Gli arredi in eccesso saranno trattati come fissi.")
+            elif movable_count >= CONST.max_movable_objects - 10:
+                limit_box = layout.box()
+                limit_box.label(
+                    text=f"Attenzione: {movable_count} oggetti mobili (limite: {CONST.max_movable_objects})",
+                    icon="WARNING",
+                )
+        except Exception:
+            pass
+
         layout.separator()
         layout.operator(
             "nl2scene3d.inspect",
@@ -251,6 +391,36 @@ class NL2SCENE3D_PT_main_panel(Panel):
                     icon="INFO",
                 )
 
+        # --- Sezione Confini Stanza ---
+        layout.separator()
+        box_room = layout.box()
+        box_room.label(text="Confini Stanza (Room Bounds)", icon="SHADING_BBOX")
+        
+        helper_name = "NL2_RoomBounds_Helper"
+        helper = bpy.data.objects.get(helper_name)
+        
+        row_room = box_room.row(align=True)
+        if not helper:
+            row_room.operator("nl2scene3d.create_bounds_helper", text="Definisci confini manuali", icon="ADD")
+        else:
+            row_room.operator("nl2scene3d.create_bounds_helper", text="Seleziona Helper", icon="RESTRICT_SELECT_OFF")
+            row_room.operator("nl2scene3d.remove_bounds_helper", text="", icon="TRASH")
+            
+            # Mostra i confini letti dall'helper
+            try:
+                import mathutils
+                corners = [helper.matrix_world @ mathutils.Vector(c) for c in helper.bound_box]
+                x_min, x_max = min(c.x for c in corners), max(c.x for c in corners)
+                y_min, y_max = min(c.y for c in corners), max(c.y for c in corners)
+                z_floor, z_ceiling = min(c.z for c in corners), max(c.z for c in corners)
+                
+                col_bounds = box_room.column(align=True)
+                col_bounds.label(text=f"X: {x_min:.2f}m a {x_max:.2f}m (L: {x_max-x_min:.2f}m)")
+                col_bounds.label(text=f"Y: {y_min:.2f}m a {y_max:.2f}m (P: {y_max-y_min:.2f}m)")
+                col_bounds.label(text=f"Z: {z_floor:.2f}m a {z_ceiling:.2f}m (A: {z_ceiling-z_floor:.2f}m)")
+            except Exception:
+                pass
+
         # --- Sezione Step 1: disordina e reset ---
         layout.separator()
         col1 = layout.column(align=True)
@@ -264,7 +434,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
             col1.label(text="Nessun originale (premi Randomize una volta).", icon="INFO")
 
         # --- Sezione Step 2: riordina con AI (flusso manuale) ---
-        # Numerazione chiarita con suffissi a/b/c per evitare confusione tra lo Step 2 principale e i suoi sotto-step numerati 0/1/2.
+        # Numerazione chiarita con suffissi a/b/c per evitare confusione tra lo Step 2 principale e i suoi sotto-step numerati 2a/2b/2c.
         layout.separator()
         col2 = layout.column(align=True)
         col2.label(text="Step 2: Riordina con AI")
@@ -274,12 +444,40 @@ class NL2SCENE3D_PT_main_panel(Panel):
             icon="RENDER_STILL",
         )
 
+        col2.prop(scene, "nl2_custom_instructions")
+
         # Avvisa se si esporta senza aver prima randomizzato.
         if not scene.nl2_has_home:
             row_warn = col2.row()
             row_warn.alert = True
             row_warn.label(text="Suggerito: esegui prima Randomize (Step 1)", icon="ERROR")
 
+        # --- Percorso automatico: una sola azione (render + API + applica) ---
+        col2.separator()
+        api_box = col2.box()
+        api_box.label(text="Automatico (chiamata API)", icon="URL")
+        prov = getattr(prefs, "llm_provider", llm_providers.GEMINI)
+        key_field = {
+            llm_providers.GEMINI:    "gemini_api_key",
+            llm_providers.ANTHROPIC: "anthropic_api_key",
+            llm_providers.OPENAI:    "openai_api_key",
+        }.get(prov, "gemini_api_key")
+        has_key = bool(getattr(prefs, key_field, ""))
+        model_lbl = getattr(prefs, "llm_model", "").strip() or llm_providers.DEFAULT_MODELS[prov]
+        api_box.label(text=f"{prov} · {model_lbl}")
+        api_box.operator(
+            "nl2scene3d.reorganize_with_api",
+            text="Riordina automaticamente (API)",
+            icon="PLAY",
+        )
+        if not has_key:
+            warn = api_box.row()
+            warn.alert = True
+            warn.label(text="Imposta la API key nelle preferenze (o via env var).", icon="ERROR")
+
+        # --- Percorso manuale (fallback / controllo totale) ---
+        col2.separator()
+        col2.label(text="Manuale (esporta / incolla):")
         col2.operator(
             "nl2scene3d.export_for_llm",
             text="2b. Esporta prompt (copia negli appunti)",
@@ -345,6 +543,12 @@ def register():
         default=False,
     )
 
+    bpy.types.Scene.nl2_custom_instructions = StringProperty(
+        name="Istruzioni LLM",
+        description="Istruzioni o linee guida personalizzate per l'LLM (es. 'Metti la sedia davanti alla scrivania')",
+        default="",
+    )
+
 
 def unregister():
     """Rimuove le proprieta' di scena e deregistra le classi UI."""
@@ -353,6 +557,7 @@ def unregister():
         "nl2_overrides_index",
         "nl2_overrides_enabled",
         "nl2_has_home",
+        "nl2_custom_instructions",
     ):
         if hasattr(bpy.types.Scene, attr):
             delattr(bpy.types.Scene, attr)

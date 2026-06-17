@@ -9,19 +9,22 @@ Struttura:
     - Funzioni helper private (_get_prefs, _write_text, _build_overrides, ...)
     - Operatori override (sync, autodetect, suggest_groups, labels, clear)
     - Operatori principali (reset_home, inspect, scale_to_real, randomize,
-      render_labeled, export_for_llm, apply_from_text, apply_from_file)
+      render_labeled, export_for_llm, apply_from_clipboard, apply_from_text, apply_from_file, reorganize_with_api, install_pillow)
     - Funzioni register / unregister
 """
 
 import os
+import threading
 import traceback
 
-import bpy                          # type: ignore
-from bpy.types import Operator      # type: ignore
+import bpy  # type: ignore
+from bpy.types import Operator  # type: ignore
 
+from . import llm_providers
 from .core import render, reorganizer, scene_io
 from .core.classify import default_classification, suggest_grouping
 from .core.randomizer import SceneRandomizer
+from .core.models import RoomBounds
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +111,7 @@ def _sync_overrides(scene) -> tuple[int, int]:
     """
     items = scene.nl2_overrides
     existing = {e.name for e in items}
-    present  = {o.name for o in _listable_objects(scene)}
+    present = {o.name for o in _listable_objects(scene)}
 
     added = 0
     for obj in _listable_objects(scene):
@@ -116,8 +119,8 @@ def _sync_overrides(scene) -> tuple[int, int]:
             continue
         dims = [obj.dimensions.x, obj.dimensions.y, obj.dimensions.z]
         _cat, mov = default_classification(obj.name, obj.type, dims)
-        entry       = items.add()
-        entry.name  = obj.name
+        entry = items.add()
+        entry.name = obj.name
         entry.fixed = not mov
         entry.label = True  # etichettato nei render per default
         added += 1
@@ -138,8 +141,8 @@ def _sync_overrides(scene) -> tuple[int, int]:
 class NL2SCENE3D_OT_overrides_sync(Operator):
     """Sincronizza la lista override con gli oggetti della scena (aggiunge i nuovi, toglie i mancanti)."""
 
-    bl_idname  = "nl2scene3d.overrides_sync"
-    bl_label   = "Sincronizza lista override"
+    bl_idname = "nl2scene3d.overrides_sync"
+    bl_label = "Sincronizza lista override"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -151,8 +154,8 @@ class NL2SCENE3D_OT_overrides_sync(Operator):
 class NL2SCENE3D_OT_overrides_autodetect(Operator):
     """Riempie tutte le voci con la classificazione automatica (sovrascrive le scelte manuali)."""
 
-    bl_idname  = "nl2scene3d.overrides_autodetect"
-    bl_label   = "Rileva automaticamente"
+    bl_idname = "nl2scene3d.overrides_autodetect"
+    bl_label = "Rileva automaticamente"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -165,8 +168,8 @@ class NL2SCENE3D_OT_overrides_autodetect(Operator):
             obj = by_name.get(entry.name)
             if obj is None:
                 continue
-            dims        = [obj.dimensions.x, obj.dimensions.y, obj.dimensions.z]
-            _cat, mov   = default_classification(obj.name, obj.type, dims)
+            dims = [obj.dimensions.x, obj.dimensions.y, obj.dimensions.z]
+            _cat, mov = default_classification(obj.name, obj.type, dims)
             entry.fixed = not mov
             n += 1
 
@@ -177,8 +180,8 @@ class NL2SCENE3D_OT_overrides_autodetect(Operator):
 class NL2SCENE3D_OT_overrides_suggest_groups(Operator):
     """Propone i rapporti padre-figlio in base alla geometria (da correggere manualmente)."""
 
-    bl_idname  = "nl2scene3d.overrides_suggest_groups"
-    bl_label   = "Suggerisci gruppi"
+    bl_idname = "nl2scene3d.overrides_suggest_groups"
+    bl_label = "Suggerisci gruppi"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -187,7 +190,7 @@ class NL2SCENE3D_OT_overrides_suggest_groups(Operator):
 
             # Estrae lo stato corrente (con gli override fisso/mobile attivi)
             # e propone le relazioni padre-figlio basate sulla geometria.
-            state   = scene_io.extract_scene_state(overrides=_build_overrides(context))
+            state = scene_io.extract_scene_state(overrides=_build_overrides(context))
             mapping = suggest_grouping(state.objects)
 
             entries = {e.name: e for e in context.scene.nl2_overrides}
@@ -212,8 +215,8 @@ class NL2SCENE3D_OT_overrides_suggest_groups(Operator):
 class NL2SCENE3D_OT_overrides_labels_all(Operator):
     """Accende o spegne l'etichetta su tutte le voci della lista in un colpo solo."""
 
-    bl_idname  = "nl2scene3d.overrides_labels_all"
-    bl_label   = "Etichette: tutte/nessuna"
+    bl_idname = "nl2scene3d.overrides_labels_all"
+    bl_label = "Etichette: tutte/nessuna"
     bl_options = {"REGISTER", "UNDO"}
 
     value: bpy.props.BoolProperty(name="Etichetta", default=True)  # type: ignore
@@ -232,8 +235,8 @@ class NL2SCENE3D_OT_overrides_labels_all(Operator):
 class NL2SCENE3D_OT_overrides_clear(Operator):
     """Svuota completamente la lista degli override."""
 
-    bl_idname  = "nl2scene3d.overrides_clear"
-    bl_label   = "Svuota lista override"
+    bl_idname = "nl2scene3d.overrides_clear"
+    bl_label = "Svuota lista override"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -249,8 +252,8 @@ class NL2SCENE3D_OT_overrides_clear(Operator):
 class NL2SCENE3D_OT_reset_home(Operator):
     """Riporta tutti gli oggetti alla posa originale salvata."""
 
-    bl_idname  = "nl2scene3d.reset_home"
-    bl_label   = "Reset to Original"
+    bl_idname = "nl2scene3d.reset_home"
+    bl_label = "Reset to Original"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -280,18 +283,18 @@ class NL2SCENE3D_OT_reset_home(Operator):
 class NL2SCENE3D_OT_inspect(Operator):
     """Dry-run: estrae la scena e mostra come viene classificata, senza muovere nulla."""
 
-    bl_idname  = "nl2scene3d.inspect"
-    bl_label   = "Inspect Scene (dry-run)"
+    bl_idname = "nl2scene3d.inspect"
+    bl_label = "Inspect Scene (dry-run)"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
         try:
-            state  = scene_io.extract_scene_state(overrides=_build_overrides(context))
+            state = scene_io.extract_scene_state(overrides=_build_overrides(context))
             report = scene_io.format_inspection(state)
 
             # Scrive il report in un Text datablock consultabile nel Text Editor.
             name = "NL2_Inspect_Report"
-            txt  = bpy.data.texts.get(name) or bpy.data.texts.new(name)
+            txt = bpy.data.texts.get(name) or bpy.data.texts.new(name)
             txt.clear()
             txt.write(report)
 
@@ -320,8 +323,8 @@ class NL2SCENE3D_OT_inspect(Operator):
 class NL2SCENE3D_OT_scale_to_real(Operator):
     """Scala la scena a misura reale partendo da un unico riferimento noto (scala uniforme)."""
 
-    bl_idname  = "nl2scene3d.scale_to_real"
-    bl_label   = "Scala a misura reale"
+    bl_idname = "nl2scene3d.scale_to_real"
+    bl_label = "Scala a misura reale"
     bl_options = {"REGISTER", "UNDO"}
 
     mode: bpy.props.EnumProperty(  # type: ignore
@@ -386,7 +389,7 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
     def execute(self, context):
         import mathutils  # noqa: PLC0415
 
-        scene  = context.scene
+        scene = context.scene
         meshes = [o for o in scene.objects if o.type == "MESH"]
 
         if not meshes:
@@ -395,12 +398,12 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
 
         # Calcola l'AABB unione (spazio mondo) di tutti i mesh:
         # serve il centro-pivot per il modo Stanza e la dimensione di riferimento.
-        big  = 1.0e9
-        mins = mathutils.Vector(( big,  big,  big))
+        big = 1.0e9
+        mins = mathutils.Vector((big, big, big))
         maxs = mathutils.Vector((-big, -big, -big))
         for o in meshes:
             for c in o.bound_box:
-                w    = o.matrix_world @ mathutils.Vector(c)
+                w = o.matrix_world @ mathutils.Vector(c)
                 mins = mathutils.Vector((min(mins.x, w.x), min(mins.y, w.y), min(mins.z, w.z)))
                 maxs = mathutils.Vector((max(maxs.x, w.x), max(maxs.y, w.y), max(maxs.z, w.z)))
 
@@ -449,7 +452,7 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
             if o.name in keep:
                 continue
             if not self.scale_structural and (
-                o.type in {"CAMERA", "LIGHT"} or is_structural(o)
+                    o.type in {"CAMERA", "LIGHT"} or is_structural(o)
             ):
                 continue
             targets.append(o)
@@ -461,9 +464,9 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
         # Scala uniforme attorno al centro della scena:
         #   S = T(center) . Scale(factor) . T(-center)
         S = (
-            mathutils.Matrix.Translation(center)
-            @ mathutils.Matrix.Scale(factor, 4)
-            @ mathutils.Matrix.Translation(-center)
+                mathutils.Matrix.Translation(center)
+                @ mathutils.Matrix.Scale(factor, 4)
+                @ mathutils.Matrix.Translation(-center)
         )
 
         def native_depth(b):
@@ -534,15 +537,15 @@ class NL2SCENE3D_OT_scale_to_real(Operator):
 class NL2SCENE3D_OT_randomize(Operator):
     """Disordina gli oggetti mobili all'interno dei confini della stanza."""
 
-    bl_idname  = "nl2scene3d.randomize"
-    bl_label   = "Randomize Layout"
+    bl_idname = "nl2scene3d.randomize"
+    bl_label = "Randomize Layout"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         wm = context.window_manager
         try:
             prefs = _get_prefs(context)
-            seed  = int(getattr(prefs, "seed", 0)) if prefs else 0
+            seed = int(getattr(prefs, "seed", 0)) if prefs else 0
 
             wm.progress_begin(0, 100)
             for w in wm.windows:
@@ -603,8 +606,8 @@ _RESPONSE_TEXT = "NL2_AI_Response"
 class NL2SCENE3D_OT_render_labeled(Operator):
     """Renderizza le viste della scena (prospettica + pianta) con i nomi degli oggetti sovrapposti."""
 
-    bl_idname  = "nl2scene3d.render_labeled"
-    bl_label   = "Render con etichette"
+    bl_idname = "nl2scene3d.render_labeled"
+    bl_label = "Render con etichette"
     bl_options = {"REGISTER"}
 
     add_top_down: bpy.props.BoolProperty(  # type: ignore
@@ -696,8 +699,8 @@ class NL2SCENE3D_OT_render_labeled(Operator):
 class NL2SCENE3D_OT_export_for_llm(Operator):
     """Genera il prompt + JSON della scena e lo scrive in un Text datablock, pronto da copiare nell'LLM."""
 
-    bl_idname  = "nl2scene3d.export_for_llm"
-    bl_label   = "Esporta prompt per LLM"
+    bl_idname = "nl2scene3d.export_for_llm"
+    bl_label = "Esporta prompt per LLM"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -714,8 +717,9 @@ class NL2SCENE3D_OT_export_for_llm(Operator):
                 self.report({"WARNING"}, "Nessun oggetto mobile da riorganizzare.")
                 return {"CANCELLED"}
 
-            # Genera il prompt con le istruzioni fisse e i dati della scena.
-            prompt = reorganizer.build_prompt(state)
+            # Genera il prompt con le istruzioni fisse, i dati della scena e linee guida personalizzate.
+            custom_inst = getattr(context.scene, "nl2_custom_instructions", "")
+            prompt = reorganizer.build_prompt(state, custom_instructions=custom_inst)
             _write_text("NL2_AI_Prompt", prompt)
 
             # Prepara (vuoto) il Text in cui l'utente incollerà la risposta.
@@ -764,9 +768,9 @@ def _apply_llm_response(operator, context, raw_text: str):
         state = scene_io.extract_scene_state(overrides=_build_overrides(context))
 
         wm.progress_update(50)
-        parsed     = reorganizer.extract_json(raw_text) or {}
+        parsed = reorganizer.extract_json(raw_text) or {}
         placements = parsed.get("placements")
-        n_prop     = len(placements) if isinstance(placements, list) else 0
+        n_prop = len(placements) if isinstance(placements, list) else 0
 
         if n_prop == 0:
             _reset_wm(context)
@@ -779,12 +783,12 @@ def _apply_llm_response(operator, context, raw_text: str):
 
         wm.progress_update(80)
         new_state = reorganizer.sanitize_response(state, parsed)
-        counters  = scene_io.apply_state(new_state)
+        counters = scene_io.apply_state(new_state)
 
         # Genera e salva il report delle metriche di spostamento (O -> R -> C).
         try:
             report = scene_io.build_metrics_report()
-            mtxt   = bpy.data.texts.get("NL2_Metrics") or bpy.data.texts.new("NL2_Metrics")
+            mtxt = bpy.data.texts.get("NL2_Metrics") or bpy.data.texts.new("NL2_Metrics")
             mtxt.clear()
             mtxt.write(report)
             print("\n" + report + "\n")
@@ -822,8 +826,8 @@ def _reset_wm(context):
 class NL2SCENE3D_OT_apply_from_text(Operator):
     """Applica la risposta dell'LLM incollata nel Text datablock 'NL2_AI_Response'."""
 
-    bl_idname  = "nl2scene3d.apply_from_text"
-    bl_label   = "Applica risposta (dal testo incollato)"
+    bl_idname = "nl2scene3d.apply_from_text"
+    bl_label = "Applica risposta (dal testo incollato)"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -850,8 +854,8 @@ class NL2SCENE3D_OT_apply_from_text(Operator):
 class NL2SCENE3D_OT_apply_from_clipboard(Operator):
     """Applica la risposta dell'LLM leggendola direttamente dagli appunti di sistema."""
 
-    bl_idname  = "nl2scene3d.apply_from_clipboard"
-    bl_label   = "Applica risposta (dagli appunti)"
+    bl_idname = "nl2scene3d.apply_from_clipboard"
+    bl_label = "Applica risposta (dagli appunti)"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -869,12 +873,12 @@ class NL2SCENE3D_OT_apply_from_clipboard(Operator):
 class NL2SCENE3D_OT_apply_from_file(Operator):
     """Applica la risposta dell'LLM caricandola da un file (.json o .txt)."""
 
-    bl_idname  = "nl2scene3d.apply_from_file"
-    bl_label   = "Applica risposta (da file)"
+    bl_idname = "nl2scene3d.apply_from_file"
+    bl_label = "Applica risposta (da file)"
     bl_options = {"REGISTER", "UNDO"}
 
     # Il percorso viene fornito da invoke() tramite il file browser di Blender.
-    filepath:    bpy.props.StringProperty(subtype="FILE_PATH")                         # type: ignore
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")  # type: ignore
     filter_glob: bpy.props.StringProperty(default="*.json;*.txt", options={"HIDDEN"})  # type: ignore
 
     def invoke(self, context, event):
@@ -896,54 +900,366 @@ class NL2SCENE3D_OT_apply_from_file(Operator):
         return _apply_llm_response(self, context, raw)
 
 
+class NL2SCENE3D_OT_reorganize_with_api(Operator):
+    """Riorganizza la scena in automatico: renderizza, chiama l'LLM via API e applica la risposta."""
+
+    bl_idname = "nl2scene3d.reorganize_with_api"
+    bl_label = "Riordina con AI (chiamata API automatica)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    # Stato interno della chiamata in background (non sono bpy.props: vivono
+    # solo per la durata dell'istanza modale).
+    _thread = None
+    _timer = None
+    _holder = None  # dict condiviso col thread: {"result": LLMResult|None, "error": Exception|None}
+
+    def execute(self, context):
+        # execute() viene usato anche se l'operatore e' chiamato da script senza
+        # finestra: in quel caso la chiamata e' sincrona (bloccante).
+        return self._start(context, blocking=True)
+
+    def invoke(self, context, event):
+        # In UI usiamo il flusso modale + thread, cosi' Blender non si congela
+        # durante l'attesa della risposta dell'LLM.
+        return self._start(context, blocking=False)
+
+    # -- avvio -------------------------------------------------------------
+    def _start(self, context, blocking: bool):
+        prefs = _get_prefs(context)
+        if prefs is None:
+            self.report({"ERROR"}, "Preferenze add-on non disponibili.")
+            return {"CANCELLED"}
+
+        provider = getattr(prefs, "llm_provider", llm_providers.GEMINI)
+        api_key = _active_api_key(prefs, provider)
+        model = getattr(prefs, "llm_model", "").strip()
+        temp = float(getattr(prefs, "llm_temperature", 0.7))
+        timeout = float(getattr(prefs, "llm_timeout", 120.0))
+
+        # Validazione preliminare della chiave (messaggio chiaro prima di partire).
+        try:
+            llm_providers._resolve_key(provider, api_key)
+        except llm_providers.LLMError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            # Salva lo stato originale se non e' ancora stato fatto.
+            if not context.scene.nl2_has_home:
+                scene_io.capture_home_state()
+                context.scene.nl2_has_home = True
+
+            state = scene_io.extract_scene_state(overrides=_build_overrides(context))
+            roots = [o for o in state.objects if o.is_movable and o.is_root]
+            if not roots:
+                self.report({"WARNING"}, "Nessun oggetto mobile da riorganizzare.")
+                return {"CANCELLED"}
+
+            custom_inst = getattr(context.scene, "nl2_custom_instructions", "")
+            prompt = reorganizer.build_prompt(state, custom_instructions=custom_inst)
+            _write_text("NL2_AI_Prompt", prompt)
+
+            # Render fresco delle viste etichettate (sul main thread: usa bpy).
+            image_paths: list[str] = []
+            if getattr(prefs, "llm_auto_render", True):
+                try:
+                    names = _label_name_set(context)
+                    image_paths = render.render_labeled_views(
+                        add_top_down=True,
+                        add_iso=False,
+                        label_names=names,
+                        auto_perspective=True,
+                    ) or []
+                except Exception:
+                    # Il render non e' indispensabile: l'LLM puo' lavorare sul
+                    # solo JSON, anche se con meno contesto visivo.
+                    traceback.print_exc()
+                    image_paths = []
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"Preparazione fallita: {exc}")
+            traceback.print_exc()
+            return {"CANCELLED"}
+
+        # Parametri della chiamata, congelati per il thread.
+        call_kwargs = dict(
+            provider=provider, api_key=api_key, model=model,
+            prompt=prompt, image_paths=image_paths,
+            temperature=temp, timeout=timeout, verbose=True,
+            max_retries=int(getattr(prefs, "llm_max_retries", 4)),
+        )
+
+        print(
+            f"[NL2Scene3D] Riordino automatico: {len(roots)} oggetti mobili, "
+            f"{len(image_paths)} render allegati, provider={provider}.",
+            flush=True,
+        )
+
+        if blocking:
+            try:
+                result = llm_providers.call_llm(**call_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                self.report({"ERROR"}, f"Chiamata LLM fallita: {exc}")
+                return {"CANCELLED"}
+            return _apply_llm_response(self, context, result.text)
+
+        # --- modalita' UI: thread + timer ---
+        self._holder = {"result": None, "error": None}
+
+        def _worker():
+            print("[NL2Scene3D] Thread di rete avviato, chiamo l'LLM...", flush=True)
+            try:
+                self._holder["result"] = llm_providers.call_llm(**call_kwargs)
+                print("[NL2Scene3D] Thread di rete: risposta ottenuta.", flush=True)
+            except Exception as exc:  # noqa: BLE001  (catturata e mostrata nel modal)
+                self._holder["error"] = exc
+                print(f"[NL2Scene3D] Thread di rete: ERRORE -> {exc}", flush=True)
+                traceback.print_exc()
+
+        self._thread = threading.Thread(target=_worker, daemon=True)
+        self._thread.start()
+
+        wm = context.window_manager
+        for w in wm.windows:
+            w.cursor_set("WAIT")
+        self._timer = wm.event_timer_add(0.2, window=context.window)
+        wm.modal_handler_add(self)
+
+        n_imgs = len(image_paths)
+        self.report(
+            {"INFO"},
+            f"Chiamata a {provider} ({model or llm_providers.DEFAULT_MODELS[provider]}) "
+            f"con {n_imgs} immagini... attendi.",
+        )
+        return {"RUNNING_MODAL"}
+
+    # -- loop modale -------------------------------------------------------
+    def modal(self, context, event):
+        if event.type != "TIMER":
+            # Lasciamo passare gli altri eventi senza bloccare la UI; la
+            # richiesta di rete non e' interrompibile in modo pulito, quindi
+            # non gestiamo ESC come annullamento.
+            return {"PASS_THROUGH"}
+
+        if self._thread is not None and self._thread.is_alive():
+            return {"RUNNING_MODAL"}
+
+        # Thread terminato: pulizia timer/cursore e gestione del risultato.
+        self._finish_ui(context)
+
+        error = (self._holder or {}).get("error")
+        result = (self._holder or {}).get("result")
+
+        if error is not None:
+            self.report({"ERROR"}, f"Chiamata LLM fallita: {error}")
+            return {"CANCELLED"}
+
+        if result is None:
+            self.report({"ERROR"}, "Nessuna risposta dall'LLM.")
+            return {"CANCELLED"}
+
+        # Salva la risposta grezza per ispezione/debug, poi applica con la
+        # stessa pipeline di sanitizzazione del flusso manuale.
+        try:
+            _write_text(_RESPONSE_TEXT, result.text)
+        except Exception:
+            pass
+
+        print(
+            f"[NL2Scene3D] Applico la risposta ({len(result.text)} char) "
+            "con la pipeline di sanitizzazione...",
+            flush=True,
+        )
+        return _apply_llm_response(self, context, result.text)
+
+    # -- cleanup -----------------------------------------------------------
+    def _finish_ui(self, context):
+        wm = context.window_manager
+        try:
+            if self._timer is not None:
+                wm.event_timer_remove(self._timer)
+        except Exception:
+            pass
+        self._timer = None
+        try:
+            for w in wm.windows:
+                w.cursor_set("DEFAULT")
+        except Exception:
+            pass
+
+
+def _active_api_key(prefs, provider: str) -> str:
+    """Restituisce la chiave API delle preferenze per il provider selezionato."""
+    field = {
+        llm_providers.GEMINI: "gemini_api_key",
+        llm_providers.ANTHROPIC: "anthropic_api_key",
+        llm_providers.OPENAI: "openai_api_key",
+    }.get(provider, "gemini_api_key")
+    return getattr(prefs, field, "") or ""
+
+
 class NL2SCENE3D_OT_install_pillow(Operator):
     """Installa Pillow nel Python interno di Blender usando pip --user."""
 
-    bl_idname  = "nl2scene3d.install_pillow"
-    bl_label   = "Installa Pillow automaticamente"
+    bl_idname = "nl2scene3d.install_pillow"
+    bl_label = "Installa Pillow automaticamente"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
+        import importlib
         import subprocess
         import sys
         import os
         import traceback
 
         self.report({"INFO"}, "Avvio installazione di Pillow...")
-        
-        # Identifica il percorso corretto dell'eseguibile Python associato a Blender
+
+        # Rilevamento robusto dell'eseguibile Python di Blender
+        #
+        # In Blender, sys.executable punta normalmente al Python embedded
+        # (es. .../blender/4.x/python/bin/python3.xx). In alcune build/distro
+        # punta invece al binario di Blender. La strategia e':
+        #   1. Usa sys.executable come prima scelta.
+        #   2. Verifica che sia un interprete Python valido (--version).
+        #   3. Se non lo e', cerca nel prefisso Python candidati multipiattaforma.
+        #      La lista include percorsi macOS (.app bundle), Linux e Windows.
         python_exe = sys.executable
-        if "blender" in os.path.basename(python_exe).lower():
-            possible_paths = [
-                os.path.join(sys.prefix, "bin", "python.exe"),
-                os.path.join(sys.prefix, "python.exe"),
-                os.path.join(sys.prefix, "bin", "python3"),
-                os.path.join(sys.prefix, "bin", "python"),
+
+        def _is_python(path: str) -> bool:
+            """True se il binario risponde correttamente a `python --version`."""
+            try:
+                out = subprocess.check_output(
+                    [path, "--version"], stderr=subprocess.STDOUT, timeout=5
+                )
+                return out.lower().startswith(b"python")
+            except Exception:
+                return False
+
+        if not _is_python(python_exe):
+            # sys.executable non e' un interprete Python (e' il launcher di Blender).
+            # Cerca il Python embedded nel prefisso del runtime corrente.
+            candidates = [
+                os.path.join(sys.prefix, "bin", "python.exe"),  # Windows
+                os.path.join(sys.prefix, "python.exe"),  # Windows (alt)
+                os.path.join(sys.prefix, "bin", "python3"),  # Linux/macOS
+                os.path.join(sys.prefix, "bin", "python"),  # Linux/macOS (alt)
+                # macOS .app bundle: il Python e' annidato piu' in profondita'.
+                os.path.join(sys.prefix, "..", "bin", "python3"),
+                os.path.join(sys.prefix, "..", "..", "bin", "python3"),
             ]
-            for path in possible_paths:
-                if os.path.exists(path):
+            found = False
+            for path in candidates:
+                path = os.path.normpath(path)
+                if os.path.isfile(path) and _is_python(path):
                     python_exe = path
+                    found = True
                     break
+            if not found:
+                self.report(
+                    {"ERROR"},
+                    "Impossibile trovare l'interprete Python di Blender. "
+                    "Installa Pillow manualmente con: "
+                    f"`{sys.executable} -m pip install Pillow --user`",
+                )
+                return {"CANCELLED"}
 
         try:
             # Installa Pillow in spazio utente.
             subprocess.check_call([python_exe, "-m", "pip", "install", "Pillow", "--user"])
-            
-            # Forza il reload dei moduli per registrare la nuova importazione
-            import importlib
+
+            # Assicura che il site-packages utente sia in sys.path per il reload.
             import site
             user_site = site.getusersitepackages()
             if user_site and user_site not in sys.path:
                 sys.path.append(user_site)
             importlib.invalidate_caches()
-            from PIL import Image
-            
+            from PIL import Image  # noqa: F401
+
             self.report({"INFO"}, "Pillow installato correttamente! Ora puoi generare i render etichettati.")
             return {"FINISHED"}
         except Exception as exc:
             self.report({"ERROR"}, f"Installazione fallita: {exc}")
             traceback.print_exc()
             return {"CANCELLED"}
+
+
+class NL2SCENE3D_OT_create_bounds_helper(Operator):
+    """Crea o seleziona un cubo di riferimento wireframe per definire manualmente i confini della stanza."""
+
+    bl_idname = "nl2scene3d.create_bounds_helper"
+    bl_label = "Crea Helper Confini"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        import mathutils
+        scene = context.scene
+        helper_name = "NL2_RoomBounds_Helper"
+
+        # Se esiste gia', lo selezioniamo
+        helper = bpy.data.objects.get(helper_name)
+        if helper:
+            # Assicura che sia visibile e selezionato
+            helper.hide_viewport = False
+            helper.hide_select = False
+            for o in context.selected_objects:
+                o.select_set(False)
+            helper.select_set(True)
+            context.view_layer.objects.active = helper
+            self.report({"INFO"}, "Helper confini esistente selezionato.")
+            return {"FINISHED"}
+
+        # Altrimenti lo creiamo basandoci sui confini correnti
+        # Estrae lo stato attuale senza overrides manuali per avere una stima
+        try:
+            state = scene_io.extract_scene_state()
+            bounds = state.room_bounds
+        except Exception:
+            bounds = RoomBounds(x_min=-5.0, x_max=5.0, y_min=-5.0, y_max=5.0, z_floor=0.0, z_ceiling=3.0)
+
+        # Crea mesh cubo
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        helper = context.active_object
+        helper.name = helper_name
+        helper.display_type = "WIRE"
+        helper.show_in_front = True
+
+        # Disabilita il render
+        helper.hide_render = True
+
+        # Imposta dimensioni e posizione in base ai confini
+        w = bounds.x_max - bounds.x_min
+        d = bounds.y_max - bounds.y_min
+        h = bounds.z_ceiling - bounds.z_floor
+
+        helper.location = [
+            (bounds.x_min + bounds.x_max) / 2.0,
+            (bounds.y_min + bounds.y_max) / 2.0,
+            (bounds.z_floor + bounds.z_ceiling) / 2.0
+        ]
+        helper.scale = [w, d, h]
+
+        # Applica scala per facilitare l'editing
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+        self.report({"INFO"}, "Helper confini creato. Modificalo per cambiare i confini della stanza.")
+        return {"FINISHED"}
+
+
+class NL2SCENE3D_OT_remove_bounds_helper(Operator):
+    """Rimuove il cubo di riferimento dei confini."""
+
+    bl_idname = "nl2scene3d.remove_bounds_helper"
+    bl_label = "Rimuovi Helper Confini"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        helper_name = "NL2_RoomBounds_Helper"
+        helper = bpy.data.objects.get(helper_name)
+        if helper:
+            bpy.data.objects.remove(helper, do_unlink=True)
+            self.report({"INFO"}, "Helper confini rimosso.")
+        else:
+            self.report({"WARNING"}, "Nessun helper confini trovato.")
+        return {"FINISHED"}
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +1281,10 @@ _classes = (
     NL2SCENE3D_OT_apply_from_text,
     NL2SCENE3D_OT_apply_from_clipboard,
     NL2SCENE3D_OT_apply_from_file,
+    NL2SCENE3D_OT_reorganize_with_api,
     NL2SCENE3D_OT_install_pillow,
+    NL2SCENE3D_OT_create_bounds_helper,
+    NL2SCENE3D_OT_remove_bounds_helper,
 )
 
 
