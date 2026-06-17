@@ -23,10 +23,14 @@ import bpy  # type: ignore
 from bpy.props import (  # type: ignore
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
+    FloatProperty,
     IntProperty,
     StringProperty,
 )
 from bpy.types import AddonPreferences, Panel, PropertyGroup, UIList  # type: ignore
+
+from . import llm_providers
 
 # Pillow detection a livello modulo, non in ogni frame del draw().
 # Blender chiama draw() per ogni aggiornamento UI; un import-attempt per frame
@@ -58,12 +62,105 @@ class NL2SCENE3D_AddonPreferences(AddonPreferences):
         min=0,
     )
 
+    # --- Chiamata API automatica (opzionale) ---
+    llm_provider: EnumProperty(  # type: ignore
+        name="Provider",
+        description="Servizio LLM da contattare per la riorganizzazione automatica",
+        items=[
+            (llm_providers.GEMINI,    "Google Gemini", "API Gemini (generateContent)"),
+            (llm_providers.ANTHROPIC, "Anthropic",     "API Claude (Messages)"),
+            (llm_providers.OPENAI,    "OpenAI",        "API GPT (Chat Completions)"),
+        ],
+        default=llm_providers.GEMINI,
+    )
+
+    gemini_api_key: StringProperty(  # type: ignore
+        name="Gemini API key",
+        description="Chiave API di Google AI Studio. Vuoto = usa la variabile d'ambiente GEMINI_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+    anthropic_api_key: StringProperty(  # type: ignore
+        name="Anthropic API key",
+        description="Chiave API Anthropic. Vuoto = usa la variabile d'ambiente ANTHROPIC_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+    openai_api_key: StringProperty(  # type: ignore
+        name="OpenAI API key",
+        description="Chiave API OpenAI. Vuoto = usa la variabile d'ambiente OPENAI_API_KEY",
+        default="",
+        subtype="PASSWORD",
+    )
+
+    llm_model: StringProperty(  # type: ignore
+        name="Modello",
+        description="Identificatore del modello. Vuoto = default del provider (es. gemini-3.5-flash)",
+        default="",
+    )
+
+    llm_temperature: FloatProperty(  # type: ignore
+        name="Temperature",
+        description="Creativita' del modello (0 = deterministico, valori alti = piu' vario)",
+        default=0.7, min=0.0, max=2.0,
+    )
+
+    llm_timeout: FloatProperty(  # type: ignore
+        name="Timeout (s)",
+        description="Tempo massimo di attesa della risposta dell'LLM",
+        default=120.0, min=10.0, max=600.0,
+    )
+
+    llm_max_retries: IntProperty(  # type: ignore
+        name="Tentativi su errori temporanei",
+        description=(
+            "Quante volte riprovare in automatico se il provider risponde con "
+            "sovraccarico/limite (HTTP 429/503/5xx) o errori di rete. "
+            "0 = nessun tentativo extra. L'attesa tra i tentativi cresce in modo esponenziale"
+        ),
+        default=4, min=0, max=10,
+    )
+
+    llm_auto_render: BoolProperty(  # type: ignore
+        name="Renderizza prima della chiamata",
+        description=(
+            "Se attivo, l'operatore automatico genera render etichettati freschi "
+            "e li allega alla richiesta (consigliato per risultati migliori)"
+        ),
+        default=True,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "seed")
         layout.label(
             text="Flusso manuale: esporta il prompt, usalo nel tuo LLM, incolla qui la risposta.",
             icon="INFO",
+        )
+
+        box = layout.box()
+        box.label(text="Chiamata API automatica (opzionale)", icon="URL")
+        box.prop(self, "llm_provider")
+
+        # Mostra solo il campo chiave del provider selezionato.
+        key_field = {
+            llm_providers.GEMINI:    "gemini_api_key",
+            llm_providers.ANTHROPIC: "anthropic_api_key",
+            llm_providers.OPENAI:    "openai_api_key",
+        }[self.llm_provider]
+        box.prop(self, key_field)
+
+        row = box.row(align=True)
+        row.prop(self, "llm_model",
+                 text=f"Modello ({llm_providers.DEFAULT_MODELS[self.llm_provider]})")
+        row2 = box.row(align=True)
+        row2.prop(self, "llm_temperature")
+        row2.prop(self, "llm_timeout")
+        box.prop(self, "llm_max_retries")
+        box.prop(self, "llm_auto_render")
+        box.label(
+            text="La chiave resta locale nelle preferenze; nessun dato lascia il PC se non verso il provider.",
+            icon="LOCKED",
         )
 
 
@@ -297,7 +394,7 @@ class NL2SCENE3D_PT_main_panel(Panel):
         # --- Sezione Confini Stanza ---
         layout.separator()
         box_room = layout.box()
-        box_room.label(text="Confini Stanza (Room Bounds)", icon="BBOX")
+        box_room.label(text="Confini Stanza (Room Bounds)", icon="SHADING_BBOX")
         
         helper_name = "NL2_RoomBounds_Helper"
         helper = bpy.data.objects.get(helper_name)
@@ -355,6 +452,32 @@ class NL2SCENE3D_PT_main_panel(Panel):
             row_warn.alert = True
             row_warn.label(text="Suggerito: esegui prima Randomize (Step 1)", icon="ERROR")
 
+        # --- Percorso automatico: una sola azione (render + API + applica) ---
+        col2.separator()
+        api_box = col2.box()
+        api_box.label(text="Automatico (chiamata API)", icon="URL")
+        prov = getattr(prefs, "llm_provider", llm_providers.GEMINI)
+        key_field = {
+            llm_providers.GEMINI:    "gemini_api_key",
+            llm_providers.ANTHROPIC: "anthropic_api_key",
+            llm_providers.OPENAI:    "openai_api_key",
+        }.get(prov, "gemini_api_key")
+        has_key = bool(getattr(prefs, key_field, ""))
+        model_lbl = getattr(prefs, "llm_model", "").strip() or llm_providers.DEFAULT_MODELS[prov]
+        api_box.label(text=f"{prov} · {model_lbl}")
+        api_box.operator(
+            "nl2scene3d.reorganize_with_api",
+            text="Riordina automaticamente (API)",
+            icon="PLAY",
+        )
+        if not has_key:
+            warn = api_box.row()
+            warn.alert = True
+            warn.label(text="Imposta la API key nelle preferenze (o via env var).", icon="ERROR")
+
+        # --- Percorso manuale (fallback / controllo totale) ---
+        col2.separator()
+        col2.label(text="Manuale (esporta / incolla):")
         col2.operator(
             "nl2scene3d.export_for_llm",
             text="2b. Esporta prompt (copia negli appunti)",
