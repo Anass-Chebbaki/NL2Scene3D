@@ -154,7 +154,7 @@ def _declutter(boxes: list, width: int, height: int, pad: int = 5, iterations: i
                 if abs(dx) < 1e-6 and abs(dy) < 1e-6:
                     dy = 1.0
 
-                # Overlap sulle due assi.
+                # Overlap sui due assi.
                 ox = (a["w"] + b["w"]) / 2.0 + pad - abs(dx)
                 oy = (a["h"] + b["h"]) / 2.0 + pad - abs(dy)
 
@@ -698,7 +698,7 @@ def _cleanup_temp_camera(name: str) -> None:
             except Exception:
                 pass
     else:
-        # L'oggetto potrebbe non esistere ma il datablock camera si.
+        # L'oggetto potrebbe non esistere ma il datablock camera si'.
         cam_data = bpy.data.cameras.get(name)
         if cam_data is not None:
             try:

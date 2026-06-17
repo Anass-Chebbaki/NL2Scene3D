@@ -56,7 +56,7 @@ def _name_has_kw(keywords, text: str) -> bool:
 
     Il match e' su token interi (separati da _, -, spazi, numeri), non come
     sottostringa generica. Cosi' un muro chiamato 'bedroom_wall_north' non
-    viene scambiato per un'apertura solo perche' contiene la lettere 'room',
+    viene scambiato per un'apertura solo perche' contiene le lettere 'room',
     e 'doorknob' non viene confuso con 'door'.
     """
     toks = {t for t in re.split(r"[^a-z]+", text.lower()) if t}

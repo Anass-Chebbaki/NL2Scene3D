@@ -26,7 +26,7 @@ indipendentemente dalla riga di comando:
        Restituisce un nuovo SceneState con pipeline_step="reorganized".
 
 La chiamata effettiva al modello e l'I/O di rete vivono in llm_providers.py (invocato dagli operatori), 
-non qui: in questo modo la logica rimane completamente verificabile."
+non qui: in questo modo la logica rimane completamente verificabile.
 """
 
 from __future__ import annotations
