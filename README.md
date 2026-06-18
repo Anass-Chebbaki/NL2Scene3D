@@ -43,7 +43,6 @@ Sono disponibili due flussi di lavoro, intercambiabili e che condividono la stes
 - [Sanitizzazione della risposta LLM](#sanitizzazione-della-risposta-llm)
 - [Garanzie geometriche](#garanzie-geometriche)
 - [Configurazione](#configurazione)
-- [Testing offline](#testing-offline)
 - [Struttura del progetto](#struttura-del-progetto)
 - [Licenza](#licenza)
 
@@ -93,10 +92,6 @@ nl2scene3d_addon/
     ├── render.py        Pipeline render: etichette gutter, bussola assi, barra di scala
     ├── scene_io.py      Bridge Blender ↔ core: extract_scene_state, apply_state, metriche
     └── settings.py      Constants (frozen dataclass), NON_MESH_TYPES, STRUCTURAL_PATTERNS
-
-offline_testing/
-├── PROMPT+JSONSCENE.txt   Esempio completo di prompt + JSON per una camera da letto
-└── PYTHON - SCRIPT.txt    Script Blender minimale per applicare un JSON direttamente
 ```
 
 ### Layer Blender
@@ -187,13 +182,16 @@ Il flusso automatico via API non richiede alcuna dipendenza aggiuntiva: `llm_pro
    ```bash
    zip -r nl2scene3d_addon.zip nl2scene3d_addon/
    ```
-   La directory `offline_testing/` non deve essere inclusa nello zip.
 
 3. In Blender:
    - **Per Blender 4.2 o superiore**: Apri **Modifica > Preferenze > Get Extensions** (Ottieni estensioni), clicca sull'icona della freccia in alto a destra e seleziona **Install from Disk** (Installa da disco), quindi seleziona il file zip appena generato.
    - **Per Blender 4.1 o inferiore**: Apri **Modifica > Preferenze > Add-on > Installa**, seleziona lo zip e abilita **NL2Scene3D** dalla lista.
 
-4. Il pannello dell'add-on compare nella **sidebar della 3D Viewport** (tasto N) sotto la tab **NL2Scene3D**.
+4. Il pannello dell'add-on compare nella **sidebar della 3D Viewport** (tasto N) sotto la tab **NL2Scene3D**:
+
+   <p align="center">
+     <img src="public/images/addon.PNG" alt="Aspetto dell'Add-on nella sidebar" width="50%" />
+   </p>
 
 ### Installazione di Pillow
 
@@ -530,31 +528,9 @@ Le impostazioni del flusso automatico vivono nelle preferenze dell'add-on (**Mod
 
 Come fallback alle chiavi inserite nelle preferenze, l'add-on legge le variabili d'ambiente `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` e `OPENAI_API_KEY`. La chiave non viene mai trasmessa se non al provider selezionato.
 
----
-
-## Testing offline
-
-La directory `offline_testing/` contiene materiale per testare il sistema senza aprire Blender.
-
-`PROMPT+JSONSCENE.txt` è un esempio completo di prompt + payload JSON relativo a una camera da letto con 12 oggetti (letto, scrivania, sedia, comodino, scaffale, decorazioni). Il file può essere inviato direttamente a qualsiasi LLM per valutare la qualità del layout proposto, confrontare modelli diversi o sviluppare varianti del prompt.
-
-`PYTHON - SCRIPT.txt` è uno script minimale da eseguire nella console Python di Blender. Contiene un JSON di layout hard-coded e applica le posizioni direttamente agli oggetti della scena tramite `bpy`, bypassando completamente l'add-on. È utile per test rapidi di singole risposte o per valutazioni batch in cui l'overhead dell'interfaccia non è desiderato.
-
-Poiché `nl2scene3d_addon/core/` non ha dipendenze da `bpy`, il core è esercitabile da riga di comando:
-
-```python
-import sys
-sys.path.insert(0, "/percorso/a/nl2scene3d")  # aggiungere la root del progetto al path
-
-from nl2scene3d_addon.core.models import Transform, SceneObject, RoomBounds, SceneState
-from nl2scene3d_addon.core.reorganizer import build_request, build_prompt, extract_json, sanitize_response
-from nl2scene3d_addon.core.randomizer import SceneRandomizer
-
-# Costruire uno SceneState di test, invocare build_prompt(), simulare una risposta,
-# chiamare sanitize_response() e verificare le pose risultanti senza Blender.
-```
-
-Anche `llm_providers.py` è importabile e testabile da riga di comando senza Blender (non dipende da `bpy`): si può invocare `call_llm()` con un prompt e immagini reali per verificare l'integrazione con un provider, indipendentemente dall'add-on.
+<p align="center">
+  <img src="public/images/addon_settings.PNG" alt="Impostazioni dell'Add-on nelle Preferenze" width="80%" />
+</p>
 
 ---
 
